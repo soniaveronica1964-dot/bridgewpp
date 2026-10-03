@@ -6,6 +6,7 @@
   const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "total"];
   let scheduled = false;
   let activeAccountsKey = null;
+  let selectingAgentBalanceText = false;
   let agentBalanceLoading = false;
   let multiPanelAgentBalanceLoading = false;
   let agentBalanceView = "balance";
@@ -314,6 +315,19 @@
     }[view];
   }
 
+  function selectCurrencyAmount(element) {
+    const text = element.firstChild;
+    const amount = element.textContent.match(/\$\s*([\d.,]+)/);
+    if (!text || !amount) return;
+    const start = amount.index + amount[0].indexOf(amount[1]);
+    const range = document.createRange();
+    range.setStart(text, start);
+    range.setEnd(text, start + amount[1].length);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
   function createStatisticsIcon() {
     const namespace = "http://www.w3.org/2000/svg";
     const icon = document.createElementNS(namespace, "svg");
@@ -350,7 +364,7 @@
     errors.hidden = !hasErrors;
     host.style.width = minimized && !hasErrors
       ? "28px"
-      : "min(205px, calc(100vw - 56px))";
+      : "min(225px, calc(100vw - 56px))";
     if (view === "balance" || view === "daily") {
       toggle.replaceChildren(createStatisticsIcon());
     } else {
@@ -376,7 +390,7 @@
       (agentBalanceView !== "daily" && agentBalanceView !== "total");
     host.style.width = agentBalanceView === "minimized" && !hasErrors
       ? "28px"
-      : "min(205px, calc(100vw - 56px))";
+      : "min(225px, calc(100vw - 56px))";
     errors.replaceChildren();
 
     for (const [platform, message] of entries) {
@@ -457,6 +471,8 @@
         name.textContent = label;
         const amount = document.createElement("span");
         amount.className = className;
+        amount.classList.add("agent-movement-copy-value");
+        amount.addEventListener("click", () => selectCurrencyAmount(amount));
         amount.textContent = `$${formatCurrency(total)}`;
         row.append(name, amount);
         list.append(row);
@@ -633,7 +649,7 @@
     const heading = document.createElement("div");
     heading.className = "movement-history-heading";
     const title = document.createElement("h2");
-    title.textContent = "Información de movimientos";
+    title.textContent = "Movimientos";
     const close = document.createElement("button");
     close.type = "button";
     close.className = "movement-history-close";
@@ -701,10 +717,14 @@
       ganamos: host.dataset.username,
       multipanel: host.dataset.multipanelUsername
     };
+    const defaultPlatform = host.dataset.defaultPlatform || "ganamos";
+    title.textContent = `Movimientos ${platformUsernames[defaultPlatform] || ""}`.trim();
     let storedMovements = [];
 
     const renderMovements = () => {
       const selectedPlatform = platformSelect.value;
+      const titlePlatform = selectedPlatform === "all" ? defaultPlatform : selectedPlatform;
+      title.textContent = `Movimientos ${platformUsernames[titlePlatform] || ""}`.trim();
       const filtered = storedMovements.filter((movement) =>
         (selectedPlatform === "all" || movement.platform === selectedPlatform));
       const lastWithdrawal = periodSelect.value === "since-withdrawal"
@@ -841,10 +861,22 @@
     host.id = AGENT_BALANCE_HOST_ID;
     host.style.left = "68px";
     host.style.top = "2px";
-    host.style.width = "min(205px, calc(100vw - 56px))";
+    host.style.width = "min(225px, calc(100vw - 56px))";
     host.style.visibility = "hidden";
 
     const shadow = host.attachShadow({ mode: "open" });
+    for (const eventName of [
+      "click",
+      "contextmenu",
+      "dblclick",
+      "mousedown",
+      "mouseup",
+      "pointerdown",
+      "pointerup",
+      "selectstart"
+    ]) {
+      shadow.addEventListener(eventName, (event) => event.stopPropagation());
+    }
     const stylesheet = document.createElement("link");
     stylesheet.rel = "stylesheet";
     stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
@@ -875,18 +907,22 @@
     });
     const rows = document.createElement("div");
     rows.className = "agent-balance-rows";
-    for (const [platform, labelText, refreshTitle, platformName] of [
-      ["ganamos", "Ganamos: cargando...", "Actualizar balance del agente Ganamos", "Ganamos"],
-      ["multipanel", "MultiPanel: cargando...", "Actualizar balance del agente MultiPanel", "MultiPanel"]
+    for (const [platform, refreshTitle, platformName] of [
+      ["ganamos", "Actualizar balance del agente Ganamos", "Ganamos"],
+      ["multipanel", "Actualizar balance del agente MultiPanel", "MultiPanel"]
     ]) {
       const row = document.createElement("div");
       row.className = "agent-balance-row";
       const label = document.createElement("span");
       label.className = "agent-balance-label";
       label.dataset.platform = platform;
-      label.setAttribute("aria-live", "polite");
-      label.title = `${platformName}: cargando...`;
-      label.textContent = labelText;
+      label.textContent = platformName;
+      const amount = document.createElement("span");
+      amount.className = "agent-balance-amount";
+      amount.dataset.platform = platform;
+      amount.setAttribute("aria-live", "polite");
+      amount.textContent = "Cargando...";
+      amount.addEventListener("click", () => selectCurrencyAmount(amount));
       const refresh = document.createElement("button");
       refresh.type = "button";
       refresh.className = "agent-balance-refresh";
@@ -898,7 +934,7 @@
         if (platform === "ganamos") void refreshAgentBalance(host);
         else void refreshMultiPanelAgentBalance(host);
       });
-      row.append(label, refresh);
+      row.append(label, amount, refresh);
       rows.append(row);
     }
     const movementView = document.createElement("div");
@@ -929,26 +965,30 @@
   async function refreshAgentBalance(host = createAgentBalancePanel()) {
     if (agentBalanceLoading) return;
     const label = host.shadowRoot?.querySelector('.agent-balance-label[data-platform="ganamos"]');
+    const amount = host.shadowRoot?.querySelector('.agent-balance-amount[data-platform="ganamos"]');
     const refreshButtons = host.shadowRoot
       ? [...host.shadowRoot.querySelectorAll('.agent-balance-refresh[data-platform="ganamos"]')]
       : [];
-    if (!label || !refreshButtons.length) return;
+    if (!label || !amount || !refreshButtons.length) return;
 
     agentBalanceLoading = true;
     refreshButtons.forEach((refresh) => { refresh.disabled = true; });
-    label.classList.remove("agent-balance-error");
+    amount.classList.remove("agent-balance-error");
     label.title = "Ganamos: actualizando...";
-    label.textContent = "Ganamos: actualizando...";
+    amount.title = label.title;
+    amount.textContent = "Actualizando...";
     try {
       const response = await chrome.runtime.sendMessage({ type: "AGENT_BALANCE_REQUEST" });
       if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el balance del agente.");
       setAgentBalanceError(host, "ganamos");
-      label.textContent = `Ganamos: $${formatCurrency(Number(response.balance))}`;
       label.title = `Ganamos: $${formatCurrency(Number(response.balance))}`;
+      amount.title = label.title;
+      amount.textContent = `$${formatCurrency(Number(response.balance))}`;
     } catch (error) {
-      label.classList.add("agent-balance-error");
-      label.textContent = "Ganamos: error";
       label.title = `Ganamos: ${error.message || "error al consultar"}`;
+      amount.classList.add("agent-balance-error");
+      amount.title = label.title;
+      amount.textContent = "Error";
       setAgentBalanceError(host, "ganamos", error.message || "Error al consultar el balance.");
     } finally {
       agentBalanceLoading = false;
@@ -959,26 +999,30 @@
   async function refreshMultiPanelAgentBalance(host = createAgentBalancePanel()) {
     if (multiPanelAgentBalanceLoading) return;
     const label = host.shadowRoot?.querySelector('.agent-balance-label[data-platform="multipanel"]');
+    const amount = host.shadowRoot?.querySelector('.agent-balance-amount[data-platform="multipanel"]');
     const refreshButtons = host.shadowRoot
       ? [...host.shadowRoot.querySelectorAll('.agent-balance-refresh[data-platform="multipanel"]')]
       : [];
-    if (!label || !refreshButtons.length) return;
+    if (!label || !amount || !refreshButtons.length) return;
 
     multiPanelAgentBalanceLoading = true;
     refreshButtons.forEach((refresh) => { refresh.disabled = true; });
-    label.classList.remove("agent-balance-error");
+    amount.classList.remove("agent-balance-error");
     label.title = "MultiPanel: actualizando...";
-    label.textContent = "MultiPanel: actualizando...";
+    amount.title = label.title;
+    amount.textContent = "Actualizando...";
     try {
       const response = await chrome.runtime.sendMessage({ type: "MULTIPANEL_AGENT_BALANCE_REQUEST" });
       if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el balance del agente MultiPanel.");
       setAgentBalanceError(host, "multipanel");
-      label.textContent = `MultiPanel: $${formatCurrency(Number(response.balance))}`;
       label.title = `MultiPanel: $${formatCurrency(Number(response.balance))}`;
+      amount.title = label.title;
+      amount.textContent = `$${formatCurrency(Number(response.balance))}`;
     } catch (error) {
-      label.classList.add("agent-balance-error");
-      label.textContent = "MultiPanel: error";
       label.title = `MultiPanel: ${error.message || "error al consultar"}`;
+      amount.classList.add("agent-balance-error");
+      amount.title = label.title;
+      amount.textContent = "Error";
       setAgentBalanceError(host, "multipanel", error.message || "Error al consultar el balance.");
     } finally {
       multiPanelAgentBalanceLoading = false;
@@ -1017,6 +1061,7 @@
     host = document.createElement("div");
     host.id = HOST_ID;
     host.style.visibility = "hidden";
+
     const shadow = host.attachShadow({ mode: "open" });
     const stylesheet = document.createElement("link");
     stylesheet.rel = "stylesheet";
@@ -1939,6 +1984,26 @@
     });
   }
 
+  function protectAgentBalanceSelection(event) {
+    const path = event.composedPath();
+    const startedOnBalanceText = path.some((target) =>
+      target instanceof Element &&
+      (target.classList.contains("agent-balance-label") ||
+        target.classList.contains("agent-balance-amount"))
+    ) && path.some((target) =>
+      target instanceof Element && target.id === AGENT_BALANCE_HOST_ID
+    );
+    if (event.type === "mousedown" || event.type === "pointerdown") {
+      if (startedOnBalanceText) selectingAgentBalanceText = true;
+    }
+    if (!startedOnBalanceText && !selectingAgentBalanceText) return;
+    event.stopImmediatePropagation();
+    event.stopPropagation();
+    if (event.type === "mouseup" || event.type === "pointerup" || event.type === "pointercancel") {
+      window.setTimeout(() => { selectingAgentBalanceText = false; }, 0);
+    }
+  }
+
   const observer = new MutationObserver((mutations) => {
     if (mutations.every(({ target }) =>
       target.id === HOST_ID || target.id === AGENT_BALANCE_HOST_ID)) return;
@@ -1953,6 +2018,18 @@
   });
   window.addEventListener("resize", scheduleUpdate);
   window.addEventListener("scroll", scheduleUpdate, true);
+  for (const eventName of [
+    "mousedown",
+    "mousemove",
+    "mouseup",
+    "pointercancel",
+    "pointerdown",
+    "pointermove",
+    "pointerup"
+  ]) {
+    window.addEventListener(eventName, protectAgentBalanceSelection, true);
+  }
+  window.addEventListener("blur", () => { selectingAgentBalanceText = false; });
   const agentBalanceHost = createAgentBalancePanel();
   void refreshAgentBalance(agentBalanceHost);
   void refreshMultiPanelAgentBalance(agentBalanceHost);

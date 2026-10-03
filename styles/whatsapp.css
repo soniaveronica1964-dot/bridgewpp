@@ -604,7 +604,7 @@ button:disabled {
 
 .movement-history-bonus {
   flex: 0 1 auto;
-  color: #74d7b0;
+  color: #fff;
   font-size: 11px;
 }
 
@@ -917,7 +917,7 @@ input::placeholder {
   align-items: center;
   gap: 4px;
   width: 100%;
-  min-height: 60px;
+  min-height: 42px;
   padding: 3px 6px 3px 2px;
   border: 0;
   border-radius: 7px;
@@ -1061,6 +1061,12 @@ input::placeholder {
   border-bottom: 1px solid #55c99b;
 }
 
+.agent-movement-copy-value {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
 .agent-movement-withdrawals {
   border-bottom: 1px solid #ff8a5c;
 }
@@ -1078,9 +1084,11 @@ input::placeholder {
 .agent-balance-row {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
-  min-height: 27px;
+  min-height: 18px;
+  font-size: 12px;
+  line-height: 1.2;
 }
 
 .agent-balance-label {
@@ -1090,8 +1098,6 @@ input::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #e4e4e4;
-  font-size: 12px;
-  line-height: 1.2;
 }
 
 .agent-balance-label[data-platform="ganamos"] {
@@ -1100,6 +1106,24 @@ input::placeholder {
 
 .agent-balance-label[data-platform="multipanel"] {
   border-bottom: 1px solid #4d9fff;
+}
+
+.agent-balance-amount {
+  flex: 0 0 auto;
+  border-bottom: 1px solid transparent;
+  color: #e4e4e4;
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.agent-balance-amount[data-platform="ganamos"] {
+  border-bottom-color: #a855f7;
+}
+
+.agent-balance-amount[data-platform="multipanel"] {
+  border-bottom-color: #4d9fff;
 }
 
 .agent-balance-error {
