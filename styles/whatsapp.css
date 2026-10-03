@@ -1,0 +1,1139 @@
+*, *::before, *::after {
+  font-family: Arial, Helvetica, sans-serif;
+  font-style: normal;
+}
+
+:host {
+  position: fixed;
+  z-index: 2147483647;
+  font-family: "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #e2e8e7;
+}
+
+.panel {
+  position: relative;
+  isolation: isolate;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.user-information-button {
+  position: absolute;
+  z-index: 1;
+  top: -31px;
+  left: 8px;
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 1px solid #53615f;
+  border-radius: 4px;
+  color: #d8e0de;
+  background: #182020;
+  font-size: 13px;
+}
+
+.user-information-button:hover:not(:disabled) {
+  border-color: #00a884;
+  background: #263432;
+}
+
+.user-information-button[hidden] {
+  display: none !important;
+}
+
+.panel::before {
+  position: absolute;
+  z-index: -2;
+  inset: -90px -24px;
+  border-radius: 100px;
+  background: transparent;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  content: "";
+  opacity: .4;
+  pointer-events: none;
+  mask-image: radial-gradient(ellipse 100% 50% at center, #000 20%, rgb(0 0 0 / 75%) 58%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 100% 50% at center, #000 20%, rgb(0 0 0 / 75%) 58%, transparent 100%);
+}
+
+.panel::after {
+  position: absolute;
+  z-index: -1;
+  inset: -28px 0;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgb(0 0 0 / 30%) 28px,
+    rgb(0 0 0 / 30%) calc(100% - 28px),
+    transparent
+  );
+  content: "";
+  pointer-events: none;
+}
+
+.status {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  margin: 5px 0 0;
+  padding: 2px 6px;
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+  background: rgb(0 0 0 / 80%);
+  text-align: center;
+}
+
+.balance-label {
+  min-width: 0;
+}
+
+.refresh {
+  flex: 0 0 auto;
+  min-height: 18px;
+  width: 20px;
+  padding: 0;
+  border: 1px solid #344746;
+  border-radius: 50%;
+  color: #d3ddda;
+  background: #253232;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.actions,
+.dialog-actions {
+  display: flex;
+  gap: 7px;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 7px;
+}
+
+.withdrawal-action-group {
+  display: flex;
+  flex: initial;
+  gap: 5px;
+  min-width: 0;
+}
+
+.actions > [data-action="deposit"] {
+  min-width: 0;
+}
+
+.withdrawal-action-group > [data-action="withdrawal"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.password-reset-button {
+  position: absolute;
+  z-index: 1;
+  top: -31px;
+  right: 8px;
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-color: #594078;
+  color: #d7c4f5;
+  background: #242626;
+}
+
+.password-reset-button:hover:not(:disabled) {
+  border-color: #7650a8;
+  background: #303333;
+}
+
+.password-reset-button[hidden],
+.create-user-button[hidden] {
+  display: none !important;
+}
+
+.password-reset-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.actions > [hidden],
+.status[hidden] {
+  display: none !important;
+}
+
+.platform-selector {
+  display: flex;
+  gap: 7px;
+  margin: 14px 0 4px;
+}
+
+.platform-selector button {
+  min-height: 32px;
+  color: #aab6b5;
+  border-color: #344546;
+  background: transparent;
+}
+
+.platform-selector button[aria-pressed="true"][data-platform="ganamos"] {
+  color: #f8f4ff;
+  border-color: #7650a8;
+  background: #62418e;
+}
+
+.platform-selector button[aria-pressed="true"][data-platform="multipanel"] {
+  color: #f2f8ff;
+  border-color: #3979b8;
+  background: #2f6397;
+}
+
+.bonus-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #344746;
+}
+
+.bonus-fields label {
+  min-width: 0;
+}
+
+.amount-entry {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.amount-entry > label {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.amount-entry > button {
+  flex: 0 0 auto;
+  min-width: 58px;
+  min-height: 40px;
+  margin-bottom: 0;
+}
+
+.input-affix {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-affix input {
+  padding-left: 29px;
+}
+
+.input-affix[data-position="suffix"] input {
+  padding-right: 29px;
+  padding-left: 11px;
+}
+
+.input-affix span {
+  position: absolute;
+  z-index: 1;
+  color: #929f9f;
+  pointer-events: none;
+}
+
+.input-affix[data-position="prefix"] span {
+  left: 11px;
+}
+
+.input-affix[data-position="suffix"] span {
+  right: 11px;
+}
+
+button {
+  flex: 1 1 auto;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #f2f4f3;
+  background: #344546;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, transform .15s ease;
+}
+
+button:hover:not(:disabled) {
+  background: #405455;
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+button[data-action="deposit"] {
+  color: #55c99b;
+  background: #242626;
+  border-color: #3a7d64;
+}
+
+button[data-action="deposit"]:hover:not(:disabled) {
+  border-color: #55a987;
+  background: #303333;
+}
+
+button[data-action="withdrawal"] {
+  color: #ff8a5c;
+  background: #242626;
+  border-color: #a8492a;
+}
+
+button[data-action="withdrawal"]:hover:not(:disabled) {
+  border-color: #d9663f;
+  background: #303333;
+}
+
+.create-user-button {
+  position: absolute;
+  z-index: 1;
+  top: -31px;
+  right: 42px;
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 4px;
+  color: #d7c4f5;
+  border-color: #594078;
+  background: #242626;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.create-user-button[data-mode="full"] {
+  position: static;
+  grid-column: 1 / -1;
+  justify-self: stretch;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.create-user-button[data-platform="ganamos"] {
+  border-color: #7650a8;
+  color: #e8d8ff;
+}
+
+.create-user-button[data-platform="ganamos"]:hover:not(:disabled) {
+  border-color: #a855f7;
+  background: #3d2c54;
+}
+
+.create-user-button[data-platform="multipanel"] {
+  border-color: #3979b8;
+  color: #c9e3ff;
+}
+
+.create-user-button[data-platform="multipanel"]:hover:not(:disabled) {
+  border-color: #4d9fff;
+  background: #233c54;
+}
+
+.create-user-button:hover:not(:disabled) {
+  background: #303333;
+}
+
+button.secondary {
+  color: #aab6b5;
+  border-color: #344546;
+  background: transparent;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #273535;
+}
+
+button:disabled {
+  opacity: .58;
+  cursor: wait;
+}
+
+.platform-selector button:disabled {
+  opacity: .38;
+}
+
+.modal {
+  position: fixed;
+  z-index: 2147483647;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: #070c0ddb;
+  backdrop-filter: blur(1px);
+}
+
+.dialog {
+  box-sizing: border-box;
+  width: min(430px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 22px 24px;
+  border: 1px solid #167356;
+  border-radius: 12px;
+  color: #e2e8e7;
+  background: #1d2929;
+  box-shadow: 0 18px 55px #0009;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dialog[data-operation="withdrawal"] {
+  border-color: #ff4d00;
+}
+
+.dialog[data-operation="recent-withdrawal"] {
+  border-color: #d85848;
+}
+
+.dialog[data-operation="recent-withdrawal"] h2 {
+  color: #ff8a8a;
+}
+
+.dialog[data-operation="recent-withdrawal"] .dialog-actions {
+  border-top-color: #713c3c;
+}
+
+.recent-withdrawal-continue {
+  border-color: #a94343;
+  color: #ffffff;
+  background: #a93636;
+}
+
+.recent-withdrawal-continue:hover:not(:disabled) {
+  background: #c44747;
+}
+
+.dialog[data-operation="recent-withdrawal"] .dialog-actions button.secondary {
+  border-color: #713c3c;
+  color: #ffdada;
+}
+
+.movement-history-dialog {
+  width: min(520px, 100%);
+  border-color: #ffffff;
+}
+
+.movement-history-heading,
+.movement-history-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.movement-history-heading {
+  margin-bottom: 12px;
+}
+
+.movement-history-heading h2 {
+  margin: 0;
+}
+
+.movement-history-close {
+  flex: 0 0 30px;
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+  color: #d8e0de;
+  background: transparent;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.movement-history-filters,
+.movement-history-dates {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.movement-history-dialog label {
+  min-width: 0;
+  margin: 8px 0 4px;
+}
+
+.movement-history-dialog select,
+.movement-history-dialog input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid #40504e;
+  border-radius: 6px;
+  color: #e7edef;
+  background: #182323;
+  font: inherit;
+}
+
+.movement-history-dialog select:focus,
+.movement-history-dialog input:focus {
+  border-color: #ffffff;
+  outline: 2px solid #ffffff33;
+}
+
+.movement-history-dates[hidden] {
+  display: none;
+}
+
+.movement-history-list {
+  display: grid;
+  gap: 7px;
+  max-height: min(48vh, 273px);
+  margin-top: 12px;
+  overflow-y: auto;
+}
+
+.movement-history-item {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 3px 7px;
+  border: 1px solid #344746;
+  border-radius: 7px;
+  background: #172222;
+}
+
+.movement-history-item[data-platform="ganamos"] {
+  border-color: #7650a8;
+}
+
+.movement-history-item[data-platform="multipanel"] {
+  border-color: #3979b8;
+}
+
+.movement-history-summary {
+  order: 2;
+  min-width: 0;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.movement-history-summary time {
+  flex: 0 0 auto;
+  color: #9eadaa;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.movement-history-details {
+  order: 1;
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.movement-history-amount,
+.movement-history-bonus,
+.movement-history-total {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.movement-history-amount {
+  flex: 0 0 auto;
+  align-self: center;
+  transform: translateY(1px);
+  color: #55c99b;
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.movement-history-amount[data-operation="withdrawal"] {
+  color: #ff6b6b;
+}
+
+.movement-history-bonus {
+  flex: 0 1 auto;
+  color: #74d7b0;
+  font-size: 11px;
+}
+
+.movement-history-total {
+  color: #9eadaa;
+  font-size: 10px;
+}
+
+.movement-history-empty {
+  margin: 10px 0;
+  color: #aab6b5;
+}
+
+.movement-history-error {
+  color: #f15c6d;
+}
+
+.dialog[data-operation="create-user"][data-platform="ganamos"] {
+  --create-accent: #a855f7;
+  --create-border: #7650a8;
+  --create-border-soft: #594078;
+  --create-button: #62418e;
+  --create-button-hover: #7650a8;
+  --create-text: #e8d8ff;
+}
+
+.dialog[data-operation="password-reset"][data-platform="ganamos"] {
+  --create-accent: #a855f7;
+  --create-border: #7650a8;
+  --create-border-soft: #594078;
+  --create-button: #62418e;
+  --create-button-hover: #7650a8;
+  --create-text: #e8d8ff;
+}
+
+.dialog[data-operation="create-user"][data-platform="multipanel"] {
+  --create-accent: #4d9fff;
+  --create-border: #3979b8;
+  --create-border-soft: #315e88;
+  --create-button: #2f6397;
+  --create-button-hover: #3979b8;
+  --create-text: #c9e3ff;
+}
+
+.dialog[data-operation="password-reset"][data-platform="multipanel"] {
+  --create-accent: #4d9fff;
+  --create-border: #3979b8;
+  --create-border-soft: #315e88;
+  --create-button: #2f6397;
+  --create-button-hover: #3979b8;
+  --create-text: #c9e3ff;
+}
+
+.dialog[data-operation="create-user"],
+.dialog[data-operation="password-reset"] {
+  border-color: var(--create-border);
+}
+
+h2 {
+  margin: 0 0 5px;
+  color: #e7edef;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.notice {
+  margin: 0 0 15px;
+  overflow-wrap: anywhere;
+  color: #aab6b5;
+  font-size: 12px;
+}
+
+label {
+  display: block;
+  margin: 14px 0 6px;
+  color: #b5c0bf;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 11px;
+  border: 1px solid #167356;
+  border-radius: 7px;
+  outline: none;
+  color: #e7edef;
+  background: #1b2727;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+.dialog[data-operation="withdrawal"] input {
+  border-color: #ff4d00;
+}
+
+.dialog[data-operation="create-user"] input,
+.dialog[data-operation="password-reset"] input {
+  border-color: var(--create-border-soft);
+}
+
+.dialog[data-operation="deposit"] input:focus {
+  border-color: #29a875;
+  box-shadow: 0 0 0 2px #29a87533;
+}
+
+.dialog[data-operation="withdrawal"] input:focus {
+  border-color: #ff4d00;
+  box-shadow: 0 0 0 2px #ff4d0033;
+}
+
+.dialog[data-operation="create-user"] input:focus,
+.dialog[data-operation="password-reset"] input:focus {
+  border-color: var(--create-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--create-accent) 22%, transparent);
+}
+
+.dialog[data-operation="create-user"] h2,
+.dialog[data-operation="create-user"] label,
+.dialog[data-operation="password-reset"] h2,
+.dialog[data-operation="password-reset"] label {
+  color: var(--create-text);
+}
+
+.dialog[data-operation="create-user"] .platform-selector button:not([aria-pressed="true"]),
+.dialog[data-operation="password-reset"] .platform-selector button:not([aria-pressed="true"]) {
+  border-color: var(--create-border-soft);
+}
+
+input::placeholder {
+  color: #718080;
+}
+
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 22px;
+  padding-top: 14px;
+  border-top: 1px solid #344746;
+}
+
+.dialog-actions.has-deposit-summary {
+  justify-content: flex-start;
+}
+
+.dialog[data-operation="create-user"] .dialog-actions,
+.dialog[data-operation="password-reset"] .dialog-actions {
+  border-top-color: var(--create-border-soft);
+}
+
+.dialog-action-buttons {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+  margin-left: auto;
+}
+
+.dialog-actions button {
+  flex: 0 1 auto;
+  min-width: 86px;
+  min-height: 34px;
+}
+
+.deposit-summary {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: #e2e8e7;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.deposit-summary[hidden] {
+  display: none;
+}
+
+.withdrawal-summary {
+  display: grid;
+  gap: 2px;
+  align-self: flex-start;
+  white-space: nowrap;
+}
+
+.deposit-summary[data-platform="ganamos"] {
+  text-decoration-color: #a855f7;
+}
+
+.deposit-summary[data-platform="multipanel"] {
+  text-decoration-color: #4d9fff;
+}
+
+.dialog[data-operation="deposit"] .dialog-actions button[type="submit"] {
+  color: #f2f7f4;
+  background: #167356;
+}
+
+.dialog[data-operation="deposit"] .dialog-actions button[type="submit"]:hover:not(:disabled) {
+  background: #1c8966;
+}
+
+.dialog[data-operation="withdrawal"] .dialog-actions button[type="submit"] {
+  color: #ffffff;
+  background: #ff4d00;
+}
+
+.dialog[data-operation="withdrawal"] .dialog-actions button[type="submit"]:hover:not(:disabled) {
+  background: #e64500;
+}
+
+.dialog[data-operation="create-user"] .dialog-actions button[type="submit"],
+.dialog[data-operation="password-reset"] .dialog-actions button[type="submit"] {
+  border-color: var(--create-border);
+  color: #ffffff;
+  background: var(--create-button);
+}
+
+.dialog[data-operation="create-user"] .dialog-actions button[type="submit"]:hover:not(:disabled),
+.dialog[data-operation="password-reset"] .dialog-actions button[type="submit"]:hover:not(:disabled) {
+  background: var(--create-button-hover);
+}
+
+.dialog[data-operation="create-user"] .dialog-actions button.secondary,
+.dialog[data-operation="password-reset"] .dialog-actions button.secondary {
+  border-color: var(--create-border-soft);
+  color: var(--create-text);
+}
+
+.dialog[data-operation="create-user"] .dialog-actions button.secondary:hover:not(:disabled),
+.dialog[data-operation="password-reset"] .dialog-actions button.secondary:hover:not(:disabled) {
+  background: #303333;
+}
+
+.dialog > button.secondary {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.toast-stack {
+  position: fixed;
+  z-index: 2147483647;
+  left: 16px;
+  bottom: 16px;
+  display: grid;
+  gap: 8px;
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #52615f;
+  border-left: 4px solid;
+  border-radius: 8px;
+  color: #f2f4f3;
+  background: #1d2929;
+  box-shadow: 0 8px 24px #0008;
+  font-size: 13px;
+  line-height: 1.4;
+  pointer-events: auto;
+}
+
+.toast-message {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.toast-warning {
+  border-left-color: #e2b94f;
+}
+
+.toast-success {
+  border-left-color: #35a879;
+}
+
+.toast-error {
+  border-left-color: #d85848;
+}
+
+.toast-close {
+  flex: 0 0 auto;
+  min-height: 22px;
+  width: 22px;
+  padding: 0;
+  color: #d2dcda;
+  background: transparent;
+  font-size: 19px;
+  line-height: 1;
+}
+
+.toast-close:hover:not(:disabled) {
+  background: #344546;
+}
+
+.agent-balance-card {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 60px;
+  padding: 3px 6px 3px 2px;
+  border: 0;
+  border-radius: 7px;
+  color: #e9edef;
+  background: #161717;
+  box-shadow: none;
+  font-size: 11px;
+}
+
+.agent-balance-toggle {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: #b8b8b8;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.agent-balance-toggle:hover:not(:disabled) {
+  color: #e9edef;
+  background: #303030;
+}
+
+.agent-balance-statistics-icon {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.agent-balance-toggle:focus-visible,
+.agent-balance-refresh:focus-visible {
+  outline: 2px solid #00a884;
+  outline-offset: 1px;
+}
+
+.agent-balance-rows {
+  display: grid;
+  gap: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.agent-balance-rows[hidden],
+.agent-movement-view[hidden] {
+  display: none !important;
+}
+
+.agent-balance-card.is-minimized .agent-balance-rows {
+  display: none;
+}
+
+.agent-balance-card.is-minimized {
+  justify-content: flex-start;
+  padding: 2px;
+  background: transparent;
+}
+
+.agent-balance-card.has-errors {
+  min-height: 60px;
+  background: #161717;
+}
+
+.agent-balance-error-view {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 3px;
+  min-width: 0;
+  padding: 4px 2px;
+}
+
+.agent-balance-error-view[hidden] {
+  display: none !important;
+}
+
+.agent-balance-error-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.agent-balance-error-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #ff8a8a;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-balance-error-refresh {
+  width: 22px;
+  min-height: 22px;
+}
+
+.agent-movement-view {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 2px;
+}
+
+.agent-movement-list {
+  display: grid;
+  gap: 0;
+}
+
+.agent-movement-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  min-height: 27px;
+  color: #e4e4e4;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.agent-movement-total > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.agent-movement-total > span:last-child {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-movement-deposits {
+  border-bottom: 1px solid #55c99b;
+}
+
+.agent-movement-withdrawals {
+  border-bottom: 1px solid #ff8a5c;
+}
+
+.agent-movement-empty {
+  color: #aab6b5;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.agent-movement-error {
+  color: #f15c6d;
+}
+
+.agent-balance-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  min-height: 27px;
+}
+
+.agent-balance-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e4e4e4;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.agent-balance-label[data-platform="ganamos"] {
+  border-bottom: 1px solid #a855f7;
+}
+
+.agent-balance-label[data-platform="multipanel"] {
+  border-bottom: 1px solid #4d9fff;
+}
+
+.agent-balance-error {
+  color: #f15c6d;
+}
+
+.agent-balance-refresh {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: #b8b8b8;
+  background: transparent;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.agent-balance-refresh:hover:not(:disabled) {
+  color: #e9edef;
+  background: #303030;
+}
+
+@media (max-width: 520px) {
+  .modal {
+    padding: 10px;
+  }
+
+  .dialog {
+    padding: 18px;
+  }
+}

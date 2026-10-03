@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Configuración de la extensión</title>
+    <style>
+      body {
+        max-width: 620px;
+        margin: 32px auto;
+        padding: 0 18px;
+        color: #202124;
+        font: 14px/1.5 Arial, sans-serif;
+      }
+      h1 { font-size: 22px; }
+      label { display: block; margin: 18px 0 6px; font-weight: 600; }
+      select, input, button { box-sizing: border-box; width: 100%; padding: 9px; font: inherit; }
+      .hint { color: #5f6368; }
+      #status { min-height: 1.5em; margin-top: 12px; }
+      button { margin-top: 12px; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <h1>Configuración de la extensión</h1>
+    <p>Elegí cómo se conectará este perfil de Chrome a las plataformas.</p>
+    <form id="settings">
+      <label for="role">Modo de este perfil</label>
+      <select id="role" name="role">
+        <option value="standalone">Independiente (usa las sesiones de este perfil)</option>
+        <option value="primary">Principal (atiende solicitudes de otros perfiles)</option>
+        <option value="secondary">Secundario (envía solicitudes al principal)</option>
+      </select>
+      <label for="token">Código de emparejamiento</label>
+      <input id="token" name="token" type="password" autocomplete="off" spellcheck="false">
+      <p id="hint" class="hint"></p>
+      <label for="ganamosSuffix">Letra final de usuario Ganamos</label>
+      <input id="ganamosSuffix" name="ganamosSuffix" type="text" maxlength="1" pattern="[A-Za-z]" required>
+      <label for="multiPanelSuffix">Letra final de usuario MultiPanel</label>
+      <input id="multiPanelSuffix" name="multiPanelSuffix" type="text" maxlength="1" pattern="[A-Za-z]" required>
+      <p class="hint">Usá letras diferentes. Configurá los mismos sufijos en todos los perfiles emparejados.</p>
+      <label for="userCreationPassword">Contraseña automática para nuevos usuarios</label>
+      <input id="userCreationPassword" name="userCreationPassword" type="password" autocomplete="new-password">
+      <p class="hint">El perfil que ejecuta el alta usa esta contraseña para Ganamos y MultiPanel, también para solicitudes de perfiles secundarios.</p>
+      <button type="submit">Guardar configuración</button>
+      <p id="status" role="status" aria-live="polite"></p>
+    </form>
+    <script src="options.js"></script>
+  </body>
+</html>
