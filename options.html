@@ -30,6 +30,9 @@
         <option value="primary">Principal (atiende solicitudes de otros perfiles)</option>
         <option value="secondary">Secundario (envía solicitudes al principal)</option>
       </select>
+      <label for="ganamosUserId">ID de agente Ganamos</label>
+      <input id="ganamosUserId" name="ganamosUserId" type="text" inputmode="numeric" pattern="[0-9]+" required>
+      <p class="hint">Se usa para buscar usuarios en Ganamos. Si usás el puente, configurá el ID en el perfil Principal. Valor predeterminado: 38175478.</p>
       <label for="token">Código de emparejamiento</label>
       <input id="token" name="token" type="password" autocomplete="off" spellcheck="false">
       <p id="hint" class="hint"></p>

@@ -25,7 +25,7 @@ Los campos numéricos de los formularios muestran puntos como separadores de mil
 3. Activá **Modo desarrollador**.
 4. Elegí **Cargar descomprimida**.
 5. Seleccioná la carpeta `Extension` que contiene `manifest.json`.
-6. Configurá el identificador de agente si el ejemplo `38175478` no corresponde a tu cuenta. En las herramientas de desarrollador del service worker de la extensión, ejecutá `chrome.storage.local.set({ ganamosUserId: "TU_ID" })`.
+6. En las opciones de la extensión, configurá el **ID de agente Ganamos**. El valor predeterminado es `38175478`; reemplazalo si no corresponde a tu cuenta. Si usás el puente, cargá el ID en el perfil **Principal**, que ejecuta las consultas de Ganamos.
 7. Después de cargar o recargar la extensión en `chrome://extensions`, recargá también la pestaña `https://bo.casinoenvivo.club/` con la sesión iniciada. La extensión sincroniza la sesión desde `Local Storage → lux-support-user`; si la API rechaza una sesión guardada, intenta leer la actual de esa pestaña y repite la consulta una vez.
 8. Abrí o recargá `https://web.whatsapp.com/` e iniciá sesión en WhatsApp y Ganamos. Las consultas de saldo se hacen desde el service worker.
 

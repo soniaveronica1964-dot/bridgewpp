@@ -1,4 +1,5 @@
 const roleInput = document.querySelector("#role");
+const ganamosUserIdInput = document.querySelector("#ganamosUserId");
 const tokenInput = document.querySelector("#token");
 const ganamosSuffixInput = document.querySelector("#ganamosSuffix");
 const multiPanelSuffixInput = document.querySelector("#multiPanelSuffix");
@@ -25,11 +26,16 @@ roleInput.addEventListener("change", updateHint);
 document.querySelector("#settings").addEventListener("submit", async (event) => {
   event.preventDefault();
   const role = roleInput.value;
+  const ganamosUserId = ganamosUserIdInput.value.trim();
   const token = tokenInput.value.trim();
   const ganamosSuffix = ganamosSuffixInput.value.trim().toLowerCase();
   const multiPanelSuffix = multiPanelSuffixInput.value.trim().toLowerCase();
   if (!["standalone", "primary", "secondary"].includes(role)) {
     status.textContent = "Elegí un modo válido.";
+    return;
+  }
+  if (!/^\d+$/.test(ganamosUserId)) {
+    status.textContent = "Ingresá un ID de agente Ganamos válido, usando solo números.";
     return;
   }
   if (!/^[a-z]$/.test(ganamosSuffix) || !/^[a-z]$/.test(multiPanelSuffix) ||
@@ -46,6 +52,7 @@ document.querySelector("#settings").addEventListener("submit", async (event) => 
     await chrome.storage.local.set({
       bridgeRole: role,
       bridgeToken: role === "standalone" ? "" : token,
+      ganamosUserId,
       ganamosSuffix,
       multiPanelSuffix,
       userCreationPassword: userCreationPasswordInput.value
@@ -59,12 +66,16 @@ document.querySelector("#settings").addEventListener("submit", async (event) => 
 chrome.storage.local.get([
   "bridgeRole",
   "bridgeToken",
+  "ganamosUserId",
   "ganamosSuffix",
   "multiPanelSuffix",
   "userCreationPassword"
 ])
-  .then(({ bridgeRole, bridgeToken, ganamosSuffix, multiPanelSuffix, userCreationPassword }) => {
+  .then(({ bridgeRole, bridgeToken, ganamosUserId, ganamosSuffix, multiPanelSuffix, userCreationPassword }) => {
     roleInput.value = ["primary", "secondary"].includes(bridgeRole) ? bridgeRole : "standalone";
+    ganamosUserIdInput.value = /^\d+$/.test(String(ganamosUserId ?? ""))
+      ? String(ganamosUserId)
+      : "38175478";
     tokenInput.value = typeof bridgeToken === "string" ? bridgeToken : "";
     ganamosSuffixInput.value = typeof ganamosSuffix === "string" ? ganamosSuffix : "f";
     multiPanelSuffixInput.value = typeof multiPanelSuffix === "string" ? multiPanelSuffix : "y";
