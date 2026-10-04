@@ -149,11 +149,11 @@
     return stack;
   }
 
-  function showToast(_host, username, message, type) {
+  function showToast(_host, username, message, type, toastKey = username) {
     const root = getToastStack();
 
-    for (const toast of root.querySelectorAll(".toast-warning")) {
-      if (toast.dataset.username === username) {
+    for (const toast of root.querySelectorAll(".toast")) {
+      if (toast.dataset.toastKey === toastKey) {
         window.clearTimeout(toast.dismissTimer);
         toast.remove();
       }
@@ -162,6 +162,7 @@
     const toast = document.createElement("div");
     toast.className = `toast toast-${type}`;
     toast.dataset.username = username;
+    toast.dataset.toastKey = toastKey;
     toast.setAttribute("role", type === "error" ? "alert" : "status");
     const text = document.createElement("span");
     text.className = "toast-message";
@@ -184,6 +185,15 @@
       toast.dismissTimer = window.setTimeout(dismiss, 3000);
     }
     root.append(toast);
+  }
+
+  function dismissToast(toastKey) {
+    for (const toast of getToastStack().querySelectorAll(".toast")) {
+      if (toast.dataset.toastKey === toastKey) {
+        window.clearTimeout(toast.dismissTimer);
+        toast.remove();
+      }
+    }
   }
 
   function formatCurrency(amount) {
@@ -436,7 +446,9 @@
       const movements = Object.entries(stored)
         .filter(([key, record]) =>
           key.startsWith(AGENT_MOVEMENT_PREFIX) &&
-          (!contactKey || record?.contactKey === contactKey))
+          (!contactKey || record?.contactKey === contactKey) &&
+          ["deposit", "withdrawal"].includes(record?.operation) &&
+          record.status !== "pending-verification")
         .map(([, record]) => record)
         .sort((first, second) => second.timestamp - first.timestamp);
 
@@ -492,7 +504,7 @@
     operation,
     amount,
     platform,
-    { username, transactionAmount, bonusAmount }
+    { username, transactionAmount, bonusAmount, fromPlatform, toPlatform, status, verification }
   ) {
     const record = {
       contactKey,
@@ -501,8 +513,12 @@
       platform,
       timestamp: Date.now(),
       username,
-      transactionAmount: Number(transactionAmount),
-      bonusAmount: Number(bonusAmount)
+      ...(transactionAmount != null ? { transactionAmount: Number(transactionAmount) } : {}),
+      ...(bonusAmount != null ? { bonusAmount: Number(bonusAmount) } : {}),
+      ...(fromPlatform ? { fromPlatform } : {}),
+      ...(toPlatform ? { toPlatform } : {}),
+      ...(status ? { status } : {}),
+      ...(verification ? { verification } : {})
     };
     const recordKey = `${AGENT_MOVEMENT_PREFIX}${record.timestamp}:${crypto.randomUUID()}`;
     await chrome.storage.local.set({ [recordKey]: record });
@@ -726,7 +742,9 @@
       const titlePlatform = selectedPlatform === "all" ? defaultPlatform : selectedPlatform;
       title.textContent = `Movimientos ${platformUsernames[titlePlatform] || ""}`.trim();
       const filtered = storedMovements.filter((movement) =>
-        (selectedPlatform === "all" || movement.platform === selectedPlatform));
+        (selectedPlatform === "all" || movement.platform === selectedPlatform ||
+          (movement.operation === "exchange" &&
+            [movement.fromPlatform, movement.toPlatform].includes(selectedPlatform))));
       const lastWithdrawal = periodSelect.value === "since-withdrawal"
         ? filtered.find((movement) => movement.operation === "withdrawal")
         : null;
@@ -767,9 +785,13 @@
       for (const movement of visibleMovements) {
         const item = document.createElement("article");
         item.className = "movement-history-item";
-        item.dataset.platform = movement.platform;
-        const platformName = movement.platform === "ganamos" ? "Ganamos" : "MultiPanel";
-        item.setAttribute("aria-label", platformName);
+        item.dataset.platform = movement.fromPlatform || movement.platform;
+        item.dataset.operation = movement.operation;
+        if (movement.status) item.dataset.status = movement.status;
+        const platformName = (platform) => platform === "ganamos" ? "Ganamos" : "MultiPanel";
+        item.setAttribute("aria-label", movement.operation === "exchange"
+          ? `Intercambio ${platformName(movement.fromPlatform)} a ${platformName(movement.toPlatform)}`
+          : platformName(movement.platform));
         const summary = document.createElement("div");
         summary.className = "movement-history-summary";
         const timestamp = document.createElement("time");
@@ -777,21 +799,44 @@
         timestamp.textContent = dateFormatter.format(movement.timestamp);
         summary.append(timestamp);
 
+        const details = document.createElement("div");
+        details.className = "movement-history-details";
         const amount = document.createElement("div");
         amount.className = "movement-history-amount";
         amount.dataset.operation = movement.operation;
         const hasTransactionAmount = Number.isFinite(movement.transactionAmount);
         const transactionAmount = hasTransactionAmount ? movement.transactionAmount : movement.amount;
-        const sign = movement.operation === "deposit" ? "+" : "−";
-        amount.textContent = `${sign}$${formatCurrency(transactionAmount)}`;
+        if (movement.operation === "exchange") {
+          amount.textContent = `$${formatCurrency(movement.amount)}`;
+          const description = document.createElement("span");
+          description.className = "movement-history-exchange";
+          const exchangeStatus = movement.status === "partial"
+            ? "Intercambio incompleto"
+            : movement.status === "pending-verification"
+              ? "Intercambio pendiente de verificación"
+              : "Intercambio";
+          description.textContent = `${exchangeStatus}: ${platformName(movement.fromPlatform)} → ${platformName(movement.toPlatform)}`;
+          details.append(description, amount);
+        } else {
+          const amountText = `$${formatCurrency(transactionAmount)}`;
+          if (movement.status === "pending-verification") {
+            amount.textContent = `Pendiente: $${formatCurrency(movement.amount)}`;
+          } else {
+            const sign = movement.operation === "deposit" ? "+" : "−";
+            amount.textContent = `${sign}${amountText}`;
+          }
+          details.append(amount);
+        }
         if (movement.operation === "deposit" && !hasTransactionAmount) {
           amount.title = "Total acreditado; el monto original no está disponible en este registro histórico";
         }
-        const details = document.createElement("div");
-        details.className = "movement-history-details";
-        details.append(amount);
-
         if (movement.operation === "deposit") {
+          if (movement.status === "pending-verification") {
+            const verification = document.createElement("div");
+            verification.className = "movement-history-verification";
+            verification.textContent = "Pendiente de verificación";
+            details.append(verification);
+          }
           const bonus = document.createElement("div");
           bonus.className = "movement-history-bonus";
           bonus.textContent = Number.isFinite(movement.bonusAmount)
@@ -827,7 +872,10 @@
             Number.isFinite(record.timestamp) &&
             !Number.isNaN(new Date(record.timestamp).getTime()) &&
             Number.isFinite(record.amount) &&
-            ["deposit", "withdrawal"].includes(record.operation))
+            (["deposit", "withdrawal"].includes(record.operation) ||
+              (record.operation === "exchange" &&
+                ["ganamos", "multipanel"].includes(record.fromPlatform) &&
+                ["ganamos", "multipanel"].includes(record.toPlatform))))
           .sort((first, second) => second.timestamp - first.timestamp);
         renderMovements();
       } catch (error) {
@@ -1035,11 +1083,11 @@
     let firstPlatform = null;
     const aliases = contactName.trim().split(/[\s/]+/)
       .map((part) => part.replace(/^[^\p{L}\p{N}._-]+/u, "").replace(/[./]+$/, ""))
-      .map((part) => part.match(/^([a-z0-9._-]+?)([a-z])\2*$/i))
+      .map((part) => part.match(/^([\p{L}\p{M}\p{N}._-]+?)([a-z])\2*$/iu))
       .filter(Boolean);
 
     for (const [, base, suffix] of aliases) {
-      if (!/^(?=.*[a-z])(?=.*\d)[a-z0-9._-]+$/i.test(base)) continue;
+      if (!/^(?=.*\p{L})(?=.*\d)[\p{L}\p{M}\p{N}._-]+$/u.test(base)) continue;
       const normalizedSuffix = suffix.toLowerCase();
       const platform = normalizedSuffix === platformSuffixes.ganamos
         ? "ganamos"
@@ -1084,6 +1132,20 @@
     informationButton.setAttribute("aria-label", "Información de depósitos, retiros y bonos");
     informationButton.hidden = true;
     informationButton.addEventListener("click", () => openUserMovementDialog(host));
+    const exchangeButton = document.createElement("button");
+    exchangeButton.type = "button";
+    exchangeButton.className = "exchange-button";
+    const exchangeIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    exchangeIcon.setAttribute("viewBox", "0 0 24 24");
+    exchangeIcon.setAttribute("aria-hidden", "true");
+    const exchangeArrows = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    exchangeArrows.setAttribute("d", "M4 7h15l-3-3m3 3-3 3M20 17H5l3 3m-3-3 3-3");
+    exchangeIcon.append(exchangeArrows);
+    exchangeButton.append(exchangeIcon);
+    exchangeButton.title = "Intercambiar fichas entre plataformas";
+    exchangeButton.setAttribute("aria-label", "Intercambiar fichas entre plataformas");
+    exchangeButton.hidden = true;
+    exchangeButton.addEventListener("click", () => openExchangeDialog(host));
     const status = document.createElement("div");
     status.className = "status";
     status.setAttribute("aria-live", "polite");
@@ -1142,7 +1204,7 @@
     actions.append(createUserButton);
     const dialogRoot = document.createElement("div");
     dialogRoot.className = "dialog-root";
-    panel.append(informationButton, passwordResetButton, actions, status, dialogRoot);
+    panel.append(informationButton, exchangeButton, passwordResetButton, actions, status, dialogRoot);
     shadow.append(stylesheet, panel);
     document.documentElement.append(host);
     return host;
@@ -1228,6 +1290,263 @@
     affix.textContent = text;
     wrapper.append(input, affix);
     return wrapper;
+  }
+
+  async function openExchangeDialog(host) {
+    const root = host.shadowRoot?.querySelector(".dialog-root");
+    const openedAccountsKey = host.dataset.accounts;
+    const usernames = {
+      ganamos: host.dataset.username,
+      multipanel: host.dataset.multipanelUsername
+    };
+    const platformName = (platform) => platform === "ganamos" ? "Ganamos" : "MultiPanel";
+    if (!root || !usernames.ganamos || !usernames.multipanel) return;
+    root.replaceChildren();
+
+    const modal = document.createElement("div");
+    modal.className = "modal";
+    modal.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      root.replaceChildren();
+    }, true);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) root.replaceChildren();
+    });
+
+    const dialog = document.createElement("form");
+    dialog.className = "dialog";
+    dialog.dataset.operation = "exchange";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const title = document.createElement("h2");
+    title.textContent = "Intercambio de fichas";
+    const notice = document.createElement("p");
+    notice.className = "notice";
+    notice.textContent = "Se debitará el monto elegido en la plataforma de origen y se acreditará el mismo monto en la de destino.";
+    dialog.append(title, notice);
+
+    const platformFields = document.createElement("div");
+    platformFields.className = "exchange-platform-fields";
+    const platformSelects = {};
+    for (const [direction, labelText] of [["from", "Desde"], ["to", "Hacia"]]) {
+      const label = document.createElement("label");
+      label.textContent = labelText;
+      const select = document.createElement("select");
+      select.className = "exchange-platform-select";
+      select.dataset.platform = direction === "from" ? "ganamos" : "multipanel";
+      for (const [platform, name] of [["ganamos", "Ganamos"], ["multipanel", "MultiPanel"]]) {
+        const option = document.createElement("option");
+        option.value = platform;
+        option.textContent = name;
+        select.append(option);
+      }
+      select.addEventListener("change", () => {
+        select.dataset.platform = select.value;
+      });
+      platformSelects[direction] = select;
+      label.append(select);
+      platformFields.append(label);
+    }
+    const cachedBalances = ["ganamos", "multipanel"].map((platform) => ({
+      platform,
+      balance: parseBalance(host.balanceStates?.[platform]?.balance)
+    })).filter(({ balance }) => balance !== null);
+    const cachedPreferredSource = cachedBalances.sort((first, second) => second.balance - first.balance)[0]?.platform;
+    const preferredSource = cachedPreferredSource ||
+      (host.dataset.defaultPlatform === "multipanel" ? "multipanel" : "ganamos");
+    platformSelects.from.value = preferredSource;
+    platformSelects.to.value = preferredSource === "ganamos" ? "multipanel" : "ganamos";
+    platformSelects.from.dataset.platform = platformSelects.from.value;
+    platformSelects.to.dataset.platform = platformSelects.to.value;
+    let sourceWasManuallyChanged = false;
+    const syncPlatformSelections = (changed) => {
+      sourceWasManuallyChanged = true;
+      const other = changed === "from" ? "to" : "from";
+      if (platformSelects[changed].value === platformSelects[other].value) {
+        platformSelects[other].value = platformSelects[changed].value === "ganamos"
+          ? "multipanel"
+          : "ganamos";
+      }
+      platformSelects.from.dataset.platform = platformSelects.from.value;
+      platformSelects.to.dataset.platform = platformSelects.to.value;
+    };
+    platformSelects.from.addEventListener("change", () => syncPlatformSelections("from"));
+    platformSelects.to.addEventListener("change", () => syncPlatformSelections("to"));
+    dialog.append(platformFields);
+
+    const amountLabel = document.createElement("label");
+    amountLabel.textContent = "Monto";
+    const amountInput = document.createElement("input");
+    configureNumericInput(amountInput);
+    amountInput.required = true;
+    amountInput.placeholder = "-";
+    amountLabel.append(createInputAffix(amountInput, "$"));
+    dialog.append(amountLabel);
+
+    const actions = document.createElement("div");
+    actions.className = "dialog-actions";
+    const actionButtons = document.createElement("div");
+    actionButtons.className = "dialog-action-buttons";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.textContent = "Cancelar";
+    cancel.addEventListener("click", () => root.replaceChildren());
+    const confirm = document.createElement("button");
+    confirm.type = "submit";
+    confirm.textContent = "Intercambiar";
+    actionButtons.append(cancel, confirm);
+    actions.append(actionButtons);
+    dialog.append(actions);
+
+    dialog.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const fromPlatform = platformSelects.from.value;
+      const toPlatform = platformSelects.to.value;
+      const fromUsername = usernames[fromPlatform];
+      const toUsername = usernames[toPlatform];
+      const amount = numericInputValue(amountInput);
+      if (fromPlatform === toPlatform || amount === null || amount <= 0 ||
+        !hasValidInputPrecision(amountInput)) {
+        showToast(host, fromUsername || "Chat", "Elegí plataformas distintas e ingresá un monto válido de hasta dos decimales.", "error");
+        amountInput.focus();
+        return;
+      }
+      if (host.dataset.accounts !== openedAccountsKey) {
+        showToast(host, fromUsername, "El chat cambió; cerrá este formulario y volvé a iniciar el intercambio.", "error");
+        return;
+      }
+
+      confirm.disabled = true;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: "BALANCE_REQUEST",
+          data: { nombre: fromUsername, platform: fromPlatform, force: true }
+        });
+        if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el saldo de origen.");
+        if (host.dataset.accounts !== openedAccountsKey) {
+          throw new Error("El chat cambió; volvé a iniciar el intercambio.");
+        }
+        const availableBalance = parseBalance(response.balance);
+        if (availableBalance === null || availableBalance <= 0) {
+          throw new Error("El saldo de origen no es válido para un intercambio.");
+        }
+        if (amount > availableBalance + Number.EPSILON) {
+          throw new Error(`El monto supera el saldo disponible de $${formatBalance(availableBalance)}.`);
+        }
+      } catch (error) {
+        showToast(host, fromUsername, error.message || "No se pudo validar el saldo de origen.", "error");
+        confirm.disabled = false;
+        return;
+      }
+
+      const amountString = numericInputString(amountInput);
+      const toastKey = `exchange:${crypto.randomUUID()}`;
+      confirm.disabled = true;
+      showToast(host, fromUsername, "Procesando intercambio...", "warning", toastKey);
+      root.replaceChildren();
+      const saveExchange = async (status) => {
+        await saveAgentMovement(openedAccountsKey, "exchange", amount, fromPlatform, {
+          username: fromUsername,
+          fromPlatform,
+          toPlatform,
+          status
+        });
+        if (agentBalanceContactKey === openedAccountsKey) {
+          const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+          if (agentBalanceHost) void renderAgentMovements(agentBalanceHost);
+        }
+      };
+
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: "EXCHANGE_REQUEST",
+          data: { fromPlatform, toPlatform, fromUsername, toUsername, monto: amountString }
+        });
+        if (response?.partial) {
+          let historyError = false;
+          try {
+            await saveExchange(response.verificationPending ? "pending-verification" : "partial");
+          } catch (error) {
+            console.error("[Ganamos balance extension] No se pudo guardar el intercambio incompleto.", error);
+            historyError = true;
+          }
+          const message = response.error || (response.verificationPending
+            ? "El retiro se confirmó, pero el depósito quedó pendiente de verificación. Revisá ambos saldos antes de repetir la operación."
+            : "El retiro se confirmó, pero falló el depósito. Verificá ambos saldos.");
+          showToast(host, fromUsername, historyError
+            ? `${message} Además, no se pudo guardar el intercambio en el historial.`
+            : message, "error", toastKey);
+          void refreshBalance(host);
+          void refreshAgentBalance();
+          void refreshMultiPanelAgentBalance();
+          return;
+        }
+        if (!response?.ok) throw new Error(response?.error || "No se pudo completar el intercambio.");
+        try {
+          await saveExchange("complete");
+        } catch (error) {
+          console.error("[Ganamos balance extension] No se pudo guardar el intercambio confirmado.", error);
+          showToast(host, fromUsername, "El intercambio se completó, pero no se pudo guardar en el historial.", "error", toastKey);
+        }
+        showToast(host, fromUsername,
+          `Intercambio ${platformName(fromPlatform)} → ${platformName(toPlatform)} ($${formatCurrency(amount)}).`,
+          "success", toastKey);
+        void refreshBalance(host);
+        void refreshAgentBalance();
+        void refreshMultiPanelAgentBalance();
+      } catch (error) {
+        showToast(host, fromUsername, error.message || "No se pudo completar el intercambio.", "error", toastKey);
+      } finally {
+        confirm.disabled = false;
+      }
+    });
+
+    modal.append(dialog);
+    root.append(modal);
+    amountInput.focus();
+
+    void (async () => {
+      try {
+        const results = await Promise.all(["ganamos", "multipanel"].map(async (platform) => {
+          const response = await chrome.runtime.sendMessage({
+            type: "BALANCE_REQUEST",
+            data: { nombre: usernames[platform], platform, force: true }
+          });
+          if (!response?.ok) throw new Error(response?.error || `No se pudo consultar el saldo de ${platformName(platform)}.`);
+          const balance = parseBalance(response.balance);
+          if (balance === null) throw new Error(`El saldo de ${platformName(platform)} no es válido.`);
+          host.balanceStates ||= {};
+          host.balanceStates[platform] = { balance };
+          return { platform, balance };
+        }).map((request) => request.catch((error) => ({ error }))));
+        if (host.dataset.accounts !== openedAccountsKey || !root.contains(modal) ||
+          sourceWasManuallyChanged) return;
+        const validBalances = results.filter((result) => !result.error);
+        if (!validBalances.length) {
+          const failure = results.find((result) => result.error);
+          showToast(host, usernames.ganamos, failure.error.message || "No se pudieron consultar los saldos para elegir el origen.", "error");
+          return;
+        }
+        validBalances.sort((first, second) => second.balance - first.balance);
+        const bestSource = validBalances[0].platform;
+        platformSelects.from.value = bestSource;
+        platformSelects.to.value = bestSource === "ganamos" ? "multipanel" : "ganamos";
+        platformSelects.from.dataset.platform = platformSelects.from.value;
+        platformSelects.to.dataset.platform = platformSelects.to.value;
+        if (results.some((result) => result.error)) {
+          const failure = results.find((result) => result.error);
+          showToast(host, usernames.ganamos, `No se pudo comparar uno de los saldos; se eligió ${platformName(bestSource)} con el saldo consultado. ${failure.error.message}`, "error");
+        }
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudieron comparar los saldos para el intercambio.", error);
+        if (host.dataset.accounts === openedAccountsKey && root.contains(modal)) {
+          showToast(host, usernames.ganamos, error.message || "No se pudieron consultar los saldos para elegir el origen.", "error");
+        }
+      }
+    })();
   }
 
   async function openTransactionDialog(host, operation) {
@@ -1530,22 +1849,43 @@
         const bonusValue = bonus?.enabled ? Number(bonus.value) : 0;
         const creditedAmount = operation === "deposit" ? amountValue + bonusValue : amountValue;
         const amountSummary = `$${formatCurrency(creditedAmount)}`;
-        showToast(host, username,
-          `${operation === "deposit" ? "Depósito" : "Retiro"} ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} (${amountSummary}).`,
-          "success");
+        const pendingVerification = operation === "deposit" &&
+          response.verification?.status !== "verified";
+        let movementSaved = true;
         try {
           await saveAgentMovement(openedAccountsKey, operation, creditedAmount, selectedPlatform, {
             username,
             transactionAmount: amountValue,
-            bonusAmount: operation === "deposit" ? bonusValue : 0
+            bonusAmount: operation === "deposit" ? bonusValue : 0,
+            status: pendingVerification ? "pending-verification" : undefined,
+            verification: response.verification
           });
           if (agentBalanceContactKey === openedAccountsKey) {
             const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
             if (agentBalanceHost) void renderAgentMovements(agentBalanceHost);
           }
         } catch (error) {
-          console.error("[Ganamos balance extension] No se pudo guardar el movimiento confirmado.", error);
-          showToast(host, username, "La operación se completó, pero no se pudo guardar el movimiento.", "error");
+          movementSaved = false;
+          console.error("[Ganamos balance extension] No se pudo guardar el movimiento de la operación.", error);
+        }
+        if (pendingVerification) {
+          const verification = response.verification;
+          const observed = Number.isFinite(verification?.finalBalance)
+            ? ` El saldo consultado pasó de $${formatBalance(verification.initialBalance)} a $${formatBalance(verification.finalBalance)}.`
+            : "";
+          const historyNotice = movementSaved
+            ? ""
+            : " Tampoco se pudo guardar el movimiento localmente.";
+          showToast(host, username,
+            `La plataforma respondió, pero no se pudo confirmar el depósito de ${amountSummary}. Quedó pendiente de verificación; revisá el saldo o historial antes de volver a cargar.${observed}${historyNotice}`,
+            "warning");
+        } else {
+          showToast(host, username,
+            `${operation === "deposit" ? "Depósito verificado" : "Retiro"} ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} (${amountSummary}).`,
+            "success");
+          if (!movementSaved) {
+            showToast(host, username, "La operación se completó, pero no se pudo guardar el movimiento.", "error");
+          }
         }
         void refreshBalance(host);
         if (selectedPlatform === "ganamos") void refreshAgentBalance();
@@ -1695,13 +2035,14 @@
         return;
       }
       let username = getGeneratedUsername();
+      const toastKey = `create-user:${crypto.randomUUID()}`;
       if (host.dataset.accounts !== accountsKey) {
-        showToast(host, username, "El contacto cambió; cerrá este formulario y volvé a intentarlo.", "error");
+        showToast(host, username, "El contacto cambió; cerrá este formulario y volvé a intentarlo.", "error", toastKey);
         return;
       }
 
       create.disabled = true;
-      showToast(host, username, "Creando usuario...", "warning");
+      showToast(host, username, "Creando usuario...", "warning", toastKey);
       root.replaceChildren();
       try {
         while (true) {
@@ -1715,24 +2056,27 @@
           if (response?.usernameExists) {
             const nextUsername = `${username}${platformSuffixes[selectedPlatform]}`;
             const retry = await confirmDuplicateUsername(root, username, nextUsername);
-            if (!retry) return;
+            if (!retry) {
+              dismissToast(toastKey);
+              return;
+            }
             username = nextUsername;
-            showToast(host, username, "Probando el nombre alternativo...", "warning");
+            showToast(host, username, "Probando el nombre alternativo...", "warning", toastKey);
             continue;
           }
           if (!response?.ok) throw new Error(response?.error || "La plataforma no confirmó la creación.");
-          showToast(host, username, `Usuario creado${response.userId ? ` (ID ${response.userId})` : ""}.`, "success");
+          showToast(host, username, `Usuario creado${response.userId ? ` (ID ${response.userId})` : ""}.`, "success", toastKey);
           try {
             await navigator.clipboard.writeText(username);
-            showToast(host, username, "Usuario copiado al portapapeles.", "success");
+            showToast(host, username, "Usuario copiado al portapapeles.", "success", toastKey);
           } catch (error) {
             console.error("[Ganamos balance extension] No se pudo copiar el usuario al portapapeles.", error);
-            showToast(host, username, "El usuario se creó, pero no se pudo copiar al portapapeles.", "error");
+            showToast(host, username, "El usuario se creó, pero no se pudo copiar al portapapeles.", "error", toastKey);
           }
           return;
         }
       } catch (error) {
-        showToast(host, username, error.message || "No se pudo crear el usuario.", "error");
+        showToast(host, username, error.message || "No se pudo crear el usuario.", "error", toastKey);
       } finally {
         create.disabled = false;
       }
@@ -1943,6 +2287,8 @@
     host.dataset.contactPhone = phone || "";
     const hasPlatformUsers = Boolean(usernames?.ganamos || usernames?.multipanel);
     host.shadowRoot.querySelector(".user-information-button").hidden = !hasPlatformUsers;
+    host.shadowRoot.querySelector(".exchange-button").hidden =
+      !usernames?.ganamos || !usernames?.multipanel;
     const missingPlatform = usernames?.ganamos && !usernames?.multipanel
       ? "multipanel"
       : usernames?.multipanel && !usernames?.ganamos

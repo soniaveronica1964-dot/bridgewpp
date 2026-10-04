@@ -47,7 +47,45 @@
   background: #263432;
 }
 
+.exchange-button {
+  position: absolute;
+  z-index: 1;
+  top: -31px;
+  left: 42px;
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 1px solid #53615f;
+  border-radius: 4px;
+  color: #d8e0de;
+  background: #182020;
+  line-height: 1;
+}
+
+.exchange-button:hover:not(:disabled) {
+  border-color: #00a884;
+  background: #263432;
+}
+
+.exchange-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
 .user-information-button[hidden] {
+  display: none !important;
+}
+
+.exchange-button[hidden] {
   display: none !important;
 }
 
@@ -207,6 +245,45 @@
   color: #f2f8ff;
   border-color: #3979b8;
   background: #2f6397;
+}
+
+.exchange-platform-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.exchange-platform-select {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid #53615f;
+  border-radius: 7px;
+  color: #e2e8e7;
+  background: #182323;
+  font: inherit;
+}
+
+.exchange-platform-select[data-platform="ganamos"] {
+  border-color: #7650a8;
+  color: #d7c4f5;
+}
+
+.exchange-platform-select[data-platform="multipanel"] {
+  border-color: #3979b8;
+  color: #c9e3ff;
+}
+
+.exchange-platform-select[data-platform="ganamos"]:focus {
+  outline: 2px solid #7650a833;
+}
+
+.exchange-platform-select[data-platform="multipanel"]:focus {
+  outline: 2px solid #3979b833;
 }
 
 .bonus-fields {
@@ -423,6 +500,60 @@ button:disabled {
   border-color: #ff4d00;
 }
 
+.dialog[data-operation="exchange"] {
+  border-color: #cbd0d5;
+  color: #e2e8e7;
+  background: #1d2929;
+}
+
+.dialog[data-operation="exchange"] h2 {
+  color: #e7edef;
+}
+
+.dialog[data-operation="exchange"] .notice,
+.dialog[data-operation="exchange"] label {
+  color: #aab6b5;
+}
+
+.dialog[data-operation="exchange"] input {
+  border-color: #cbd0d5;
+  color: #e7edef;
+  background: #182323;
+}
+
+.dialog[data-operation="exchange"] input:focus {
+  border-color: #929aa3;
+  box-shadow: 0 0 0 2px #929aa333;
+}
+
+.dialog[data-operation="exchange"] .input-affix span {
+  color: #929f9f;
+}
+
+.dialog[data-operation="exchange"] .dialog-actions {
+  border-top-color: #cbd0d5;
+}
+
+.dialog[data-operation="exchange"] .dialog-actions button.secondary {
+  border-color: #cbd0d5;
+  color: #e2e8e7;
+  background: #263432;
+}
+
+.dialog[data-operation="exchange"] .dialog-actions button.secondary:hover:not(:disabled) {
+  background: #344546;
+}
+
+.dialog[data-operation="exchange"] .dialog-actions button[type="submit"] {
+  border-color: #cbd0d5;
+  color: #ffffff;
+  background: #53615f;
+}
+
+.dialog[data-operation="exchange"] .dialog-actions button[type="submit"]:hover:not(:disabled) {
+  background: #687773;
+}
+
 .dialog[data-operation="recent-withdrawal"] {
   border-color: #d85848;
 }
@@ -600,6 +731,48 @@ button:disabled {
 
 .movement-history-amount[data-operation="withdrawal"] {
   color: #ff6b6b;
+}
+
+.movement-history-amount[data-operation="exchange"] {
+  color: #d8e0de;
+}
+
+.movement-history-exchange {
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: #d8e0de;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.movement-history-item[data-status="partial"] {
+  border-color: #53615f;
+}
+
+.movement-history-item[data-operation="exchange"] {
+  border-color: #53615f;
+}
+
+.movement-history-item[data-operation="exchange"] .movement-history-amount,
+.movement-history-item[data-operation="exchange"] .movement-history-exchange {
+  color: #d8e0de;
+}
+
+.movement-history-item[data-status="pending-verification"] {
+  border-color: #aab6b5;
+}
+
+.movement-history-item[data-status="pending-verification"] .movement-history-amount,
+.movement-history-verification {
+  color: #e2c878;
+}
+
+.movement-history-verification {
+  flex: 0 1 auto;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .movement-history-bonus {

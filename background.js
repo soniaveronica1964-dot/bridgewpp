@@ -27,7 +27,7 @@ function isValidMultiPanelUsername(username, suffix = "y") {
 
 function normalizeUsernameSuffix(username, suffix) {
   if (typeof username !== "string") return "";
-  return username.trim().toLocaleLowerCase().replace(new RegExp(`${suffix}+$`, "i"), suffix);
+  return username.trim().normalize("NFC").toLocaleLowerCase().replace(new RegExp(`${suffix}+$`, "i"), suffix);
 }
 
 async function getPlatformSuffixes() {
@@ -392,30 +392,67 @@ async function getMultiPanelBalance(data) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const user = await findMultiPanelUser(data.nombre.trim());
-      const result = await requestMultiPanelForm("/api/admin/getCurrentUserBalance", {
-        session: user.session,
-        company: "MULT",
-        user: user.user,
-        db: user.db,
-        balance: "CASH"
-      });
-      const balances = Array.isArray(result?.data) ? result.data : [];
-      const balance = balances.find((entry) =>
-        String(entry?.user) === user.user && String(entry?.db) === user.db && entry?.account === "CASH");
-      if (!balance || (typeof balance.amount !== "string" && typeof balance.amount !== "number")) {
-        throw new Error("MultiPanel no devolvió el saldo CASH para el usuario encontrado.");
-      }
-      const amountInMinorUnits = Number(balance.amount);
-      if (!Number.isFinite(amountInMinorUnits)) {
-        throw new Error("MultiPanel devolvió un saldo CASH que no es numérico.");
-      }
-      return { ok: true, username: user.alias, balance: (amountInMinorUnits / 100).toFixed(2) };
+      return await getMultiPanelBalanceForUser(user);
     } catch (error) {
       if (!isInvalidMultiPanelSession(error) || attempt > 0) throw error;
       await getMultiPanelSessionFromOpenTab();
     }
   }
   throw new Error("No se pudo consultar el saldo de MultiPanel.");
+}
+
+async function getMultiPanelBalanceForUser(user) {
+  const result = await requestMultiPanelForm("/api/admin/getCurrentUserBalance", {
+    session: user.session,
+    company: "MULT",
+    user: user.user,
+    db: user.db,
+    balance: "CASH"
+  });
+  const balances = Array.isArray(result?.data) ? result.data : [];
+  const balance = balances.find((entry) =>
+    String(entry?.user) === user.user && String(entry?.db) === user.db && entry?.account === "CASH");
+  if (!balance || (typeof balance.amount !== "string" && typeof balance.amount !== "number")) {
+    throw new Error("MultiPanel no devolvió el saldo CASH para el usuario encontrado.");
+  }
+  const amountInMinorUnits = Number(balance.amount);
+  if (!Number.isFinite(amountInMinorUnits)) {
+    throw new Error("MultiPanel devolvió un saldo CASH que no es numérico.");
+  }
+  return { ok: true, username: user.alias, balance: (amountInMinorUnits / 100).toFixed(2) };
+}
+
+async function verifyBalanceIncrease(getBalance, initialBalance, expectedIncrease) {
+  const initialCents = Math.round(initialBalance * 100);
+  const expectedCents = Math.round(expectedIncrease * 100);
+  let lastBalance = null;
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      lastBalance = await getBalance();
+      lastError = null;
+      if (Math.round(lastBalance * 100) === initialCents + expectedCents) {
+        return {
+          status: "verified",
+          initialBalance,
+          finalBalance: lastBalance,
+          expectedIncrease
+        };
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  return {
+    status: "pending",
+    initialBalance,
+    ...(lastBalance != null ? { finalBalance: lastBalance } : {}),
+    expectedIncrease,
+    ...(lastError ? { verificationError: lastError.message || "No se pudo volver a consultar el saldo." } : {})
+  };
 }
 
 async function getMultiPanelAgentBalance() {
@@ -486,6 +523,10 @@ async function runTransactionRequest(data) {
   if (!/^\d+$/.test(String(user.userId ?? ""))) {
     throw new Error("Ganamos encontró el usuario, pero no devolvió un ID válido para la operación.");
   }
+  const initialBalance = Number(user.balance);
+  if (data.operation === "deposit" && !Number.isFinite(initialBalance)) {
+    throw new Error("Ganamos no devolvió un saldo inicial válido; no se envió el depósito.");
+  }
   if (data.operation === "withdrawal" && data.bonus != null) {
     throw new Error("Ganamos no admite bonos en solicitudes de retiro.");
   }
@@ -507,10 +548,24 @@ async function runTransactionRequest(data) {
       body: JSON.stringify(payload)
     }
   );
-  if (response?.ok === false || response?.success === false || response?.error) {
-    throw new Error(response.error || response.message || `Ganamos rechazó el ${data.operation === "deposit" ? "depósito" : "retiro"}.`);
+  if (response?.ok === false || response?.success === false || response?.error ||
+    (response?.status != null && Number(response.status) !== 0) ||
+    (typeof response?.error_message === "string" && response.error_message.trim())) {
+    throw new Error(response.error || response.message || response.error_message ||
+      `Ganamos rechazó el ${data.operation === "deposit" ? "depósito" : "retiro"}.`);
   }
-  return { ok: true, username: user.username, userId: user.userId, response };
+  if (data.operation !== "deposit") {
+    return { ok: true, username: user.username, userId: user.userId, response };
+  }
+
+  const expectedIncrease = toApiAmount(data.monto) + bonusAmount;
+  const verification = await verifyBalanceIncrease(async () => {
+    const refreshed = await findGanamosUser({ ...data, nombre: user.username });
+    const balance = Number(refreshed.balance);
+    if (!Number.isFinite(balance)) throw new Error("Ganamos devolvió un saldo no numérico al verificar.");
+    return balance;
+  }, initialBalance, expectedIncrease);
+  return { ok: true, username: user.username, userId: user.userId, response, verification };
 }
 
 async function runMultiPanelManualOperation(data) {
@@ -519,6 +574,13 @@ async function runMultiPanelManualOperation(data) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const user = await findMultiPanelUser(data.nombre.trim());
+      const initialBalanceResult = data.operation === "deposit"
+        ? await getMultiPanelBalanceForUser(user)
+        : null;
+      const initialBalance = initialBalanceResult ? Number(initialBalanceResult.balance) : null;
+      if (data.operation === "deposit" && !Number.isFinite(initialBalance)) {
+        throw new Error("MultiPanel no devolvió un saldo inicial válido; no se envió el depósito.");
+      }
       const bonusAmount = data.operation === "deposit" && data.bonus?.enabled
         ? toMultiPanelMinorUnits(data.bonus.value)
         : "0";
@@ -539,7 +601,26 @@ async function runMultiPanelManualOperation(data) {
         throw new Error(response.error || response.message ||
           `MultiPanel rechazó el ${data.operation === "deposit" ? "depósito" : "retiro"}.`);
       }
-      return { ok: true, username: user.alias, response };
+      if (data.operation !== "deposit") return { ok: true, username: user.alias, response };
+
+      const expectedIncrease = Number(amount) / 100 + Number(bonusAmount) / 100;
+      const verification = await verifyBalanceIncrease(async () => {
+        const refreshed = await getMultiPanelBalance({ nombre: data.nombre });
+        const balance = Number(refreshed.balance);
+        if (!Number.isFinite(balance)) throw new Error("MultiPanel devolvió un saldo no numérico al verificar.");
+        return balance;
+      }, initialBalance, expectedIncrease);
+      if (verification.status === "pending") {
+        return {
+          ok: true,
+          username: user.alias,
+          response,
+          verification,
+          partial: true,
+          error: `MultiPanel respondió al depósito, pero el saldo no confirmó el aumento esperado de $${expectedIncrease.toFixed(2)}.`
+        };
+      }
+      return { ok: true, username: user.alias, response, verification };
     } catch (error) {
       lastError = error;
       if (!isInvalidMultiPanelSession(error) || attempt > 0) throw error;
@@ -547,6 +628,61 @@ async function runMultiPanelManualOperation(data) {
     }
   }
   throw lastError || new Error("No se pudo completar el depósito en MultiPanel.");
+}
+
+function validateExchange(data, suffixes) {
+  if (!data || !["ganamos", "multipanel"].includes(data.fromPlatform) ||
+    !["ganamos", "multipanel"].includes(data.toPlatform) ||
+    data.fromPlatform === data.toPlatform ||
+    typeof data.fromUsername !== "string" ||
+    typeof data.toUsername !== "string" ||
+    typeof data.monto !== "string" ||
+    !/^\d+(?:[.,]\d{1,2})?$/.test(data.monto) ||
+    Number(data.monto.replace(",", ".")) <= 0) {
+    return false;
+  }
+  const fromValid = data.fromPlatform === "ganamos"
+    ? isValidUsername(data.fromUsername, suffixes.ganamos)
+    : isValidMultiPanelUsername(data.fromUsername, suffixes.multipanel);
+  const toValid = data.toPlatform === "ganamos"
+    ? isValidUsername(data.toUsername, suffixes.ganamos)
+    : isValidMultiPanelUsername(data.toUsername, suffixes.multipanel);
+  return fromValid && toValid;
+}
+
+async function runExchangeRequest(data) {
+  const amount = data.monto;
+  await runTransactionRequest({
+    operation: "withdrawal",
+    platform: data.fromPlatform,
+    nombre: data.fromUsername,
+    monto: amount
+  });
+
+  try {
+    const depositResult = await runTransactionRequest({
+      operation: "deposit",
+      platform: data.toPlatform,
+      nombre: data.toUsername,
+      monto: amount
+    });
+    if (depositResult.verification?.status === "pending") {
+      return {
+        ok: false,
+        partial: true,
+        verificationPending: true,
+        error: `El retiro de $${amount} en ${data.fromPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} se confirmó, pero el depósito en ${data.toPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} quedó pendiente de verificación. Revisá ambos saldos antes de repetir la operación.`
+      };
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      partial: true,
+      error: `El retiro de $${amount} en ${data.fromPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} se confirmó, pero no se pudo acreditar en ${data.toPlatform === "ganamos" ? "Ganamos" : "MultiPanel"}. Verificá ambos saldos antes de volver a operar. Detalle: ${error.message}`
+    };
+  }
+
+  return { ok: true };
 }
 
 async function resetUserPassword(data) {
@@ -607,6 +743,7 @@ const API_MESSAGE_TYPES = new Set([
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
+  "EXCHANGE_REQUEST",
   "WITHDRAWAL_HISTORY_REQUEST",
   "CREATE_USER_REQUEST",
   "PASSWORD_RESET_REQUEST"
@@ -703,6 +840,9 @@ function validateApiMessage(message, suffixes) {
   if (message.type === "WITHDRAWAL_HISTORY_REQUEST") {
     return isValidUsername(message.data?.nombre, suffixes.ganamos);
   }
+  if (message.type === "EXCHANGE_REQUEST") {
+    return validateExchange(message.data, suffixes);
+  }
   return validateTransaction({ ...message.data, platform }, suffixes);
 }
 
@@ -725,6 +865,7 @@ async function executeApiMessage(message) {
       : createGanamosUser(message.data);
   }
   if (message.type === "PASSWORD_RESET_REQUEST") return resetUserPassword(message.data);
+  if (message.type === "EXCHANGE_REQUEST") return runExchangeRequest(message.data);
   if (message.type === "BALANCE_REQUEST") {
     const platform = message.data?.platform || "ganamos";
     return platform === "multipanel"
