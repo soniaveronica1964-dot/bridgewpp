@@ -302,6 +302,49 @@
     return Number.isFinite(value) ? value : null;
   }
 
+  function createAmountShortcuts(input) {
+    const shortcuts = document.createElement("div");
+    shortcuts.className = "amount-shortcuts";
+    shortcuts.setAttribute("role", "group");
+    shortcuts.setAttribute("aria-label", "Sumar un monto rápido");
+    for (const shortcutAmount of [500, 1000, 2500, 5000, 10000]) {
+      const button = document.createElement("button");
+      const label = `$${formatBalance(shortcutAmount)}`;
+      button.type = "button";
+      button.textContent = label;
+      button.setAttribute("aria-label", `Sumar ${label} al monto`);
+      button.addEventListener("click", () => {
+        const currentAmount = numericInputValue(input) || 0;
+        const nextAmount = (Math.round(currentAmount * 100) + shortcutAmount * 100) / 100;
+        input.value = formatBalance(nextAmount);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.focus();
+      });
+      shortcuts.append(button);
+    }
+    return shortcuts;
+  }
+
+  function createPercentageShortcuts(input) {
+    const shortcuts = document.createElement("div");
+    shortcuts.className = "amount-shortcuts";
+    shortcuts.setAttribute("role", "group");
+    shortcuts.setAttribute("aria-label", "Elegir porcentaje de bono");
+    for (const percentage of [20, 30, 40, 50, 60]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `${percentage}%`;
+      button.setAttribute("aria-label", `Usar ${percentage}%`);
+      button.addEventListener("click", () => {
+        input.value = String(percentage);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.focus();
+      });
+      shortcuts.append(button);
+    }
+    return shortcuts;
+  }
+
   function numericInputString(input) {
     return normalizeNumericInput(input.value).value;
   }
@@ -538,6 +581,39 @@
         movement.timestamp <= Date.now())
       .map(([, movement]) => movement)
       .sort((first, second) => second.timestamp - first.timestamp)[0] || null;
+  }
+
+  async function updateLastWithdrawalDisplay(host, contactKey) {
+    const label = host.shadowRoot?.querySelector(".last-withdrawal");
+    if (!label) return;
+    label.hidden = true;
+    try {
+      const stored = await chrome.storage.local.get(null);
+      if (host.dataset.accounts !== contactKey) return;
+      const lastWithdrawal = Object.entries(stored)
+        .filter(([key, movement]) =>
+          key.startsWith(AGENT_MOVEMENT_PREFIX) &&
+          movement?.contactKey === contactKey &&
+          movement.operation === "withdrawal" &&
+          Number.isFinite(movement.timestamp) &&
+          ["ganamos", "multipanel"].includes(movement.platform) &&
+          movement.timestamp <= Date.now())
+        .map(([, movement]) => movement)
+        .sort((first, second) => second.timestamp - first.timestamp)[0];
+      if (!lastWithdrawal) return;
+
+      const formattedDate = new Intl.DateTimeFormat("es-AR", {
+        dateStyle: "short",
+        timeStyle: "short"
+      }).format(lastWithdrawal.timestamp);
+      label.dateTime = new Date(lastWithdrawal.timestamp).toISOString();
+      label.textContent = `Último Retiro: ${formattedDate}`;
+      label.title = `Último retiro: ${formattedDate}`;
+      label.classList.toggle("recent", Date.now() - lastWithdrawal.timestamp < 24 * 60 * 60 * 1000);
+      label.hidden = false;
+    } catch (error) {
+      console.error("[Ganamos balance extension] No se pudo consultar la fecha del último retiro.", error);
+    }
   }
 
   function confirmRecentWithdrawal(root, username, movement) {
@@ -1321,10 +1397,7 @@
     dialog.setAttribute("aria-modal", "true");
     const title = document.createElement("h2");
     title.textContent = "Intercambio de fichas";
-    const notice = document.createElement("p");
-    notice.className = "notice";
-    notice.textContent = "Se debitará el monto elegido en la plataforma de origen y se acreditará el mismo monto en la de destino.";
-    dialog.append(title, notice);
+    dialog.append(title);
 
     const platformFields = document.createElement("div");
     platformFields.className = "exchange-platform-fields";
@@ -1383,6 +1456,7 @@
     amountInput.placeholder = "-";
     amountLabel.append(createInputAffix(amountInput, "$"));
     dialog.append(amountLabel);
+    dialog.append(createAmountShortcuts(amountInput));
 
     const actions = document.createElement("div");
     actions.className = "dialog-actions";
@@ -1574,12 +1648,16 @@
     dialog.setAttribute("aria-modal", "true");
     const title = document.createElement("h2");
     title.textContent = operation === "deposit" ? "Depositar" : "Retirar";
-    const notice = document.createElement("p");
-    notice.className = "notice";
-    notice.textContent = operation === "deposit"
-      ? "Elegí la plataforma e ingresá el monto y el bono."
-      : `El retiro se enviará a ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"}.`;
-    dialog.append(title, notice);
+    const heading = document.createElement("div");
+    heading.className = "transaction-heading";
+    heading.append(title);
+    if (operation === "withdrawal") {
+      const lastWithdrawalLabel = document.createElement("time");
+      lastWithdrawalLabel.className = "last-withdrawal";
+      lastWithdrawalLabel.hidden = true;
+      heading.append(lastWithdrawalLabel);
+    }
+    dialog.append(heading);
 
     const selector = document.createElement("div");
     selector.className = "platform-selector";
@@ -1597,9 +1675,6 @@
         }
         if (operation === "deposit") depositSummary.dataset.platform = selectedPlatform;
         else withdrawalSummary.dataset.platform = selectedPlatform;
-        notice.textContent = operation === "deposit"
-          ? `El depósito se enviará a ${label}.`
-          : `El retiro se enviará a ${label}.`;
         confirm.textContent = "Confirmar";
       });
       selector.append(button);
@@ -1617,6 +1692,8 @@
     amountLabel.append(createInputAffix(amountInput, "$"));
     amountEntry.append(amountLabel);
     dialog.append(amountEntry);
+
+    dialog.append(createAmountShortcuts(amountInput));
 
     const depositSummary = document.createElement("span");
     depositSummary.className = "deposit-summary";
@@ -1670,6 +1747,7 @@
       bonusPercentLabel.append(createInputAffix(bonusPercentInput, "%", "suffix"));
       bonusFields.append(bonusLabel, bonusPercentLabel);
       dialog.append(bonusFields);
+      dialog.append(createPercentageShortcuts(bonusPercentInput));
 
       const numberValue = numericInputValue;
       const syncFixedFromPercent = () => {
@@ -1723,6 +1801,7 @@
       recoveryPercentLabel.append(createInputAffix(recoveryPercentInput, "%", "suffix"));
       recoveryFields.append(loadLabel, recoveryPercentLabel);
       dialog.append(recoveryFields);
+      dialog.append(createPercentageShortcuts(recoveryPercentInput));
       amountInput.addEventListener("input", updateWithdrawalSummary);
       loadAmountInput.addEventListener("input", updateWithdrawalSummary);
       recoveryPercentInput.addEventListener("input", updateWithdrawalSummary);
@@ -1910,6 +1989,9 @@
     });
     modal.append(dialog);
     root.append(modal);
+    if (operation === "withdrawal") {
+      void updateLastWithdrawalDisplay(host, openedAccountsKey);
+    }
     amountInput.focus();
   }
 
@@ -1945,12 +2027,7 @@
     title.textContent = forcedPlatform
       ? `Crear ${forcedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"}`
       : "Crear Usuario";
-    const notice = document.createElement("p");
-    notice.className = "notice";
-    notice.textContent = phone.length >= 4
-      ? "Ingresá un apodo. Se agregan automáticamente los últimos cuatro números y la letra de la plataforma."
-      : "Revisá el apodo sugerido para crear el usuario solo en la plataforma faltante.";
-    dialog.append(title, notice);
+    dialog.append(title);
 
     const selector = document.createElement("div");
     selector.className = "platform-selector";
@@ -2010,9 +2087,6 @@
             option.setAttribute("aria-pressed", String(option.dataset.platform === selectedPlatform));
           }
           updateGeneratedUsername();
-          notice.textContent = platform === "multipanel"
-            ? "Se asignará la contraseña configurada y se asociarán todos los sitios disponibles."
-            : "La contraseña configurada para esta extensión se asignará automáticamente.";
         });
         selector.append(button);
       }
@@ -2184,12 +2258,9 @@
     dialog.setAttribute("aria-modal", "true");
     const title = document.createElement("h2");
     title.textContent = "Restaurar contraseña";
-    const notice = document.createElement("p");
-    notice.className = "notice";
-    notice.textContent = "Se restaurará la contraseña configurada en las opciones de la extensión.";
     const selector = document.createElement("div");
     selector.className = "platform-selector";
-    for (const [platform, username] of availablePlatforms) {
+    for (const [platform] of availablePlatforms) {
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.platform = platform;
@@ -2201,7 +2272,6 @@
         for (const option of selector.querySelectorAll("button")) {
           option.setAttribute("aria-pressed", String(option.dataset.platform === selectedPlatform));
         }
-        notice.textContent = `Se restaurará la contraseña de ${username} a la configurada en las opciones.`;
       });
       selector.append(button);
     }
@@ -2220,7 +2290,7 @@
     confirm.textContent = "Aceptar";
     actionButtons.append(cancel, confirm);
     actions.append(actionButtons);
-    dialog.append(title, notice, selector, actions);
+    dialog.append(title, selector, actions);
     dialog.addEventListener("submit", async (event) => {
       event.preventDefault();
       const username = host.dataset[selectedPlatform === "ganamos" ? "username" : "multipanelUsername"];

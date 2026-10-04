@@ -167,6 +167,7 @@
 .withdrawal-action-group {
   display: flex;
   flex: initial;
+  align-items: center;
   gap: 5px;
   min-width: 0;
 }
@@ -176,7 +177,7 @@
 }
 
 .withdrawal-action-group > [data-action="withdrawal"] {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
 }
 
@@ -316,6 +317,29 @@
   min-width: 58px;
   min-height: 40px;
   margin-bottom: 0;
+}
+
+.amount-shortcuts {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.amount-shortcuts button {
+  min-width: 0;
+  min-height: 27px;
+  padding: 0 2px;
+  border-color: #344546;
+  color: #cbd4d2;
+  background: #202d2d;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.amount-shortcuts button:hover:not(:disabled) {
+  border-color: #53615f;
+  background: #2b3a39;
 }
 
 .input-affix {
@@ -498,6 +522,39 @@ button:disabled {
 
 .dialog[data-operation="withdrawal"] {
   border-color: #ff4d00;
+}
+
+.transaction-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 5px;
+}
+
+.transaction-heading h2 {
+  min-width: 0;
+  margin: 0;
+}
+
+.last-withdrawal {
+  flex: 0 0 auto;
+  color: #aab6b5;
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.last-withdrawal[hidden] {
+  display: none;
+}
+
+.last-withdrawal.recent {
+  color: #ff7777;
+  text-decoration: underline;
+  text-decoration-color: #ff4d4d;
+  text-underline-offset: 2px;
 }
 
 .dialog[data-operation="exchange"] {
