@@ -212,10 +212,9 @@
   const numericInputStates = new WeakMap();
 
   function normalizeNumericInput(value, preferGrouping = false) {
-    const negative = /^\s*-/.test(value);
     const cleaned = value.replace(/[^\d.,]/g, "");
-    if (negative && !/\d/.test(cleaned)) {
-      return { value: "-", integer: "", decimalSeparator: null, negative };
+    if (!/\d/.test(cleaned)) {
+      return { value: "", integer: "", decimalSeparator: null };
     }
     const commaIndex = cleaned.lastIndexOf(",");
     const dotIndex = cleaned.lastIndexOf(".");
@@ -236,17 +235,16 @@
       ? cleaned.slice(0, cleaned.lastIndexOf(decimalSeparator))
       : cleaned).replace(/[.,]/g, "") || "0";
     if (!decimalSeparator) {
-      return { value: `${negative ? "-" : ""}${integer}`, integer, decimalSeparator: null, negative };
+      return { value: integer, integer, decimalSeparator: null };
     }
 
     const fraction = cleaned.slice(cleaned.lastIndexOf(decimalSeparator) + 1)
       .replace(/[.,]/g, "");
     return {
-      value: `${negative ? "-" : ""}${integer}.${fraction}`,
+      value: `${integer}.${fraction}`,
       integer,
       decimalSeparator,
-      fraction,
-      negative
+      fraction
     };
   }
 
@@ -263,9 +261,9 @@
     const normalizedPrefix = normalizeNumericInput(prefix, preferGrouping);
     const groupedInteger = normalized.integer.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
     const hasDecimal = normalized.decimalSeparator !== null;
-    const displayInteger = `${normalized.negative ? "-" : ""}${groupedInteger}`;
+    const displayInteger = groupedInteger;
     const formatted = `${displayInteger}${hasDecimal ? `,${normalized.fraction}` : ""}`;
-    input.value = raw ? formatted : "";
+    input.value = /\d/.test(raw) ? formatted : "";
     numericInputStates.set(input, {
       grouped: !hasDecimal && /\d\.\d{3}(?:\.\d{3})*$/.test(displayInteger)
     });
@@ -285,8 +283,6 @@
           break;
         }
       }
-    } else if (normalized.negative && prefix.startsWith("-")) {
-      nextCursor = 1;
     }
     input.setSelectionRange(nextCursor, nextCursor);
   }
@@ -294,6 +290,9 @@
   function configureNumericInput(input) {
     input.type = "text";
     input.inputMode = "decimal";
+    input.addEventListener("beforeinput", (event) => {
+      if (event.data?.includes("-")) event.preventDefault();
+    });
     input.addEventListener("input", (event) => formatNumericInput(input, input.selectionStart, event));
   }
 
@@ -1682,13 +1681,24 @@
           )
           : "";
       };
+      const clampBonusPercent = () => {
+        const percent = numberValue(bonusPercentInput);
+        if (percent === null || percent <= 100) return;
+        bonusPercentInput.value = "100";
+        formatNumericInput(bonusPercentInput, bonusPercentInput.value.length);
+        syncFixedFromPercent();
+        updateDepositSummary();
+      };
       amountInput.addEventListener("input", syncFixedFromPercent);
       bonusPercentInput.addEventListener("input", syncFixedFromPercent);
+      bonusPercentInput.addEventListener("input", clampBonusPercent);
       bonusInput.addEventListener("input", () => {
         const amount = numberValue(amountInput);
         const bonus = numberValue(bonusInput);
         const percent = amount > 0 && bonus != null ? (bonus / amount * 100).toFixed(2) : "";
-        bonusPercentInput.value = percent === "" ? "" : formatBalance(Number(percent));
+        bonusPercentInput.value = percent === ""
+          ? ""
+          : formatBalance(Math.min(Number(percent), 100));
       });
       amountInput.addEventListener("input", updateDepositSummary);
       bonusPercentInput.addEventListener("input", updateDepositSummary);
@@ -1792,8 +1802,7 @@
         .filter((input) => input?.value);
       const hasInvalidOptionalValue = numericFields.some((input) => {
         const value = numericInputValue(input);
-        return normalizeNumericInput(input.value).negative ||
-          value === null || value < 0 || !hasValidInputPrecision(input);
+        return value === null || value < 0 || !hasValidInputPrecision(input);
       });
       if (numericAmount === null || numericAmount <= 0 || !hasValidInputPrecision(amountInput) ||
         hasInvalidOptionalValue) {
