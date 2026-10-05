@@ -35,6 +35,16 @@
       remoteCreateDestinations = Array.isArray(changes.remoteCreateDestinations.newValue)
         ? changes.remoteCreateDestinations.newValue
         : [];
+      const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+      if (balanceHost) {
+        setAgentBalancePanelWidth(
+          balanceHost,
+          agentBalanceView === "minimized",
+          Object.keys(agentBalanceErrors).length > 0
+        );
+        void refreshAgentBalance(balanceHost);
+        void refreshMultiPanelAgentBalance(balanceHost);
+      }
     }
     if (areaName !== "local" || (!changes.ganamosSuffix && !changes.multiPanelSuffix)) return;
     const ganamos = changes.ganamosSuffix?.newValue ?? platformSuffixes.ganamos;
@@ -390,6 +400,12 @@
     return AGENT_MOVEMENT_VIEWS.includes(view);
   }
 
+  function setAgentBalancePanelWidth(host, minimized, hasErrors) {
+    host.style.width = minimized && !hasErrors
+      ? "28px"
+      : `min(${remoteCreateDestinations.length ? 420 : 210}px, calc(100vw - 56px))`;
+  }
+
   function selectCurrencyAmount(element) {
     const text = element.firstChild;
     const amount = element.textContent.match(/\$\s*([\d.,]+)/);
@@ -437,9 +453,7 @@
     rows.hidden = hasErrors || view !== "balance";
     movements.hidden = hasErrors || !isAgentMovementView(view);
     errors.hidden = !hasErrors;
-    host.style.width = minimized && !hasErrors
-      ? "28px"
-      : "min(210px, calc(100vw - 56px))";
+    setAgentBalancePanelWidth(host, minimized, hasErrors);
     if (view === "balance" || view === "daily" || view === "weekly") {
       toggle.replaceChildren(createStatisticsIcon());
     } else {
@@ -463,9 +477,7 @@
     card.querySelector(".agent-balance-rows").hidden = hasErrors || agentBalanceView !== "balance";
     card.querySelector(".agent-movement-view").hidden = hasErrors ||
       !isAgentMovementView(agentBalanceView);
-    host.style.width = agentBalanceView === "minimized" && !hasErrors
-      ? "28px"
-      : "min(210px, calc(100vw - 56px))";
+    setAgentBalancePanelWidth(host, agentBalanceView === "minimized", hasErrors);
     errors.replaceChildren();
 
     for (const [platform, message] of entries) {
@@ -496,6 +508,49 @@
     if (message) agentBalanceErrors[platform] = message;
     else delete agentBalanceErrors[platform];
     updateAgentBalanceErrors(host);
+  }
+
+  async function getConfiguredRemoteBalanceDestinations(host) {
+    const { remoteCreateDestinations: destinations } =
+      await chrome.storage.local.get("remoteCreateDestinations");
+    remoteCreateDestinations = Array.isArray(destinations)
+      ? destinations.filter((destination) =>
+        typeof destination?.id === "string" && typeof destination.name === "string")
+      : [];
+    setAgentBalancePanelWidth(
+      host,
+      agentBalanceView === "minimized",
+      Object.keys(agentBalanceErrors).length > 0
+    );
+    return remoteCreateDestinations;
+  }
+
+  async function renderRemoteAgentBalances(host, platform, label, amount, destinations) {
+    const results = await Promise.all(destinations.map(async (destination) => {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: "REMOTE_AGENT_BALANCE_REQUEST",
+          data: { destinationId: destination.id, platform }
+        });
+        if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el balance.");
+        const balance = Number(response.balance);
+        if (!Number.isFinite(balance)) throw new Error("La PC devolvió un balance no numérico.");
+        return { destination, balance, error: null };
+      } catch (error) {
+        return { destination, balance: null, error: error.message || "Error al consultar el balance." };
+      }
+    }));
+
+    setAgentBalanceError(host, platform);
+    const readings = results.map(({ balance, error }) =>
+      balance === null ? "Error" : `$${formatCurrency(balance)}`);
+    const names = results.map(({ destination }) => destination.name);
+    const failures = results.filter(({ error }) => error);
+    amount.classList.toggle("agent-balance-error", failures.length > 0);
+    amount.textContent = readings.join(" / ");
+    amount.title = results.map(({ destination, balance, error }) =>
+      `${destination.name}: ${error || `$${formatCurrency(balance)}`}`).join("\n");
+    label.title = `${platform === "ganamos" ? "Ganamos" : "MultiPanel"}: ${names.join(" / ")}`;
   }
 
   async function renderAgentMovements(host, view = agentBalanceView) {
@@ -1149,6 +1204,11 @@
     amount.title = label.title;
     amount.textContent = "Actualizando...";
     try {
+      const destinations = await getConfiguredRemoteBalanceDestinations(host);
+      if (destinations.length) {
+        await renderRemoteAgentBalances(host, "ganamos", label, amount, destinations);
+        return;
+      }
       const response = await chrome.runtime.sendMessage({ type: "AGENT_BALANCE_REQUEST" });
       if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el balance del agente.");
       setAgentBalanceError(host, "ganamos");
@@ -1183,6 +1243,11 @@
     amount.title = label.title;
     amount.textContent = "Actualizando...";
     try {
+      const destinations = await getConfiguredRemoteBalanceDestinations(host);
+      if (destinations.length) {
+        await renderRemoteAgentBalances(host, "multipanel", label, amount, destinations);
+        return;
+      }
       const response = await chrome.runtime.sendMessage({ type: "MULTIPANEL_AGENT_BALANCE_REQUEST" });
       if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el balance del agente MultiPanel.");
       setAgentBalanceError(host, "multipanel");
@@ -2093,10 +2158,6 @@
       placeholderOption.value = "";
       placeholderOption.textContent = "Elegí una computadora";
       destinationSelect.append(placeholderOption);
-      const localOption = document.createElement("option");
-      localOption.value = "local";
-      localOption.textContent = "Esta PC";
-      destinationSelect.append(localOption);
       for (const destination of destinations) {
         const option = document.createElement("option");
         option.value = destination.id;
@@ -2231,9 +2292,7 @@
             data: {
               platform: selectedPlatform,
               username,
-              ...(selectedDestinationId && selectedDestinationId !== "local"
-                ? { destinationId: selectedDestinationId }
-                : {})
+              ...(selectedDestinationId ? { destinationId: selectedDestinationId } : {})
             }
           });
           if (response?.usernameExists) {

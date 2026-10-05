@@ -850,28 +850,33 @@ function getRemoteCreateOrigin(value) {
   return url.origin;
 }
 
-async function sendRemoteCreateUserRequest(data) {
-  if (!["ganamos", "multipanel"].includes(data?.platform) ||
-    typeof data.username !== "string") {
-    throw new Error("La plataforma o el nombre de usuario para creación remota no son válidos.");
-  }
+async function sendRemoteOperation(destinationId, message, timeoutMs = 95_000) {
   const stored = await chrome.storage.local.get("remoteCreateDestinations");
   const destination = (Array.isArray(stored.remoteCreateDestinations)
     ? stored.remoteCreateDestinations
-    : []).find((item) => item?.id === data.destinationId);
+    : []).find((item) => item?.id === destinationId);
   if (!destination) throw new Error("La PC elegida no está configurada en las opciones de la extensión.");
 
   const origin = getRemoteCreateOrigin(destination.url);
   if (typeof destination.token !== "string" || !/^[A-Za-z0-9_-]{40,64}$/.test(destination.token)) {
-    throw new Error(`El código de creación remota de ${destination.name || "la PC destino"} no es válido.`);
+    throw new Error(`El código remoto de ${destination.name || "la PC destino"} no es válido.`);
   }
-  const suffix = data.platform === "ganamos"
-    ? destination.ganamosSuffix
-    : destination.multiPanelSuffix;
-  if (!/^[a-z]$/i.test(suffix || "") ||
-    !new RegExp(`^[a-z0-9]+${suffix}+$`, "i").test(data.username) ||
-    data.username.length > 64) {
-    throw new Error(`El usuario no cumple el sufijo configurado para ${destination.name || "la PC destino"}.`);
+  if (message.type === "CREATE_USER_REQUEST") {
+    if (!["ganamos", "multipanel"].includes(message.data?.platform) ||
+      typeof message.data.username !== "string") {
+      throw new Error("La plataforma o el nombre de usuario para creación remota no son válidos.");
+    }
+    const suffix = message.data.platform === "ganamos"
+      ? destination.ganamosSuffix
+      : destination.multiPanelSuffix;
+    if (!/^[a-z]$/i.test(suffix || "") ||
+      !new RegExp(`^[a-z0-9]+${suffix}+$`, "i").test(message.data.username) ||
+      message.data.username.length > 64) {
+      throw new Error(`El usuario no cumple el sufijo configurado para ${destination.name || "la PC destino"}.`);
+    }
+  } else if (!["AGENT_BALANCE_REQUEST", "MULTIPANEL_AGENT_BALANCE_REQUEST"].includes(message.type) ||
+    message.data !== undefined) {
+    throw new Error("La operación remota no está permitida.");
   }
 
   const targetUrl = new URL(origin);
@@ -885,10 +890,7 @@ async function sendRemoteCreateUserRequest(data) {
   const nonce = crypto.randomUUID();
   const body = JSON.stringify({
     id: crypto.randomUUID(),
-    message: {
-      type: "CREATE_USER_REQUEST",
-      data: { platform: data.platform, username: data.username }
-    }
+    message
   });
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
@@ -907,9 +909,9 @@ async function sendRemoteCreateUserRequest(data) {
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 95_000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${origin}/v1/remote-create-user`, {
+    const response = await fetch(`${origin}/v1/remote-operation`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -944,7 +946,7 @@ async function sendRemoteCreateUserRequest(data) {
       signaturesMatch = responseSignature.charCodeAt(index) === expectedHex.charCodeAt(index);
     }
     if (!signaturesMatch) {
-      throw new Error("No se pudo verificar la respuesta firmada de la PC destino. Comprobá allí si el usuario se creó antes de volver a intentarlo.");
+      throw new Error("No se pudo verificar la respuesta firmada de la PC destino.");
     }
     try {
       return JSON.parse(responseBody);
@@ -953,7 +955,7 @@ async function sendRemoteCreateUserRequest(data) {
     }
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error("Se agotó el tiempo de espera de la PC destino. Verificá si el usuario se creó antes de volver a intentarlo.");
+      throw new Error("Se agotó el tiempo de espera de la PC destino.");
     }
     if (error instanceof TypeError) {
       throw new Error(`No se pudo conectar con ${destination.name || "la PC destino"}. Verificá el bridge, la dirección y el firewall de red privada.`);
@@ -962,6 +964,23 @@ async function sendRemoteCreateUserRequest(data) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function sendRemoteCreateUserRequest(data) {
+  return sendRemoteOperation(data.destinationId, {
+    type: "CREATE_USER_REQUEST",
+    data: { platform: data.platform, username: data.username }
+  });
+}
+
+async function getRemoteAgentBalance(data) {
+  if (!["ganamos", "multipanel"].includes(data?.platform)) {
+    throw new Error("Plataforma no válida para consultar el balance remoto.");
+  }
+  const messageType = data.platform === "ganamos"
+    ? "AGENT_BALANCE_REQUEST"
+    : "MULTIPANEL_AGENT_BALANCE_REQUEST";
+  return sendRemoteOperation(data.destinationId, { type: messageType }, 25_000);
 }
 
 function validateApiMessage(message, suffixes) {
@@ -1090,6 +1109,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendRemoteCreateUserRequest(message.data)
       .then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo crear el usuario en la PC destino." }));
+    return true;
+  }
+
+  if (message?.type === "REMOTE_AGENT_BALANCE_REQUEST") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud no válida o enviada desde una página no autorizada." });
+      return;
+    }
+    getRemoteAgentBalance(message.data || {})
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo consultar el balance remoto." }));
     return true;
   }
 

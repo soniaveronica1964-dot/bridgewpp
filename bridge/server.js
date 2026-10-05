@@ -301,11 +301,14 @@ async function handleRequest(request, response) {
   sendJson(response, 404, { ok: false, error: "Ruta de puente desconocida." }, origin);
 }
 
-function validateRemoteCreateMessage(message) {
-  return message?.type === "CREATE_USER_REQUEST" &&
-    ["ganamos", "multipanel"].includes(message.data?.platform) &&
-    typeof message.data?.username === "string" &&
-    /^[a-z0-9]{2,64}$/i.test(message.data.username);
+function validateRemoteMessage(message) {
+  if (message?.type === "CREATE_USER_REQUEST") {
+    return ["ganamos", "multipanel"].includes(message.data?.platform) &&
+      typeof message.data?.username === "string" &&
+      /^[a-z0-9]{2,64}$/i.test(message.data.username);
+  }
+  return ["AGENT_BALANCE_REQUEST", "MULTIPANEL_AGENT_BALANCE_REQUEST"]
+    .includes(message?.type) && message.data === undefined;
 }
 
 async function handleRemoteCreateRequest(request, response) {
@@ -335,8 +338,8 @@ async function handleRemoteCreateRequest(request, response) {
   }
 
   const url = new URL(request.url, `http://${REMOTE_CREATE_HOST}:${REMOTE_CREATE_PORT}`);
-  if (url.pathname !== "/v1/remote-create-user" || request.method !== "POST") {
-    sendJson(response, 404, { ok: false, error: "Ruta de creación remota desconocida." }, origin);
+  if (url.pathname !== "/v1/remote-operation" || request.method !== "POST") {
+    sendJson(response, 404, { ok: false, error: "Ruta remota desconocida." }, origin);
     return;
   }
 
@@ -361,8 +364,8 @@ async function handleRemoteCreateRequest(request, response) {
     typeof nonce !== "string" || !/^[a-f0-9-]{36}$/i.test(nonce) ||
     typeof suppliedSignature !== "string" ||
     typeof body?.id !== "string" || !/^[a-f0-9-]{36}$/i.test(body.id) ||
-    !validateRemoteCreateMessage(body.message) || pendingRequests.has(body.id)) {
-    sendJson(response, 400, { ok: false, error: "Solicitud remota de creación inválida." }, origin);
+    !validateRemoteMessage(body.message) || pendingRequests.has(body.id)) {
+    sendJson(response, 400, { ok: false, error: "Solicitud remota inválida." }, origin);
     return;
   }
 
@@ -388,15 +391,15 @@ async function handleRemoteCreateRequest(request, response) {
     return;
   }
 
-  const task = {
-    id: body.id,
-    message: {
-      type: "CREATE_USER_REQUEST",
-      data: {
-        platform: body.message.data.platform,
-        username: body.message.data.username
+  const task = { id: body.id, message: body.message.type === "CREATE_USER_REQUEST"
+    ? {
+        type: "CREATE_USER_REQUEST",
+        data: {
+          platform: body.message.data.platform,
+          username: body.message.data.username
+        }
       }
-    }
+    : { type: body.message.type }
   };
   const result = await new Promise((resolve) => {
     const timeout = setTimeout(() => {
