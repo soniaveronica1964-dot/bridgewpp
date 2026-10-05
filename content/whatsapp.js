@@ -2554,7 +2554,7 @@
         }
         for (const username of names) {
           if (typeof username === "string" && username.includes(digits)) {
-            namesByPlatform.push({ username, platform, label });
+            namesByPlatform.push({ username, platform });
           }
         }
       }

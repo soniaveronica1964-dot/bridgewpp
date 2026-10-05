@@ -164,6 +164,9 @@ async function findGanamosUsersByDigits(digits) {
       is_direct_structure: "false"
     });
     const payload = await requestGanamosJson(`/api/agent_admin/user/?${params}`);
+    if (payload?.status !== 0) {
+      throw new Error(payload?.error_message || "Ganamos no pudo buscar usuarios.");
+    }
     const pageRecords = extractUserRecords(payload);
     let newRecords = 0;
     for (const record of pageRecords) {
