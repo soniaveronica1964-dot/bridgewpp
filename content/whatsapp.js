@@ -403,7 +403,7 @@
   function setAgentBalancePanelWidth(host, minimized, hasErrors) {
     host.style.width = minimized && !hasErrors
       ? "28px"
-      : "min(210px, calc(100vw - 56px))";
+      : "min(270px, calc(100vw - 56px))";
   }
 
   function selectCurrencyAmount(element) {
@@ -1087,7 +1087,7 @@
     host.id = AGENT_BALANCE_HOST_ID;
     host.style.left = "68px";
     host.style.top = "2px";
-    host.style.width = "min(210px, calc(100vw - 56px))";
+    host.style.width = "min(270px, calc(100vw - 56px))";
     host.style.visibility = "hidden";
 
     const shadow = host.attachShadow({ mode: "open" });

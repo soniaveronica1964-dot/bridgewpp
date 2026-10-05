@@ -311,6 +311,15 @@
   background: #167356;
 }
 
+.destination-selector button:hover:not(:disabled) {
+  border-color: #00a884;
+  background: #263f38;
+}
+
+.destination-selector button[aria-pressed="true"]:hover:not(:disabled) {
+  background: #167356;
+}
+
 .destination-selector button:disabled {
   color: #718080;
   background: #182020;
