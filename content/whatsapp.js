@@ -2627,8 +2627,7 @@
       console.error("[Ganamos balance extension] No se pudieron buscar usuarios por los últimos cuatro números.", error);
       const failure = document.createElement("div");
       failure.className = "contact-user-search-error";
-      failure.textContent = "No se pudo completar la búsqueda de usuarios.";
-      failure.title = error.message || "Error de búsqueda.";
+      failure.textContent = `No se pudo completar la búsqueda: ${error.message || "error desconocido."}`;
       resultsContainer.append(failure);
     }
     if (isCurrentContact()) section.hidden = resultsContainer.childElementCount === 0;

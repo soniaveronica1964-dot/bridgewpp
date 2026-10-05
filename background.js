@@ -1096,7 +1096,7 @@ async function getRemoteUserSearch(data) {
   return sendRemoteOperation(data.destinationId, {
     type: "USER_SEARCH_REQUEST",
     data: { digits: data.digits }
-  }, 45_000);
+  }, 95_000);
 }
 
 function validateApiMessage(message, suffixes) {

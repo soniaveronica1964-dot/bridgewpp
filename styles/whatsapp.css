@@ -143,6 +143,7 @@
   background: rgb(0 0 0 / 80%);
   font-size: 13px;
   overflow-wrap: anywhere;
+  text-align: center;
 }
 
 .contact-user-search[hidden] {
