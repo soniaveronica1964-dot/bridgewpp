@@ -32,8 +32,11 @@ const CREDENTIALS_PATH = path.join(DATA_DIRECTORY, "credentials.json");
 let credentials;
 let primaryLastSeen = 0;
 let remoteCreateActive = false;
+let activeBonusConfig = null;
+let activeBonusRevision = 0;
 const queuedRequests = [];
 const waitingPolls = [];
+const waitingBonusConfigPolls = [];
 const pendingRequests = new Map();
 const remoteNonces = new Map();
 
@@ -172,6 +175,71 @@ function waitForTask(response, origin) {
   });
 }
 
+function validateActiveBonusConfig(config) {
+  if (config === null) return true;
+  if (!config || typeof config !== "object" || typeof config.enabled !== "boolean") return false;
+  const isPercent = (value) => typeof value === "number" &&
+    Number.isFinite(value) && value >= 0 && value <= 100;
+  if (config.type === "none") return !config.enabled;
+  const isConfiguredPercent = (value) => config.enabled
+    ? isPercent(value)
+    : value === null || value === undefined || isPercent(value);
+  if (config.type === "simple") return isConfiguredPercent(config.percent);
+  if (config.type === "double") {
+    return isConfiguredPercent(config.ganamos) && isConfiguredPercent(config.multipanel);
+  }
+  if (config.type === "specific") {
+    return ["ganamos", "multipanel"].includes(config.platform) &&
+      isConfiguredPercent(config.percent);
+  }
+  if (config.type === "special") {
+    return isConfiguredPercent(config.underThreshold) &&
+      isConfiguredPercent(config.overThreshold);
+  }
+  if (config.type !== "mysterious") return false;
+  if (config.outcomes === undefined) return true;
+  if (!Array.isArray(config.outcomes) || !config.outcomes.length) return false;
+  const percentages = new Set();
+  let totalWeight = 0;
+  for (const outcome of config.outcomes) {
+    if (!isPercent(outcome?.percent) || !Number.isSafeInteger(outcome.weight) ||
+      outcome.weight < 0 || percentages.has(outcome.percent)) return false;
+    percentages.add(outcome.percent);
+    totalWeight += outcome.weight;
+    if (!Number.isSafeInteger(totalWeight)) return false;
+  }
+  return totalWeight > 0;
+}
+
+function getActiveBonusConfigUpdate() {
+  return { ok: true, changed: true, revision: activeBonusRevision, config: activeBonusConfig };
+}
+
+function waitForActiveBonusConfig(response, origin, revision) {
+  if (revision !== activeBonusRevision) {
+    sendJson(response, 200, getActiveBonusConfigUpdate(), origin);
+    return;
+  }
+  const poll = {
+    finish: () => sendJson(response, 200, getActiveBonusConfigUpdate(), origin),
+    timer: setTimeout(() => {
+      const index = waitingBonusConfigPolls.indexOf(poll);
+      if (index !== -1) waitingBonusConfigPolls.splice(index, 1);
+      sendJson(response, 200, {
+        ok: true,
+        changed: false,
+        revision: activeBonusRevision
+      }, origin);
+    }, POLL_TIMEOUT_MS)
+  };
+  waitingBonusConfigPolls.push(poll);
+  response.on("close", () => {
+    clearTimeout(poll.timer);
+    const index = waitingBonusConfigPolls.indexOf(poll);
+    if (index !== -1) waitingBonusConfigPolls.splice(index, 1);
+  });
+}
+
 async function handleRequest(request, response) {
   const origin = request.headers.origin || "";
   if (!isLoopback(request.socket.remoteAddress)) {
@@ -216,6 +284,49 @@ async function handleRequest(request, response) {
       ok: true,
       primaryOnline: Date.now() - primaryLastSeen < 45_000
     }, origin);
+    return;
+  }
+
+  if (url.pathname === "/v1/bonus-config" && request.method === "GET") {
+    if (role !== "client") {
+      sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden recibir la configuración." }, origin);
+      return;
+    }
+    const revision = Number(url.searchParams.get("revision") || 0);
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+      sendJson(response, 400, { ok: false, error: "Versión de configuración no válida." }, origin);
+      return;
+    }
+    waitForActiveBonusConfig(response, origin, revision);
+    return;
+  }
+
+  if (url.pathname === "/v1/bonus-config" && request.method === "POST") {
+    if (role !== "primary") {
+      sendJson(response, 403, { ok: false, error: "Solo el perfil principal puede publicar la configuración." }, origin);
+      return;
+    }
+    let body;
+    try {
+      body = await readJson(request);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message }, origin);
+      return;
+    }
+    if (!Object.hasOwn(body || {}, "config") || !validateActiveBonusConfig(body.config)) {
+      sendJson(response, 400, { ok: false, error: "Configuración de bono activo no válida." }, origin);
+      return;
+    }
+    const serializedConfig = JSON.stringify(body.config);
+    if (serializedConfig !== JSON.stringify(activeBonusConfig)) {
+      activeBonusConfig = body.config === null ? null : JSON.parse(serializedConfig);
+      activeBonusRevision += 1;
+      for (const poll of waitingBonusConfigPolls.splice(0)) {
+        clearTimeout(poll.timer);
+        poll.finish();
+      }
+    }
+    sendJson(response, 200, { ok: true, revision: activeBonusRevision }, origin);
     return;
   }
 

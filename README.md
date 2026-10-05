@@ -18,6 +18,8 @@ Los botones compactos de la franja superior del panel del contacto permiten cons
 
 Los campos numéricos de los formularios muestran puntos como separadores de miles y coma decimal al escribir; los saldos y resúmenes usan el mismo formato. Los valores se normalizan antes de calcular o enviarse a las API.
 
+El botón de regalo de la barra lateral permite configurar un bono automático para depósitos. Los tipos **Ninguno**, **Simple**, **Doble**, **Específico**, **Especial (+$10K)** y **Misterioso** se seleccionan desde una columna lateral separada del formulario. Ninguno desactiva la precarga automática; Simple usa un porcentaje fijo; Doble permite uno por plataforma; Específico lo limita a una plataforma; Especial cambia de porcentaje al alcanzar los $10.000; y Misterioso sortea un porcentaje según resultados editables, presentados de a dos por fila. Cada peso indica su probabilidad relativa a la suma de los pesos configurados; los valores predeterminados conservan las proporciones originales. Se pueden agregar y eliminar resultados. La configuración incluye atajos de porcentaje y usa un color identificativo por tipo. El porcentaje se puede cambiar o borrar manualmente en cada depósito.
+
 ## Instalación
 
 1. Guardá todos los archivos de esta carpeta.
@@ -38,6 +40,8 @@ El puente local permite que un perfil principal, con Ganamos y MultiPanel abiert
 3. Abrí `%LOCALAPPDATA%\GanamosWhatsAppBridge\credentials.json` desde el menú del ícono. En las opciones de la extensión del perfil principal, elegí **Principal** y copiá el valor `primaryToken`.
 4. En cada perfil secundario, instalá la misma extensión. En sus opciones elegí **Secundario** y pegá el `clientToken` del mismo archivo.
 5. Recargá WhatsApp Web en todos los perfiles. El principal debe mantener WhatsApp Web abierto para atender las solicitudes; la app de bandeja mantiene el bridge activo, pero no inicia Chrome ni crea las sesiones de las plataformas.
+
+La configuración del bono activo que se guarda en el perfil principal se sincroniza automáticamente con los perfiles secundarios que usan ese `clientToken` y tienen WhatsApp Web abierto. Los secundarios reciben también los cambios mientras permanecen conectados.
 
 ## Crear usuarios en otra PC
 

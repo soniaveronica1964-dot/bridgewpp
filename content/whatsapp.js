@@ -1,13 +1,26 @@
 (() => {
   const HOST_ID = "ganamos-balance-extension";
   const AGENT_BALANCE_HOST_ID = "ganamos-agent-balance";
+  const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
+  const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
   const TOAST_HOST_ID = "ganamos-toast-host";
   const AGENT_MOVEMENT_PREFIX = "agentMovement:";
   const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "weekly", "monthly", "total"];
   const AGENT_MOVEMENT_VIEWS = ["daily", "weekly", "monthly", "total"];
+  const ACTIVE_BONUS_TYPES = ["none", "simple", "double", "specific", "special", "mysterious"];
+  const MYSTERIOUS_BONUS_WEIGHTS = [
+    [15, 2],
+    [20, 6],
+    [25, 9],
+    [30, 16],
+    [35, 9],
+    [40, 6],
+    [50, 2]
+  ];
   let scheduled = false;
   let activeAccountsKey = null;
   let selectingAgentBalanceText = false;
+  let selectingContactUserText = false;
   let agentBalanceLoading = false;
   let multiPanelAgentBalanceLoading = false;
   let agentBalanceView = "balance";
@@ -31,6 +44,17 @@
     .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar los sufijos de plataformas.", error));
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes.activeBonusConfig) {
+      const bonusHost = document.getElementById(ACTIVE_BONUS_HOST_ID);
+      if (bonusHost) {
+        void readActiveBonusConfig()
+          .then((config) => updateActiveBonusButton(bonusHost, config))
+          .catch((error) => console.error(
+            "[Ganamos balance extension] No se pudo actualizar el indicador del bono activo.",
+            error
+          ));
+      }
+    }
     if (areaName === "local" && changes.remoteCreateDestinations) {
       remoteCreateDestinations = Array.isArray(changes.remoteCreateDestinations.newValue)
         ? changes.remoteCreateDestinations.newValue
@@ -74,7 +98,7 @@
     return Boolean(element && element.getClientRects().length);
   }
 
-  function isActuallyVisible(element) {
+  function isRenderedVisible(element) {
     if (!element || !element.getClientRects().length) return false;
     for (let current = element; current instanceof Element; current = current.parentElement) {
       const style = getComputedStyle(current);
@@ -104,6 +128,12 @@
       return false;
     }
 
+    return true;
+  }
+
+  function isActuallyVisible(element) {
+    if (!isRenderedVisible(element)) return false;
+    const rect = element.getBoundingClientRect();
     const hitTarget = document.elementFromPoint(
       Math.min(rect.right - 1, Math.max(rect.left + 1, rect.left + rect.width / 2)),
       Math.min(rect.bottom - 1, Math.max(rect.top + 1, rect.top + rect.height / 2))
@@ -333,6 +363,87 @@
     return Number.isFinite(value) ? value : null;
   }
 
+  function isValidBonusPercent(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
+  }
+
+  function validateMysteriousBonusOutcomes(outcomes) {
+    if (!Array.isArray(outcomes) || outcomes.length === 0) return false;
+    const seenPercentages = new Set();
+    let totalWeight = 0;
+    for (const outcome of outcomes) {
+      if (!outcome || !isValidBonusPercent(outcome.percent) ||
+        !Number.isSafeInteger(outcome.weight) || outcome.weight < 0 ||
+        seenPercentages.has(outcome.percent)) return false;
+      seenPercentages.add(outcome.percent);
+      totalWeight += outcome.weight;
+      if (!Number.isSafeInteger(totalWeight)) return false;
+    }
+    return totalWeight > 0;
+  }
+
+  function validateActiveBonusConfig(config) {
+    if (!config || typeof config !== "object" ||
+      typeof config.enabled !== "boolean" || !ACTIVE_BONUS_TYPES.includes(config.type)) return null;
+    if (config.type === "none") return config;
+    const isPercentValid = (value) => value === null || isValidBonusPercent(value);
+    const isConfiguredPercent = (value) =>
+      isPercentValid(value) && (!config.enabled || isValidBonusPercent(value));
+    if (config.type === "simple" && isConfiguredPercent(config.percent)) return config;
+    if (config.type === "double" &&
+      isConfiguredPercent(config.ganamos) && isConfiguredPercent(config.multipanel)) return config;
+    if (config.type === "specific" && ["ganamos", "multipanel"].includes(config.platform) &&
+      isConfiguredPercent(config.percent)) return config;
+    if (config.type === "special" &&
+      isConfiguredPercent(config.underThreshold) && isConfiguredPercent(config.overThreshold)) return config;
+    if (config.type === "mysterious" &&
+      (config.outcomes === undefined || validateMysteriousBonusOutcomes(config.outcomes))) return config;
+    return null;
+  }
+
+  async function readActiveBonusConfig() {
+    const stored = await chrome.storage.local.get(ACTIVE_BONUS_CONFIG_KEY);
+    const config = stored[ACTIVE_BONUS_CONFIG_KEY];
+    if (config == null) return null;
+    const validated = validateActiveBonusConfig(config);
+    if (!validated) throw new Error("La configuración del bono activo no es válida.");
+    const requiredKeys = {
+      none: [],
+      simple: ["percent"],
+      double: ["ganamos", "multipanel"],
+      specific: ["percent"],
+      special: ["underThreshold", "overThreshold"],
+      mysterious: []
+    }[validated.type];
+    const hasRequiredPercents = requiredKeys.every((key) =>
+      isValidBonusPercent(validated[key]));
+    return {
+      ...validated,
+      enabled: validated.type !== "none" && (validated.enabled || hasRequiredPercents)
+    };
+  }
+
+  function getMysteriousBonusOutcomes(config) {
+    return Array.isArray(config?.outcomes)
+      ? config.outcomes
+      : MYSTERIOUS_BONUS_WEIGHTS.map(([percent, weight]) => ({ percent, weight }));
+  }
+
+  function chooseMysteriousBonusPercent(config) {
+    const outcomes = getMysteriousBonusOutcomes(config);
+    const totalWeight = outcomes.reduce((total, outcome) => total + outcome.weight, 0);
+    const roll = Math.random() * totalWeight;
+    let cumulativeWeight = 0;
+    for (const outcome of outcomes) {
+      cumulativeWeight += outcome.weight;
+      if (roll < cumulativeWeight) return outcome.percent;
+    }
+    for (let index = outcomes.length - 1; index >= 0; index -= 1) {
+      if (outcomes[index].weight > 0) return outcomes[index].percent;
+    }
+    throw new Error("El sorteo misterioso no tiene pesos válidos.");
+  }
+
   function createAmountShortcuts(input) {
     const shortcuts = document.createElement("div");
     shortcuts.className = "amount-shortcuts";
@@ -363,21 +474,30 @@
     shortcuts.className = "amount-shortcuts";
     shortcuts.setAttribute("role", "group");
     shortcuts.setAttribute("aria-label", "Elegir porcentaje de bono");
+    const updateSelection = () => {
+      const selectedPercentage = numericInputValue(input);
+      for (const button of shortcuts.querySelectorAll("button")) {
+        button.setAttribute("aria-pressed", String(Number(button.dataset.percentage) === selectedPercentage));
+      }
+    };
     for (const percentage of [20, 30, 40, 50, 60]) {
       const button = document.createElement("button");
       button.type = "button";
+      button.dataset.percentage = String(percentage);
       const buttonLabel = document.createElement("span");
       buttonLabel.textContent = `${percentage}%`;
       button.append(buttonLabel);
       button.setAttribute("aria-label", `Usar ${percentage}%`);
+      button.setAttribute("aria-pressed", "false");
       button.addEventListener("click", () => {
-        input.value = String(percentage);
+        input.value = numericInputValue(input) === percentage ? "" : String(percentage);
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.focus();
       });
       shortcuts.append(button);
     }
-    return shortcuts;
+    input.addEventListener("input", updateSelection);
+    return { element: shortcuts, updateSelection };
   }
 
   function numericInputString(input) {
@@ -414,6 +534,443 @@
     host.style.width = minimized && !hasErrors
       ? "28px"
       : `min(${hasRemoteDestinations ? 320 : 230}px, calc(100vw - 56px))`;
+  }
+
+  function updateActiveBonusButton(host, config) {
+    const button = host.shadowRoot?.querySelector(".active-bonus-button");
+    const percentLabel = host.shadowRoot?.querySelector(".active-bonus-percent-label");
+    const label = host.shadowRoot?.querySelector(".active-bonus-type-label");
+    if (!button || !percentLabel || !label) return;
+    const enabled = Boolean(config?.enabled && config.type !== "none");
+    const bonusPercentages = {
+      simple: `${config?.percent}%`,
+      double: `${config?.ganamos}/${config?.multipanel}%`,
+      specific: `${config?.percent}%`,
+      special: `${config?.underThreshold}/${config?.overThreshold}%`,
+      mysterious: "?%"
+    };
+    const bonusNames = {
+      simple: "Simple",
+      double: "Doble",
+      specific: config?.platform === "multipanel" ? "MultiPanel" : "Ganamos",
+      special: "Especial",
+      mysterious: "Misterioso"
+    };
+    const bonusName = enabled ? bonusNames[config.type] : "Sin bono";
+    host.dataset.bonusType = enabled ? config.type : "none";
+    if (enabled && config.type === "specific") host.dataset.platform = config.platform;
+    else delete host.dataset.platform;
+    percentLabel.textContent = enabled ? bonusPercentages[config.type] : "";
+    label.textContent = bonusName;
+    button.setAttribute("aria-pressed", String(enabled));
+    button.title = enabled ? `Configurar bono activo: ${bonusName}` : "Colocar bono activo";
+    button.setAttribute("aria-label", button.title);
+  }
+
+  async function openActiveBonusDialog(host) {
+    let savedConfig = null;
+    try {
+      savedConfig = await readActiveBonusConfig();
+    } catch (error) {
+      console.error("[Ganamos balance extension] No se pudo cargar la configuración del bono activo.", error);
+      showToast(host, "Bono activo", error.message || "No se pudo cargar la configuración.", "error");
+      return;
+    }
+
+    const root = host.shadowRoot?.querySelector(".active-bonus-dialog-root");
+    if (!root) return;
+    root.replaceChildren();
+
+    const modal = document.createElement("div");
+    modal.className = "modal";
+    modal.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      root.replaceChildren();
+    }, true);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) root.replaceChildren();
+    });
+
+    const dialog = document.createElement("form");
+    dialog.className = "dialog active-bonus-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const title = document.createElement("h2");
+    title.textContent = "Colocar bono activo";
+    const typeSelector = document.createElement("div");
+    typeSelector.className = "active-bonus-type-selector";
+    typeSelector.setAttribute("role", "group");
+    typeSelector.setAttribute("aria-label", "Tipo de bono");
+    const bonusTypes = [
+      ["none", "Ninguno"],
+      ["simple", "Simple"],
+      ["double", "Doble"],
+      ["specific", "Específico"],
+      ["special", "Especial (+$10K)"],
+      ["mysterious", "Misterioso"]
+    ];
+    let selectedBonusType = savedConfig?.type || "simple";
+    for (const [value, label] of bonusTypes) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "active-bonus-type-button";
+      button.dataset.type = value;
+      button.textContent = label;
+      button.setAttribute("aria-pressed", String(value === selectedBonusType));
+      button.addEventListener("click", () => {
+        selectedBonusType = value;
+        updateTypeFields();
+      });
+      typeSelector.append(button);
+    }
+    dialog.dataset.bonusType = selectedBonusType;
+    const fields = document.createElement("div");
+    fields.className = "active-bonus-fields";
+    const content = document.createElement("div");
+    content.className = "active-bonus-content";
+    const percentInputs = {};
+    const createPercentField = (key, labelText) => {
+      const field = document.createElement("div");
+      field.className = "active-bonus-percent-field";
+      const label = document.createElement("label");
+      label.textContent = labelText;
+      const input = document.createElement("input");
+      configureNumericInput(input);
+      input.inputMode = "decimal";
+      input.placeholder = "-";
+      input.id = `${ACTIVE_BONUS_HOST_ID}-${key}`;
+      label.htmlFor = input.id;
+      input.setAttribute("aria-label", labelText);
+      field.append(label, createInputAffix(input, "%", "suffix"));
+      field.append(createPercentageShortcuts(input).element);
+      percentInputs[key] = input;
+      return field;
+    };
+    const groups = {};
+    const createGroup = (type) => {
+      const group = document.createElement("div");
+      group.className = "active-bonus-type-fields";
+      group.dataset.type = type;
+      groups[type] = group;
+      fields.append(group);
+      return group;
+    };
+
+    const noneGroup = createGroup("none");
+    const noneDescription = document.createElement("p");
+    noneDescription.className = "active-bonus-none-description";
+    noneDescription.textContent = "No se aplicará ningún bono automáticamente.";
+    noneGroup.append(noneDescription);
+    createGroup("simple").append(createPercentField("percent", "Porcentaje"));
+    createGroup("double").append(
+      createPercentField("ganamos", "Ganamos"),
+      createPercentField("multipanel", "MultiPanel")
+    );
+
+    const specificGroup = createGroup("specific");
+    const platformLabel = document.createElement("label");
+    platformLabel.className = "active-bonus-platform-field";
+    platformLabel.textContent = "Plataforma";
+    const platformSelect = document.createElement("select");
+    for (const [value, label] of [["ganamos", "Ganamos"], ["multipanel", "MultiPanel"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      platformSelect.append(option);
+    }
+    platformSelect.value = savedConfig?.platform || "ganamos";
+    dialog.dataset.platform = platformSelect.value;
+    platformLabel.append(platformSelect);
+    specificGroup.append(platformLabel, createPercentField("specificPercent", "Porcentaje"));
+    createGroup("special").append(
+      createPercentField("underThreshold", "Menos de $10.000"),
+      createPercentField("overThreshold", "Desde $10.000")
+    );
+    const mysteriousGroup = createGroup("mysterious");
+    const probabilityHeading = document.createElement("p");
+    probabilityHeading.className = "active-bonus-probability-heading";
+    probabilityHeading.textContent = "Probabilidades por depósito";
+    const outcomeList = document.createElement("div");
+    outcomeList.className = "active-bonus-outcome-list";
+    const outcomeRows = [];
+    const updateOutcomeDenominators = () => {
+      const totalWeight = outcomeRows.reduce((total, { weightInput }) =>
+        total + (weightInput.value === "" ? 0 : Number(weightInput.value)), 0);
+      for (const { weightInput } of outcomeRows) {
+        const denominator = weightInput.closest(".input-affix")?.querySelector("span");
+        if (denominator) denominator.textContent = `/${totalWeight}`;
+      }
+    };
+    const addOutcomeRow = (outcome = { percent: null, weight: 0 }) => {
+      const row = document.createElement("div");
+      row.className = "active-bonus-outcome-row";
+      const percentField = document.createElement("span");
+      percentField.className = "active-bonus-outcome-field";
+      const percentInput = document.createElement("input");
+      configureNumericInput(percentInput);
+      percentInput.placeholder = "%";
+      percentInput.setAttribute("aria-label", "Porcentaje del sorteo");
+      percentField.append(createInputAffix(percentInput, "%", "suffix"));
+      const weightField = document.createElement("span");
+      weightField.className = "active-bonus-outcome-field";
+      const weightInput = document.createElement("input");
+      weightInput.type = "number";
+      weightInput.min = "0";
+      weightInput.step = "1";
+      weightInput.value = String(outcome.weight);
+      weightInput.setAttribute("aria-label", "Peso de probabilidad");
+      weightField.append(createInputAffix(weightInput, "/0", "suffix"));
+      weightInput.addEventListener("input", updateOutcomeDenominators);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "active-bonus-outcome-remove";
+      remove.textContent = "×";
+      remove.title = "Eliminar este porcentaje";
+      remove.setAttribute("aria-label", "Eliminar este porcentaje");
+      remove.addEventListener("click", () => {
+        row.remove();
+        outcomeRows.splice(outcomeRows.indexOf(rowData), 1);
+        updateOutcomeDenominators();
+      });
+      const rowData = { row, percentInput, weightInput };
+      if (outcome.percent !== null && outcome.percent !== undefined) {
+        percentInput.value = String(outcome.percent);
+        percentInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      row.append(percentField, weightField, remove);
+      outcomeList.append(row);
+      outcomeRows.push(rowData);
+      updateOutcomeDenominators();
+    };
+    const configuredOutcomes = savedConfig?.type === "mysterious"
+      ? getMysteriousBonusOutcomes(savedConfig)
+      : MYSTERIOUS_BONUS_WEIGHTS.map(([percent, weight]) => ({ percent, weight }));
+    for (const outcome of configuredOutcomes) addOutcomeRow(outcome);
+    const addOutcome = document.createElement("button");
+    addOutcome.type = "button";
+    addOutcome.className = "active-bonus-outcome-add secondary";
+    addOutcome.textContent = "+ Agregar porcentaje";
+    addOutcome.addEventListener("click", () => {
+      addOutcomeRow();
+      outcomeRows[outcomeRows.length - 1].percentInput.focus();
+    });
+    mysteriousGroup.append(probabilityHeading, outcomeList, addOutcome);
+    const updateTypeFields = () => {
+      dialog.dataset.bonusType = selectedBonusType;
+      dialog.classList.toggle("has-mysterious-outcomes", selectedBonusType === "mysterious");
+      for (const [type, group] of Object.entries(groups)) {
+        group.hidden = type !== selectedBonusType;
+      }
+      for (const button of typeSelector.querySelectorAll(".active-bonus-type-button")) {
+        button.setAttribute("aria-pressed", String(button.dataset.type === selectedBonusType));
+      }
+      platformLabel.hidden = selectedBonusType !== "specific";
+    };
+    platformSelect.addEventListener("change", () => {
+      dialog.dataset.platform = platformSelect.value;
+    });
+    updateTypeFields();
+
+    if (savedConfig) {
+      for (const [key, input] of Object.entries(percentInputs)) {
+        const value = key === "specificPercent"
+          ? savedConfig.type === "specific" ? savedConfig.percent : null
+          : savedConfig[key];
+        if (value !== null && value !== undefined) {
+          input.value = String(value);
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      }
+    }
+
+    const error = document.createElement("p");
+    error.className = "active-bonus-error";
+    error.hidden = true;
+    const actions = document.createElement("div");
+    actions.className = "dialog-actions";
+    const actionButtons = document.createElement("div");
+    actionButtons.className = "dialog-action-buttons";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.textContent = "Cancelar";
+    cancel.addEventListener("click", () => root.replaceChildren());
+    const save = document.createElement("button");
+    save.type = "submit";
+    save.textContent = "Guardar";
+    actionButtons.append(cancel, save);
+    actions.append(actionButtons);
+    content.append(fields, error);
+    const formLayout = document.createElement("div");
+    formLayout.className = "active-bonus-layout";
+    formLayout.append(typeSelector, content);
+    dialog.append(title, formLayout, actions);
+    modal.append(dialog);
+    root.append(modal);
+
+    dialog.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      const readPercent = (input) => {
+        if (!input.value) return { value: null, invalid: false };
+        const value = numericInputValue(input);
+        return {
+          value,
+          invalid: value === null || !isValidBonusPercent(value) || !hasValidInputPrecision(input)
+        };
+      };
+      const percentages = Object.fromEntries(Object.entries(percentInputs)
+        .map(([key, input]) => [key, readPercent(input)]));
+      const selectedType = selectedBonusType;
+      const requiredKeys = {
+        none: [],
+        simple: ["percent"],
+        double: ["ganamos", "multipanel"],
+        specific: ["specificPercent"],
+        special: ["underThreshold", "overThreshold"],
+        mysterious: []
+      }[selectedType];
+      const relevantKeys = requiredKeys;
+      const invalidPercent = relevantKeys.some((key) => percentages[key].invalid);
+      const missingPercent = requiredKeys.some((key) => percentages[key].value === null);
+      const mysteriousOutcomes = outcomeRows.map(({ percentInput, weightInput }) => ({
+        percent: numericInputValue(percentInput),
+        weight: weightInput.value === "" ? null : Number(weightInput.value)
+      }));
+      const invalidMysteriousOutcomes = selectedType === "mysterious" &&
+        (mysteriousOutcomes.some((outcome, index) =>
+          !isValidBonusPercent(outcome.percent) ||
+          !hasValidInputPrecision(outcomeRows[index].percentInput) ||
+          !Number.isSafeInteger(outcome.weight) || outcome.weight < 0) ||
+          new Set(mysteriousOutcomes.map(({ percent }) => percent)).size !== mysteriousOutcomes.length ||
+          !validateMysteriousBonusOutcomes(mysteriousOutcomes));
+      if (invalidPercent || missingPercent || invalidMysteriousOutcomes) {
+        error.textContent = invalidPercent
+          ? "Los porcentajes deben estar entre 0 y 100 y tener hasta dos decimales."
+          : missingPercent
+            ? "Completá todos los porcentajes del tipo de bono seleccionado."
+            : "Revisá los porcentajes y pesos: no debe haber porcentajes repetidos y la suma de los pesos debe ser mayor que cero.";
+        error.hidden = false;
+        return;
+      }
+
+      const config = {
+        enabled: selectedType !== "none",
+        type: selectedType
+      };
+      if (selectedType === "simple") config.percent = percentages.percent.value;
+      if (selectedType === "double") {
+        config.ganamos = percentages.ganamos.value;
+        config.multipanel = percentages.multipanel.value;
+      }
+      if (selectedType === "specific") {
+        config.platform = platformSelect.value;
+        config.percent = percentages.specificPercent.value;
+      }
+      if (selectedType === "special") {
+        config.underThreshold = percentages.underThreshold.value;
+        config.overThreshold = percentages.overThreshold.value;
+      }
+      if (selectedType === "mysterious") config.outcomes = mysteriousOutcomes;
+
+      save.disabled = true;
+      try {
+        await chrome.storage.local.set({ [ACTIVE_BONUS_CONFIG_KEY]: config });
+        updateActiveBonusButton(host, config);
+        root.replaceChildren();
+      } catch (saveError) {
+        console.error("[Ganamos balance extension] No se pudo guardar la configuración del bono activo.", saveError);
+        error.textContent = "No se pudo guardar la configuración. Intentá nuevamente.";
+        error.hidden = false;
+      } finally {
+        save.disabled = false;
+      }
+    });
+    cancel.focus();
+  }
+
+  function createActiveBonusHost() {
+    let host = document.getElementById(ACTIVE_BONUS_HOST_ID);
+    if (host) return host;
+
+    host = document.createElement("div");
+    host.id = ACTIVE_BONUS_HOST_ID;
+    host.style.left = "13px";
+    host.style.bottom = "95px";
+    host.style.width = "38px";
+    host.style.height = "58px";
+    host.style.pointerEvents = "none";
+    host.style.visibility = "hidden";
+
+    const shadow = host.attachShadow({ mode: "open" });
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
+    stylesheet.addEventListener("load", () => {
+      host.style.visibility = "";
+    }, { once: true });
+    stylesheet.addEventListener("error", () => {
+      console.error("[Ganamos balance extension] No se pudo cargar styles/whatsapp.css para el bono activo.");
+      host.style.visibility = "";
+    }, { once: true });
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "active-bonus-button";
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("aria-hidden", "true");
+    icon.setAttribute("focusable", "false");
+    const definitions = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    const gradient = document.createElementNS("http://www.w3.org/2000/svg", "linearGradient");
+    gradient.id = "active-bonus-icon-gradient";
+    gradient.setAttribute("x1", "0");
+    gradient.setAttribute("y1", "0");
+    gradient.setAttribute("x2", "1");
+    gradient.setAttribute("y2", "1");
+    for (const [offset, color] of [["0%", "#c08cff"], ["100%", "#70b7ff"]]) {
+      const stop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
+      stop.setAttribute("offset", offset);
+      stop.setAttribute("stop-color", color);
+      gradient.append(stop);
+    }
+    definitions.append(gradient);
+    icon.append(definitions);
+    const giftPaths = [
+      ["path", "M3 10h18v11H3z"],
+      ["path", "M2 7h20v3H2z"],
+      ["path", "M12 7v14"],
+      ["path", "M12 7H7.5a2.5 2.5 0 1 1 2.2-3.7L12 7Z"],
+      ["path", "M12 7h4.5a2.5 2.5 0 1 0-2.2-3.7L12 7Z"]
+    ];
+    for (const [tag, pathData] of giftPaths) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      path.setAttribute("d", pathData);
+      icon.append(path);
+    }
+    button.append(icon);
+    button.title = "Colocar bono activo";
+    button.setAttribute("aria-label", button.title);
+    button.setAttribute("aria-pressed", "false");
+    button.addEventListener("click", () => void openActiveBonusDialog(host));
+    const percentLabel = document.createElement("span");
+    percentLabel.className = "active-bonus-percent-label";
+    const label = document.createElement("span");
+    label.className = "active-bonus-type-label";
+    const root = document.createElement("div");
+    root.className = "active-bonus-dialog-root";
+    shadow.append(stylesheet, button, percentLabel, label, root);
+    button.style.pointerEvents = "auto";
+    root.style.pointerEvents = "auto";
+    document.documentElement.append(host);
+    void readActiveBonusConfig()
+      .then((config) => updateActiveBonusButton(host, config))
+      .catch((error) => console.error(
+        "[Ganamos balance extension] No se pudo recuperar la configuración del bono activo.",
+        error
+      ));
+    return host;
   }
 
   function selectCurrencyAmount(element) {
@@ -677,6 +1234,12 @@
     };
     const recordKey = `${AGENT_MOVEMENT_PREFIX}${record.timestamp}:${crypto.randomUUID()}`;
     await chrome.storage.local.set({ [recordKey]: record });
+    if (operation === "withdrawal") {
+      const host = document.getElementById(HOST_ID);
+      if (host && host.dataset.accounts === contactKey) {
+        void updateWithdrawalButtonState(host, contactKey);
+      }
+    }
   }
 
   async function findRecentUserWithdrawal(contactKey) {
@@ -694,6 +1257,35 @@
         movement.timestamp <= Date.now())
       .map(([, movement]) => movement)
       .sort((first, second) => second.timestamp - first.timestamp)[0] || null;
+  }
+
+  async function updateWithdrawalButtonState(host, contactKey) {
+    const button = host.shadowRoot?.querySelector('button[data-action="withdrawal"]');
+    if (!button) return;
+    if (host.recentWithdrawalTimer) {
+      window.clearTimeout(host.recentWithdrawalTimer);
+      host.recentWithdrawalTimer = null;
+    }
+    button.classList.remove("recent-withdrawal");
+    button.title = "Retirar";
+
+    try {
+      const recentWithdrawal = await findRecentUserWithdrawal(contactKey);
+      if (host.dataset.accounts !== contactKey) return;
+      if (!recentWithdrawal) return;
+
+      button.classList.add("recent-withdrawal");
+      button.title = "Hubo un retiro en las últimas 24 horas";
+      const timeUntilExpiry = recentWithdrawal.timestamp + 24 * 60 * 60 * 1000 - Date.now();
+      if (timeUntilExpiry > 0) {
+        host.recentWithdrawalTimer = window.setTimeout(
+          () => void updateWithdrawalButtonState(host, contactKey),
+          timeUntilExpiry + 100
+        );
+      }
+    } catch (error) {
+      console.error("[Ganamos balance extension] No se pudo verificar si hubo un retiro reciente.", error);
+    }
   }
 
   async function updateLastWithdrawalDisplay(host, contactKey) {
@@ -1310,9 +1902,22 @@
 
     host = document.createElement("div");
     host.id = HOST_ID;
+    host.style.zIndex = "2147483646";
     host.style.visibility = "hidden";
 
     const shadow = host.attachShadow({ mode: "open" });
+    for (const eventName of [
+      "click",
+      "contextmenu",
+      "dblclick",
+      "mousedown",
+      "mouseup",
+      "pointerdown",
+      "pointerup",
+      "selectstart"
+    ]) {
+      shadow.addEventListener(eventName, (event) => event.stopPropagation());
+    }
     const stylesheet = document.createElement("link");
     stylesheet.rel = "stylesheet";
     stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
@@ -1775,6 +2380,19 @@
       platform === "ganamos" ? host.dataset.username : host.dataset.multipanelUsername;
     let selectedPlatform = host.dataset.defaultPlatform ||
       (host.dataset.username ? "ganamos" : "multipanel");
+    let activeBonusConfig = null;
+    if (operation === "deposit") {
+      try {
+        activeBonusConfig = await readActiveBonusConfig();
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo cargar el bono activo para el depósito.", error);
+        showToast(host, getPlatformUsername(selectedPlatform), "No se pudo cargar el bono activo para este depósito.", "error");
+      }
+    }
+    const mysteriousBonusPercent = activeBonusConfig?.enabled && activeBonusConfig.type === "mysterious"
+      ? chooseMysteriousBonusPercent(activeBonusConfig)
+      : null;
+    let applyPlatformBonus = () => {};
     if (!root || !getPlatformUsername(selectedPlatform)) return;
     root.replaceChildren();
 
@@ -1820,6 +2438,7 @@
         }
         if (operation === "deposit") depositSummary.dataset.platform = selectedPlatform;
         else withdrawalSummary.dataset.platform = selectedPlatform;
+        if (operation === "deposit") applyPlatformBonus();
         confirm.textContent = "Confirmar";
       });
       selector.append(button);
@@ -1857,7 +2476,7 @@
       dialogActions?.classList.toggle("has-deposit-summary", !depositSummary.hidden);
       const amount = numericInputValue(amountInput) || 0;
       const bonus = numericInputValue(bonusInput) || 0;
-      depositSummary.textContent = `Depósito Final: $${formatBalance(amount + bonus)} / $${formatBalance(bonus)}`;
+      depositSummary.textContent = `Depósito: $${formatBalance(amount + bonus)} / $${formatBalance(bonus)}`;
     };
     const updateWithdrawalSummary = () => {
       withdrawalSummary.hidden = !loadAmountInput.value && !recoveryPercentInput.value;
@@ -1892,7 +2511,8 @@
       bonusPercentLabel.append(createInputAffix(bonusPercentInput, "%", "suffix"));
       bonusFields.append(bonusLabel, bonusPercentLabel);
       dialog.append(bonusFields);
-      dialog.append(createPercentageShortcuts(bonusPercentInput));
+      const bonusPercentageShortcuts = createPercentageShortcuts(bonusPercentInput);
+      dialog.append(bonusPercentageShortcuts.element);
 
       const numberValue = numericInputValue;
       const syncFixedFromPercent = () => {
@@ -1922,10 +2542,66 @@
         bonusPercentInput.value = percent === ""
           ? ""
           : formatBalance(Math.min(Number(percent), 100));
+        bonusPercentageShortcuts.updateSelection();
+      });
+      let manuallyChangedBonusPercent = false;
+      let applyingAutomaticBonusPercent = false;
+      let specialBonusThresholdExceeded = (numberValue(amountInput) || 0) >= 10_000;
+      const applyAutomaticBonusPercent = () => {
+        let percentage = null;
+        if (activeBonusConfig?.enabled) {
+          switch (activeBonusConfig.type) {
+            case "simple":
+              percentage = activeBonusConfig.percent;
+              break;
+            case "double":
+              percentage = activeBonusConfig[selectedPlatform];
+              break;
+            case "specific":
+              percentage = activeBonusConfig.platform === selectedPlatform
+                ? activeBonusConfig.percent
+                : null;
+              break;
+            case "special":
+              percentage = (numberValue(amountInput) || 0) >= 10_000
+                ? activeBonusConfig.overThreshold
+                : activeBonusConfig.underThreshold;
+              break;
+            case "mysterious":
+              percentage = mysteriousBonusPercent;
+              break;
+          }
+        }
+        applyingAutomaticBonusPercent = true;
+        try {
+          bonusPercentInput.value = percentage == null ? "" : String(percentage);
+          bonusPercentInput.dispatchEvent(new Event("input", { bubbles: true }));
+        } finally {
+          applyingAutomaticBonusPercent = false;
+        }
+      };
+      bonusPercentInput.addEventListener("input", () => {
+        if (!applyingAutomaticBonusPercent) manuallyChangedBonusPercent = true;
+      });
+      applyPlatformBonus = () => {
+        if (!activeBonusConfig?.enabled ||
+          !["double", "specific"].includes(activeBonusConfig.type)) return;
+        manuallyChangedBonusPercent = false;
+        applyAutomaticBonusPercent();
+      };
+      amountInput.addEventListener("input", () => {
+        const thresholdExceeded = (numberValue(amountInput) || 0) >= 10_000;
+        if (activeBonusConfig?.enabled && activeBonusConfig.type === "special" &&
+          thresholdExceeded !== specialBonusThresholdExceeded) {
+          specialBonusThresholdExceeded = thresholdExceeded;
+          manuallyChangedBonusPercent = false;
+          applyAutomaticBonusPercent();
+        }
       });
       amountInput.addEventListener("input", updateDepositSummary);
       bonusPercentInput.addEventListener("input", updateDepositSummary);
       bonusInput.addEventListener("input", updateDepositSummary);
+      if (activeBonusConfig?.enabled) applyAutomaticBonusPercent();
       updateDepositSummary();
     }
 
@@ -1946,7 +2622,7 @@
       recoveryPercentLabel.append(createInputAffix(recoveryPercentInput, "%", "suffix"));
       recoveryFields.append(loadLabel, recoveryPercentLabel);
       dialog.append(recoveryFields);
-      dialog.append(createPercentageShortcuts(recoveryPercentInput));
+      dialog.append(createPercentageShortcuts(recoveryPercentInput).element);
       amountInput.addEventListener("input", updateWithdrawalSummary);
       loadAmountInput.addEventListener("input", updateWithdrawalSummary);
       recoveryPercentInput.addEventListener("input", updateWithdrawalSummary);
@@ -2568,10 +3244,19 @@
         row.append(pcLabel);
         namesByPlatform.forEach(({ username, platform }, index) => {
           if (index) row.append(document.createTextNode(" / "));
-          const usernameLabel = document.createElement("span");
+          const usernameLabel = document.createElement("textarea");
           usernameLabel.className = "contact-user-search-name";
+          usernameLabel.rows = 1;
+          usernameLabel.wrap = "soft";
+          usernameLabel.readOnly = true;
+          usernameLabel.value = username;
           usernameLabel.dataset.platform = platform;
-          usernameLabel.textContent = username;
+          usernameLabel.setAttribute(
+            "aria-label",
+            `${platform === "ganamos" ? "Ganamos" : "MultiPanel"}: ${username}`
+          );
+          usernameLabel.title = username;
+          usernameLabel.addEventListener("click", () => usernameLabel.select());
           row.append(usernameLabel);
         });
         resultsContainer.append(row);
@@ -2635,11 +3320,16 @@
 
   function updateContact() {
     const zoomViewOpen = [...document.querySelectorAll('button[aria-label="Acercar"]')]
-      .some(isActuallyVisible);
+      .some(isRenderedVisible);
     const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+    const activeBonusHost = document.getElementById(ACTIVE_BONUS_HOST_ID);
     if (agentBalanceHost) {
       const display = zoomViewOpen ? "none" : "";
       if (agentBalanceHost.style.display !== display) agentBalanceHost.style.display = display;
+    }
+    if (activeBonusHost) {
+      const display = zoomViewOpen ? "none" : "";
+      if (activeBonusHost.style.display !== display) activeBonusHost.style.display = display;
     }
     if (zoomViewOpen) {
       const host = document.getElementById(HOST_ID);
@@ -2666,7 +3356,7 @@
 
     const host = getOrCreateHost();
     host.style.display = "block";
-    positionHost(host, title);
+    if (!selectingContactUserText) positionHost(host, title);
     const accountsKey = JSON.stringify({ usernames, phone });
     if (host.dataset.accounts === accountsKey && activeAccountsKey === accountsKey) return;
     if (host.dataset.accounts && host.dataset.accounts !== accountsKey) {
@@ -2710,6 +3400,7 @@
     host.balanceStates = {};
     activeAccountsKey = accountsKey;
     agentBalanceContactKey = accountsKey;
+    if (hasPlatformUsers) void updateWithdrawalButtonState(host, accountsKey);
     if (agentBalanceHost && isAgentMovementView(agentBalanceView)) {
       void renderAgentMovements(agentBalanceHost);
     }
@@ -2726,7 +3417,7 @@
     });
   }
 
-  function protectAgentBalanceSelection(event) {
+  function protectExtensionTextSelection(event) {
     const path = event.composedPath();
     const startedOnBalanceText = path.some((target) =>
       target instanceof Element &&
@@ -2735,14 +3426,25 @@
     ) && path.some((target) =>
       target instanceof Element && target.id === AGENT_BALANCE_HOST_ID
     );
+    const startedOnContactUserText = path.some((target) =>
+      target instanceof Element && target.classList.contains("contact-user-search")
+    ) && path.some((target) =>
+      target instanceof Element && target.id === HOST_ID
+    );
     if (event.type === "mousedown" || event.type === "pointerdown") {
       if (startedOnBalanceText) selectingAgentBalanceText = true;
+      if (startedOnContactUserText) selectingContactUserText = true;
     }
-    if (!startedOnBalanceText && !selectingAgentBalanceText) return;
+    if (!startedOnBalanceText && !selectingAgentBalanceText &&
+      !startedOnContactUserText && !selectingContactUserText) return;
     event.stopImmediatePropagation();
     event.stopPropagation();
     if (event.type === "mouseup" || event.type === "pointerup" || event.type === "pointercancel") {
-      window.setTimeout(() => { selectingAgentBalanceText = false; }, 0);
+      window.setTimeout(() => {
+        selectingAgentBalanceText = false;
+        selectingContactUserText = false;
+        scheduleUpdate();
+      }, 0);
     }
   }
 
@@ -2769,9 +3471,13 @@
     "pointermove",
     "pointerup"
   ]) {
-    window.addEventListener(eventName, protectAgentBalanceSelection, true);
+    window.addEventListener(eventName, protectExtensionTextSelection, true);
   }
-  window.addEventListener("blur", () => { selectingAgentBalanceText = false; });
+  window.addEventListener("blur", () => {
+    selectingAgentBalanceText = false;
+    selectingContactUserText = false;
+  });
+  createActiveBonusHost();
   const agentBalanceHost = createAgentBalancePanel();
   void refreshAgentBalance(agentBalanceHost);
   void refreshMultiPanelAgentBalance(agentBalanceHost);

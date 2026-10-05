@@ -869,6 +869,85 @@ async function getBridgeSettings() {
   return { role: bridgeRole, token: bridgeToken };
 }
 
+function isValidActiveBonusConfig(config) {
+  if (config === null) return true;
+  if (!config || typeof config !== "object" || typeof config.enabled !== "boolean") return false;
+  const isPercent = (value) => typeof value === "number" &&
+    Number.isFinite(value) && value >= 0 && value <= 100;
+  if (config.type === "none") return !config.enabled;
+  const isConfiguredPercent = (value) => config.enabled
+    ? isPercent(value)
+    : value === null || value === undefined || isPercent(value);
+  if (config.type === "simple") return isConfiguredPercent(config.percent);
+  if (config.type === "double") {
+    return isConfiguredPercent(config.ganamos) && isConfiguredPercent(config.multipanel);
+  }
+  if (config.type === "specific") {
+    return ["ganamos", "multipanel"].includes(config.platform) &&
+      isConfiguredPercent(config.percent);
+  }
+  if (config.type === "special") {
+    return isConfiguredPercent(config.underThreshold) &&
+      isConfiguredPercent(config.overThreshold);
+  }
+  if (config.type !== "mysterious") return false;
+  if (config.outcomes === undefined) return true;
+  if (!Array.isArray(config.outcomes) || !config.outcomes.length) return false;
+  const percentages = new Set();
+  let totalWeight = 0;
+  for (const outcome of config.outcomes) {
+    if (!isPercent(outcome?.percent) || !Number.isSafeInteger(outcome.weight) ||
+      outcome.weight < 0 || percentages.has(outcome.percent)) return false;
+    percentages.add(outcome.percent);
+    totalWeight += outcome.weight;
+    if (!Number.isSafeInteger(totalWeight)) return false;
+  }
+  return totalWeight > 0;
+}
+
+async function publishActiveBonusConfig() {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "primary" || !token) {
+    throw new Error("Este perfil no está configurado como principal.");
+  }
+  const stored = await chrome.storage.local.get("activeBonusConfig");
+  const config = stored.activeBonusConfig ?? null;
+  if (!isValidActiveBonusConfig(config)) {
+    throw new Error("La configuración del bono activo no es válida y no se puede sincronizar.");
+  }
+  return bridgeFetch("/v1/bonus-config", token, {
+    method: "POST",
+    timeoutMs: 10_000,
+    body: { config }
+  });
+}
+
+async function syncActiveBonusConfig(revision) {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "secondary" || !token) {
+    throw new Error("Este perfil no está configurado como secundario.");
+  }
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("La versión de configuración recibida no es válida.");
+  }
+  const update = await bridgeFetch(`/v1/bonus-config?revision=${revision}`, token, {
+    timeoutMs: 25_000
+  });
+  if (!update?.ok || !Number.isSafeInteger(update.revision) || update.revision < 0) {
+    throw new Error("El puente devolvió una versión de bono activo no válida.");
+  }
+  if (!update.changed) return update;
+  if (!isValidActiveBonusConfig(update.config)) {
+    throw new Error("El puente devolvió una configuración de bono activo no válida.");
+  }
+  if (update.config === null) {
+    await chrome.storage.local.remove("activeBonusConfig");
+  } else {
+    await chrome.storage.local.set({ activeBonusConfig: update.config });
+  }
+  return update;
+}
+
 async function bridgeFetch(path, token, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 95_000);
@@ -1183,6 +1262,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "BRIDGE_BONUS_CONFIG_PUBLISH") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de sincronización no válida." });
+      return;
+    }
+    publishActiveBonusConfig()
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo sincronizar la configuración del bono activo."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_BONUS_CONFIG_POLL") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de sincronización no válida." });
+      return;
+    }
+    syncActiveBonusConfig(message.revision)
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo recibir la configuración del bono activo."
+      }));
+    return true;
+  }
+
   if (message?.type === "BRIDGE_POLL" || message?.type === "BRIDGE_COMPLETE") {
     if (!isWhatsAppSender(sender)) {
       sendResponse({ ok: false, error: "Solicitud de puente no válida." });
@@ -1262,4 +1369,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     .then(sendResponse)
     .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo completar la solicitud." }));
   return true;
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes.activeBonusConfig) return;
+  void getBridgeSettings()
+    .then(({ role }) => {
+      if (role === "primary") return publishActiveBonusConfig();
+      return null;
+    })
+    .catch((error) => console.error(
+      "[Ganamos balance extension] No se pudo publicar la configuración del bono activo en el puente.",
+      error
+    ));
 });
