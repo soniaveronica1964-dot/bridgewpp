@@ -417,7 +417,7 @@ async function handleRemoteCreateRequest(request, response) {
       if (queuedIndex !== -1) queuedRequests.splice(queuedIndex, 1);
       resolve({
         ok: false,
-        error: "Se agotó el tiempo de espera de la PC destino. Verificá si el usuario se creó antes de volver a intentarlo."
+        error: "Se agotó el tiempo de espera de la PC destino. Verificá el resultado en esa PC antes de volver a intentarlo."
       });
     }, REQUEST_TIMEOUT_MS);
     pendingRequests.set(body.id, {
