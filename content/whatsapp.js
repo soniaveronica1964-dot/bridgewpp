@@ -403,7 +403,7 @@
   function setAgentBalancePanelWidth(host, minimized, hasErrors) {
     host.style.width = minimized && !hasErrors
       ? "28px"
-      : `min(${remoteCreateDestinations.length ? 420 : 210}px, calc(100vw - 56px))`;
+      : "min(210px, calc(100vw - 56px))";
   }
 
   function selectCurrencyAmount(element) {
@@ -2147,24 +2147,34 @@
 
     const destinations = remoteCreateDestinations.filter((destination) =>
       typeof destination?.id === "string" && typeof destination.name === "string");
-    let selectedDestinationId = destinations.length ? "" : "local";
-    let destinationSelect = null;
-    if (destinations.length) {
+    let selectedDestinationId = "";
+    if (remoteCreateDestinations.length) {
       const destinationLabel = document.createElement("label");
       destinationLabel.textContent = "Equipo destino";
-      destinationSelect = document.createElement("select");
-      destinationSelect.className = "create-destination-select";
-      const placeholderOption = document.createElement("option");
-      placeholderOption.value = "";
-      placeholderOption.textContent = "Elegí una computadora";
-      destinationSelect.append(placeholderOption);
-      for (const destination of destinations) {
-        const option = document.createElement("option");
-        option.value = destination.id;
-        option.textContent = destination.name;
-        destinationSelect.append(option);
+      const destinationButtons = document.createElement("div");
+      destinationButtons.className = "destination-selector";
+      for (let index = 1; index <= 3; index += 1) {
+        const destination = destinations.find((item) => item.id === `remote-${index}`);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = destination?.name || `PC ${index}`;
+        button.title = destination?.name || `PC ${index} no configurada`;
+        button.disabled = !destination;
+        button.setAttribute("aria-pressed", "false");
+        button.setAttribute("aria-label", destination
+          ? `Crear en ${destination.name}`
+          : `PC ${index} no configurada`);
+        button.addEventListener("click", () => {
+          if (!destination) return;
+          selectedDestinationId = destination.id;
+          for (const option of destinationButtons.querySelectorAll("button")) {
+            option.setAttribute("aria-pressed", String(option === button));
+          }
+          updateGeneratedUsername();
+        });
+        destinationButtons.append(button);
       }
-      destinationLabel.append(destinationSelect);
+      destinationLabel.append(destinationButtons);
       dialog.append(destinationLabel);
     }
 
@@ -2201,7 +2211,7 @@
       .toLowerCase()
       .replace(/[^a-z0-9]/g, "");
     const getGeneratedUsername = () => {
-      if (destinations.length && !selectedDestinationId) return "";
+      if (remoteCreateDestinations.length && !selectedDestinationId) return "";
       const nickname = generatedNickname();
       const suffix = getSelectedSuffix();
       const phoneSuffix = phone.length >= 4 ? phone.slice(-4) : "";
@@ -2216,10 +2226,6 @@
     const updateGeneratedUsername = () => {
       usernameInput.value = getGeneratedUsername();
     };
-    destinationSelect?.addEventListener("change", () => {
-      selectedDestinationId = destinationSelect.value;
-      updateGeneratedUsername();
-    });
     nicknameInput.addEventListener("input", updateGeneratedUsername);
     updateGeneratedUsername();
 
@@ -2262,9 +2268,9 @@
     dialog.addEventListener("submit", async (event) => {
       event.preventDefault();
       const nickname = generatedNickname();
-      if (destinations.length && !selectedDestinationId) {
+      if (remoteCreateDestinations.length && !selectedDestinationId) {
         showToast(host, phone, "Elegí la computadora donde se creará el usuario.", "error");
-        destinationSelect.focus();
+        dialog.querySelector(".destination-selector button:not(:disabled)")?.focus();
         return;
       }
       if (!nickname) {
