@@ -2533,12 +2533,22 @@
 
     const isCurrentContact = () =>
       document.getElementById(HOST_ID) === host && host.dataset.accounts === accountsKey;
-    const appendSearchResult = (name, result) => {
+    const appendSearchResult = (name, result, requestError = null) => {
+      if (requestError) {
+        console.error(`[Ganamos balance extension] No se pudieron buscar usuarios en ${name}.`, requestError);
+        const error = document.createElement("div");
+        error.className = "contact-user-search-error";
+        error.textContent = `${name}: no se pudo completar la búsqueda.`;
+        error.title = String(requestError);
+        resultsContainer.append(error);
+        return;
+      }
       const namesByPlatform = [];
-      for (const [platform, label] of [["ganamos", "Ganamos"], ["multipanel", "MultiPanel"]]) {
+      result ||= {};
+      result.errors ||= {};
+      for (const platform of ["ganamos", "multipanel"]) {
         const names = result?.[platform];
         if (!Array.isArray(names)) {
-          result.errors ||= {};
           result.errors[platform] ||= "La respuesta de búsqueda no tiene un formato válido.";
           continue;
         }
@@ -2601,11 +2611,7 @@
         }));
         if (!isCurrentContact()) return;
         for (const { destination, result, error } of results) {
-          appendSearchResult(destination.name, result || {
-            ganamos: [],
-            multipanel: [],
-            errors: { ganamos: error, multipanel: error }
-          });
+          appendSearchResult(destination.name, result, error);
         }
       } else {
         const response = await chrome.runtime.sendMessage({
