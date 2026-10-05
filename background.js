@@ -148,6 +148,41 @@ async function findGanamosUser(data) {
   };
 }
 
+async function findGanamosUsersByDigits(digits) {
+  const { ganamos: suffix } = await getPlatformSuffixes();
+  const userId = await getAgentUserId();
+  const pageSize = 10;
+  const records = new Map();
+
+  for (let page = 0; ; page += 1) {
+    const params = new URLSearchParams({
+      username: digits,
+      count: String(pageSize),
+      page: String(page),
+      user_id: userId,
+      is_banned: "false",
+      is_direct_structure: "false"
+    });
+    const payload = await requestGanamosJson(`/api/agent_admin/user/?${params}`);
+    const pageRecords = extractUserRecords(payload);
+    let newRecords = 0;
+    for (const record of pageRecords) {
+      const username = [record?.username, record?.user_name, record?.login, record?.alias]
+        .find((candidate) => typeof candidate === "string");
+      if (!username || !username.includes(digits)) continue;
+      const key = username.trim().toLocaleLowerCase();
+      if (!records.has(key)) {
+        records.set(key, username.trim());
+        newRecords += 1;
+      }
+    }
+    if (pageRecords.length < pageSize || newRecords === 0) break;
+  }
+
+  return [...records.values()].filter((username) =>
+    normalizeUsernameSuffix(username, suffix).includes(digits));
+}
+
 async function getGanamosAgentBalance() {
   const payload = await requestGanamosJson("/api/user/balance");
   if (payload?.status !== 0) {
@@ -386,6 +421,69 @@ async function findMultiPanelUser(username) {
     throw new Error("MultiPanel encontró el alias, pero no devolvió IDs válidos de usuario y base de datos.");
   }
   return { session, user: String(user.user), db: String(user.db), alias: user.alias };
+}
+
+async function findMultiPanelUsersByDigits(digits) {
+  let session = await getMultiPanelSession();
+  const pageSize = 20;
+  const records = new Map();
+
+  for (let offset = 0; ; offset += pageSize) {
+    const report = await requestMultiPanelForm("/api/admin_reports/getReport", {
+      session,
+      company: "MULT",
+      report: "agents_control_all",
+      filter: JSON.stringify([{ field: "u.alias", type: "like", value: digits }]),
+      user: "null",
+      db: "null",
+      limit: `limit ${offset},${pageSize}`,
+      sort: "alias asc",
+      callFilter: ""
+    });
+    const pageRecords = report?.data?.data;
+    if (!Array.isArray(pageRecords)) {
+      throw new Error("MultiPanel devolvió una lista de usuarios con formato inesperado.");
+    }
+    let newRecords = 0;
+    for (const record of pageRecords) {
+      const alias = record?.alias;
+      if (typeof alias !== "string" || !alias.includes(digits)) continue;
+      const key = alias.trim().toLocaleLowerCase();
+      if (!records.has(key)) {
+        records.set(key, alias.trim());
+        newRecords += 1;
+      }
+    }
+
+    const refreshedSession = report?.data?.def?.session;
+    if (typeof refreshedSession === "string" && refreshedSession.trim() && refreshedSession !== session) {
+      session = refreshedSession.trim();
+      await chrome.storage.local.set({ multiPanelSession: session });
+    }
+    if (pageRecords.length < pageSize || newRecords === 0) break;
+  }
+
+  return [...records.values()];
+}
+
+async function searchUsersByDigits(digits) {
+  const [ganamosResult, multipanelResult] = await Promise.allSettled([
+    findGanamosUsersByDigits(digits),
+    findMultiPanelUsersByDigits(digits)
+  ]);
+  const errors = {};
+  if (ganamosResult.status === "rejected") {
+    errors.ganamos = ganamosResult.reason?.message || "Error de búsqueda en Ganamos.";
+  }
+  if (multipanelResult.status === "rejected") {
+    errors.multipanel = multipanelResult.reason?.message || "Error de búsqueda en MultiPanel.";
+  }
+  return {
+    ok: true,
+    ganamos: ganamosResult.status === "fulfilled" ? ganamosResult.value : [],
+    multipanel: multipanelResult.status === "fulfilled" ? multipanelResult.value : [],
+    errors
+  };
 }
 
 async function getMultiPanelBalance(data) {
@@ -741,6 +839,7 @@ const BRIDGE_ORIGIN = "http://127.0.0.1:32145";
 const API_MESSAGE_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
+  "USER_SEARCH_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
   "EXCHANGE_REQUEST",
@@ -874,6 +973,10 @@ async function sendRemoteOperation(destinationId, message, timeoutMs = 95_000) {
       message.data.username.length > 64) {
       throw new Error(`El usuario no cumple el sufijo configurado para ${destination.name || "la PC destino"}.`);
     }
+  } else if (message.type === "USER_SEARCH_REQUEST") {
+    if (!/^\d{4}$/.test(message.data?.digits || "")) {
+      throw new Error("La búsqueda remota requiere exactamente cuatro números.");
+    }
   } else if (!["AGENT_BALANCE_REQUEST", "MULTIPANEL_AGENT_BALANCE_REQUEST"].includes(message.type) ||
     message.data !== undefined) {
     throw new Error("La operación remota no está permitida.");
@@ -983,10 +1086,21 @@ async function getRemoteAgentBalance(data) {
   return sendRemoteOperation(data.destinationId, { type: messageType }, 25_000);
 }
 
+async function getRemoteUserSearch(data) {
+  if (!/^\d{4}$/.test(data?.digits || "")) {
+    throw new Error("La búsqueda remota requiere exactamente cuatro números.");
+  }
+  return sendRemoteOperation(data.destinationId, {
+    type: "USER_SEARCH_REQUEST",
+    data: { digits: data.digits }
+  }, 45_000);
+}
+
 function validateApiMessage(message, suffixes) {
   if (!API_MESSAGE_TYPES.has(message?.type)) return false;
   if (message.type === "AGENT_BALANCE_REQUEST" ||
     message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return true;
+  if (message.type === "USER_SEARCH_REQUEST") return /^\d{4}$/.test(message.data?.digits || "");
 
   const platform = message.data?.platform || "ganamos";
   if (message.type === "CREATE_USER_REQUEST") {
@@ -1020,6 +1134,7 @@ async function executeApiMessage(message) {
   }
   if (message.type === "AGENT_BALANCE_REQUEST") return getGanamosAgentBalance();
   if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return getMultiPanelAgentBalance();
+  if (message.type === "USER_SEARCH_REQUEST") return searchUsersByDigits(message.data.digits);
   if (message.type === "WITHDRAWAL_HISTORY_REQUEST") {
     return {
       ok: false,
@@ -1120,6 +1235,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getRemoteAgentBalance(message.data || {})
       .then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo consultar el balance remoto." }));
+    return true;
+  }
+
+  if (message?.type === "REMOTE_USER_SEARCH_REQUEST") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud no válida o enviada desde una página no autorizada." });
+      return;
+    }
+    getRemoteUserSearch(message.data || {})
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudieron buscar usuarios en la PC destino." }));
     return true;
   }
 

@@ -134,6 +134,48 @@
   text-align: center;
 }
 
+.contact-user-search {
+  box-sizing: border-box;
+  margin-top: 5px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  color: #e2e8e7;
+  background: rgb(0 0 0 / 80%);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.contact-user-search[hidden] {
+  display: none !important;
+}
+
+.contact-user-search-title {
+  margin-bottom: 2px;
+  color: #f2f4f3;
+  font-weight: 600;
+}
+
+.contact-user-search-row {
+  line-height: 1.4;
+}
+
+.contact-user-search-pc {
+  color: #d3ddda;
+}
+
+.contact-user-search-name[data-platform="ganamos"] {
+  color: #d7b5ff;
+}
+
+.contact-user-search-name[data-platform="multipanel"] {
+  color: #a9d5ff;
+}
+
+.contact-user-search-error {
+  color: #ffb19a;
+  font-size: 12px;
+}
+
 .balance-label {
   min-width: 0;
 }

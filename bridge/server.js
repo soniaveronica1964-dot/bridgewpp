@@ -15,6 +15,7 @@ const REMOTE_REQUEST_MAX_AGE_MS = 5 * 60_000;
 const ALLOWED_REQUEST_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
+  "USER_SEARCH_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
   "EXCHANGE_REQUEST",
@@ -307,6 +308,9 @@ function validateRemoteMessage(message) {
       typeof message.data?.username === "string" &&
       /^[a-z0-9]{2,64}$/i.test(message.data.username);
   }
+  if (message?.type === "USER_SEARCH_REQUEST") {
+    return /^\d{4}$/.test(message.data?.digits || "");
+  }
   return ["AGENT_BALANCE_REQUEST", "MULTIPANEL_AGENT_BALANCE_REQUEST"]
     .includes(message?.type) && message.data === undefined;
 }
@@ -399,6 +403,11 @@ async function handleRemoteCreateRequest(request, response) {
           username: body.message.data.username
         }
       }
+    : body.message.type === "USER_SEARCH_REQUEST"
+      ? {
+          type: "USER_SEARCH_REQUEST",
+          data: { digits: body.message.data.digits }
+        }
     : { type: body.message.type }
   };
   const result = await new Promise((resolve) => {

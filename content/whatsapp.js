@@ -1406,7 +1406,25 @@
     actions.append(createUserButton);
     const dialogRoot = document.createElement("div");
     dialogRoot.className = "dialog-root";
-    panel.append(informationButton, exchangeButton, passwordResetButton, actions, status, dialogRoot);
+    const contactUserSearch = document.createElement("section");
+    contactUserSearch.className = "contact-user-search";
+    contactUserSearch.hidden = true;
+    contactUserSearch.setAttribute("aria-live", "polite");
+    const contactUserSearchTitle = document.createElement("div");
+    contactUserSearchTitle.className = "contact-user-search-title";
+    contactUserSearchTitle.textContent = "Usuarios Existentes Encontrados:";
+    const contactUserSearchResults = document.createElement("div");
+    contactUserSearchResults.className = "contact-user-search-results";
+    contactUserSearch.append(contactUserSearchTitle, contactUserSearchResults);
+    panel.append(
+      informationButton,
+      exchangeButton,
+      passwordResetButton,
+      actions,
+      status,
+      contactUserSearch,
+      dialogRoot
+    );
     shadow.append(stylesheet, panel);
     document.documentElement.append(host);
     return host;
@@ -2506,6 +2524,110 @@
     root.replaceChildren(modal);
   }
 
+  async function searchExistingContactUsers(host, digits, accountsKey) {
+    const section = host.shadowRoot?.querySelector(".contact-user-search");
+    const resultsContainer = section?.querySelector(".contact-user-search-results");
+    if (!section || !resultsContainer) return;
+    section.hidden = true;
+    resultsContainer.replaceChildren();
+
+    const isCurrentContact = () =>
+      document.getElementById(HOST_ID) === host && host.dataset.accounts === accountsKey;
+    const appendSearchResult = (name, result) => {
+      const namesByPlatform = [];
+      for (const [platform, label] of [["ganamos", "Ganamos"], ["multipanel", "MultiPanel"]]) {
+        const names = result?.[platform];
+        if (!Array.isArray(names)) {
+          result.errors ||= {};
+          result.errors[platform] ||= "La respuesta de búsqueda no tiene un formato válido.";
+          continue;
+        }
+        for (const username of names) {
+          if (typeof username === "string" && username.includes(digits)) {
+            namesByPlatform.push({ username, platform, label });
+          }
+        }
+      }
+
+      if (namesByPlatform.length) {
+        const row = document.createElement("div");
+        row.className = "contact-user-search-row";
+        const pcLabel = document.createElement("span");
+        pcLabel.className = "contact-user-search-pc";
+        pcLabel.textContent = `${name}: `;
+        row.append(pcLabel);
+        namesByPlatform.forEach(({ username, platform }, index) => {
+          if (index) row.append(document.createTextNode(" / "));
+          const usernameLabel = document.createElement("span");
+          usernameLabel.className = "contact-user-search-name";
+          usernameLabel.dataset.platform = platform;
+          usernameLabel.textContent = username;
+          row.append(usernameLabel);
+        });
+        resultsContainer.append(row);
+      }
+
+      for (const [platform, message] of Object.entries(result?.errors || {})) {
+        if (!["ganamos", "multipanel"].includes(platform) || !message) continue;
+        console.error(`[Ganamos balance extension] No se pudieron buscar usuarios en ${name} (${platform}).`, message);
+        const error = document.createElement("div");
+        error.className = "contact-user-search-error";
+        error.textContent = `${name}: error al consultar ${platform === "ganamos" ? "Ganamos" : "MultiPanel"}.`;
+        error.title = String(message);
+        resultsContainer.append(error);
+      }
+    };
+
+    try {
+      const stored = await chrome.storage.local.get("remoteCreateDestinations");
+      const destinations = Array.isArray(stored.remoteCreateDestinations)
+        ? stored.remoteCreateDestinations.filter((destination) =>
+          typeof destination?.id === "string" && typeof destination.name === "string")
+        : [];
+      if (!isCurrentContact()) return;
+
+      if (destinations.length) {
+        const results = await Promise.all(destinations.map(async (destination) => {
+          try {
+            const response = await chrome.runtime.sendMessage({
+              type: "REMOTE_USER_SEARCH_REQUEST",
+              data: { destinationId: destination.id, digits }
+            });
+            if (!response?.ok) throw new Error(response?.error || "La búsqueda remota no se completó.");
+            return { destination, result: response };
+          } catch (error) {
+            return { destination, error: error.message || "No se pudo consultar la PC." };
+          }
+        }));
+        if (!isCurrentContact()) return;
+        for (const { destination, result, error } of results) {
+          appendSearchResult(destination.name, result || {
+            ganamos: [],
+            multipanel: [],
+            errors: { ganamos: error, multipanel: error }
+          });
+        }
+      } else {
+        const response = await chrome.runtime.sendMessage({
+          type: "USER_SEARCH_REQUEST",
+          data: { digits }
+        });
+        if (!isCurrentContact()) return;
+        if (!response?.ok) throw new Error(response?.error || "La búsqueda en esta PC no se completó.");
+        appendSearchResult("Esta PC", response);
+      }
+    } catch (error) {
+      if (!isCurrentContact()) return;
+      console.error("[Ganamos balance extension] No se pudieron buscar usuarios por los últimos cuatro números.", error);
+      const failure = document.createElement("div");
+      failure.className = "contact-user-search-error";
+      failure.textContent = "No se pudo completar la búsqueda de usuarios.";
+      failure.title = error.message || "Error de búsqueda.";
+      resultsContainer.append(failure);
+    }
+    if (isCurrentContact()) section.hidden = resultsContainer.childElementCount === 0;
+  }
+
   function updateContact() {
     const zoomViewOpen = [...document.querySelectorAll('button[aria-label="Acercar"]')]
       .some(isActuallyVisible);
@@ -2551,6 +2673,9 @@
     host.dataset.defaultPlatform = usernames?.firstPlatform || (usernames?.ganamos ? "ganamos" : "multipanel");
     host.dataset.contactPhone = phone || "";
     const hasPlatformUsers = Boolean(usernames?.ganamos || usernames?.multipanel);
+    const contactUserSearch = host.shadowRoot.querySelector(".contact-user-search");
+    contactUserSearch.hidden = true;
+    contactUserSearch.querySelector(".contact-user-search-results").replaceChildren();
     host.shadowRoot.querySelector(".user-information-button").hidden = !hasPlatformUsers;
     host.shadowRoot.querySelector(".exchange-button").hidden =
       !usernames?.ganamos || !usernames?.multipanel;
@@ -2584,6 +2709,7 @@
       void renderAgentMovements(agentBalanceHost);
     }
     if (hasPlatformUsers) void refreshBalance(host);
+    else if (phone) void searchExistingContactUsers(host, phone.slice(-4), accountsKey);
   }
 
   function scheduleUpdate() {
