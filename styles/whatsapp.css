@@ -294,6 +294,14 @@
   margin-top: 4px;
 }
 
+.destination-field {
+  display: block;
+  margin: 14px 0 6px;
+  color: #b5c0bf;
+  font-size: 14px;
+  font-weight: 500;
+}
+
 .destination-selector button {
   min-width: 0;
   padding: 0 4px;
@@ -1007,6 +1015,7 @@ input {
 
 .dialog[data-operation="create-user"] h2,
 .dialog[data-operation="create-user"] label,
+.dialog[data-operation="create-user"] .destination-field,
 .dialog[data-operation="password-reset"] h2,
 .dialog[data-operation="password-reset"] label {
   color: var(--create-text);

@@ -2149,10 +2149,14 @@
       typeof destination?.id === "string" && typeof destination.name === "string");
     let selectedDestinationId = "";
     if (remoteCreateDestinations.length) {
-      const destinationLabel = document.createElement("label");
+      const destinationField = document.createElement("div");
+      destinationField.className = "destination-field";
+      const destinationLabel = document.createElement("span");
       destinationLabel.textContent = "Equipo destino";
       const destinationButtons = document.createElement("div");
       destinationButtons.className = "destination-selector";
+      destinationButtons.setAttribute("role", "group");
+      destinationButtons.setAttribute("aria-label", "Equipo destino");
       for (let index = 1; index <= 3; index += 1) {
         const destination = destinations.find((item) => item.id === `remote-${index}`);
         const button = document.createElement("button");
@@ -2174,8 +2178,8 @@
         });
         destinationButtons.append(button);
       }
-      destinationLabel.append(destinationButtons);
-      dialog.append(destinationLabel);
+      destinationField.append(destinationLabel, destinationButtons);
+      dialog.append(destinationField);
     }
 
     const selector = document.createElement("div");
