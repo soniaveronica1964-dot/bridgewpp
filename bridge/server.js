@@ -3,11 +3,15 @@ const fs = require("node:fs/promises");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const net = require("node:net");
 
 const HOST = "127.0.0.1";
 const PORT = 32145;
+const REMOTE_CREATE_HOST = "0.0.0.0";
+const REMOTE_CREATE_PORT = 32146;
 const REQUEST_TIMEOUT_MS = 90_000;
 const POLL_TIMEOUT_MS = 20_000;
+const REMOTE_REQUEST_MAX_AGE_MS = 5 * 60_000;
 const ALLOWED_REQUEST_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
@@ -26,9 +30,11 @@ const CREDENTIALS_PATH = path.join(DATA_DIRECTORY, "credentials.json");
 
 let credentials;
 let primaryLastSeen = 0;
+let remoteCreateActive = false;
 const queuedRequests = [];
 const waitingPolls = [];
 const pendingRequests = new Map();
+const remoteNonces = new Map();
 
 function isLoopback(remoteAddress) {
   return remoteAddress === "127.0.0.1" ||
@@ -36,11 +42,32 @@ function isLoopback(remoteAddress) {
     remoteAddress === "::ffff:127.0.0.1";
 }
 
+function isPrivateNetworkAddress(remoteAddress) {
+  const address = String(remoteAddress || "").replace(/^::ffff:/i, "");
+  if (net.isIPv4(address)) {
+    const octets = address.split(".").map(Number);
+    return octets[0] === 10 ||
+      octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 ||
+      octets[0] === 192 && octets[1] === 168 ||
+      octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127 ||
+      octets[0] === 169 && octets[1] === 254 ||
+      octets[0] === 127;
+  }
+  const normalized = address.toLowerCase().split("%")[0];
+  return normalized === "::1" || /^f[cd][0-9a-f]{2}:/i.test(normalized) ||
+    /^fe[89ab][0-9a-f]:/i.test(normalized);
+}
+
 function constantTimeEquals(actual, expected) {
   const actualBuffer = Buffer.from(actual || "");
   const expectedBuffer = Buffer.from(expected);
   return actualBuffer.length === expectedBuffer.length &&
     crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function signatureEquals(actual, expected) {
+  if (typeof actual !== "string" || !/^[a-f0-9]{64}$/i.test(actual)) return false;
+  return constantTimeEquals(Buffer.from(actual, "hex"), expected);
 }
 
 function tokenRole(request) {
@@ -66,7 +93,27 @@ function sendJson(response, status, body, origin) {
   response.end(JSON.stringify(body));
 }
 
-function readJson(request) {
+function sendSignedRemoteJson(response, body, origin, timestamp, nonce) {
+  const rawBody = JSON.stringify(body);
+  const signature = crypto.createHmac("sha256", credentials.remoteCreateToken)
+    .update(`${timestamp}\n${nonce}\n${rawBody}`)
+    .digest("hex");
+  const headers = {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "x-bridge-response-signature": signature
+  };
+  if (origin && /^chrome-extension:\/\/[a-p]{32}$/.test(origin)) {
+    headers["access-control-allow-origin"] = origin;
+    headers["access-control-expose-headers"] = "X-Bridge-Response-Signature";
+    headers.vary = "Origin";
+  }
+  response.writeHead(200, headers);
+  response.end(rawBody);
+}
+
+function readRawBody(request) {
   return new Promise((resolve, reject) => {
     let body = "";
     request.setEncoding("utf8");
@@ -77,15 +124,18 @@ function readJson(request) {
         request.destroy();
       }
     });
-    request.on("end", () => {
-      try {
-        resolve(JSON.parse(body));
-      } catch {
-        reject(new Error("El cuerpo de la solicitud no es JSON válido."));
-      }
-    });
+    request.on("end", () => resolve(body));
     request.on("error", reject);
   });
+}
+
+async function readJson(request) {
+  const body = await readRawBody(request);
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error("El cuerpo de la solicitud no es JSON válido.");
+  }
 }
 
 function deliverTask(task) {
@@ -147,7 +197,11 @@ async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${HOST}:${PORT}`);
   const role = tokenRole(request);
   if (url.pathname === "/health" && request.method === "GET") {
-    sendJson(response, 200, { ok: true, service: "running" }, origin);
+    sendJson(response, 200, {
+      ok: true,
+      service: "running",
+      remoteCreate: remoteCreateActive
+    }, origin);
     return;
   }
 
@@ -247,6 +301,125 @@ async function handleRequest(request, response) {
   sendJson(response, 404, { ok: false, error: "Ruta de puente desconocida." }, origin);
 }
 
+function validateRemoteCreateMessage(message) {
+  return message?.type === "CREATE_USER_REQUEST" &&
+    ["ganamos", "multipanel"].includes(message.data?.platform) &&
+    typeof message.data?.username === "string" &&
+    /^[a-z0-9]{2,64}$/i.test(message.data.username);
+}
+
+async function handleRemoteCreateRequest(request, response) {
+  const origin = request.headers.origin || "";
+  if (!isPrivateNetworkAddress(request.socket.remoteAddress)) {
+    sendJson(response, 403, { ok: false, error: "Solo se permiten solicitudes desde una red privada." });
+    return;
+  }
+  if (origin && !/^chrome-extension:\/\/[a-p]{32}$/.test(origin)) {
+    sendJson(response, 403, { ok: false, error: "Origen de extensión no autorizado." });
+    return;
+  }
+  if (request.method === "OPTIONS") {
+    if (!origin) {
+      sendJson(response, 403, { ok: false, error: "Origen de extensión no autorizado." });
+      return;
+    }
+    response.writeHead(204, {
+      "access-control-allow-origin": origin,
+      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-allow-headers": "Content-Type, X-Bridge-Timestamp, X-Bridge-Nonce, X-Bridge-Signature",
+      "access-control-max-age": "600",
+      vary: "Origin"
+    });
+    response.end();
+    return;
+  }
+
+  const url = new URL(request.url, `http://${REMOTE_CREATE_HOST}:${REMOTE_CREATE_PORT}`);
+  if (url.pathname !== "/v1/remote-create-user" || request.method !== "POST") {
+    sendJson(response, 404, { ok: false, error: "Ruta de creación remota desconocida." }, origin);
+    return;
+  }
+
+  let rawBody;
+  let body;
+  try {
+    rawBody = await readRawBody(request);
+    body = JSON.parse(rawBody);
+  } catch (error) {
+    sendJson(response, 400, { ok: false, error: error.message }, origin);
+    return;
+  }
+
+  const timestamp = request.headers["x-bridge-timestamp"];
+  const nonce = request.headers["x-bridge-nonce"];
+  const suppliedSignature = request.headers["x-bridge-signature"];
+  const timestampNumber = Number(timestamp);
+  if (typeof credentials.remoteCreateToken !== "string" ||
+    typeof timestamp !== "string" ||
+    !Number.isSafeInteger(timestampNumber) ||
+    Math.abs(Date.now() - timestampNumber) > REMOTE_REQUEST_MAX_AGE_MS ||
+    typeof nonce !== "string" || !/^[a-f0-9-]{36}$/i.test(nonce) ||
+    typeof suppliedSignature !== "string" ||
+    typeof body?.id !== "string" || !/^[a-f0-9-]{36}$/i.test(body.id) ||
+    !validateRemoteCreateMessage(body.message) || pendingRequests.has(body.id)) {
+    sendJson(response, 400, { ok: false, error: "Solicitud remota de creación inválida." }, origin);
+    return;
+  }
+
+  const now = Date.now();
+  for (const [usedNonce, expiresAt] of remoteNonces) {
+    if (expiresAt <= now) remoteNonces.delete(usedNonce);
+  }
+  if (remoteNonces.has(nonce)) {
+    sendJson(response, 409, { ok: false, error: "La solicitud remota ya fue recibida." }, origin);
+    return;
+  }
+  const expectedSignature = crypto.createHmac("sha256", credentials.remoteCreateToken)
+    .update(`${timestamp}\n${nonce}\n${rawBody}`)
+    .digest();
+  if (!signatureEquals(suppliedSignature, expectedSignature)) {
+    sendJson(response, 401, { ok: false, error: "Código de creación remota inválido." }, origin);
+    return;
+  }
+  remoteNonces.set(nonce, timestampNumber + REMOTE_REQUEST_MAX_AGE_MS);
+
+  if (Date.now() - primaryLastSeen >= 45_000) {
+    sendJson(response, 503, { ok: false, error: "El perfil principal de esta PC no está conectado al puente." }, origin);
+    return;
+  }
+
+  const task = {
+    id: body.id,
+    message: {
+      type: "CREATE_USER_REQUEST",
+      data: {
+        platform: body.message.data.platform,
+        username: body.message.data.username
+      }
+    }
+  };
+  const result = await new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingRequests.delete(body.id);
+      const queuedIndex = queuedRequests.findIndex((queued) => queued.id === body.id);
+      if (queuedIndex !== -1) queuedRequests.splice(queuedIndex, 1);
+      resolve({
+        ok: false,
+        error: "Se agotó el tiempo de espera de la PC destino. Verificá si el usuario se creó antes de volver a intentarlo."
+      });
+    }, REQUEST_TIMEOUT_MS);
+    pendingRequests.set(body.id, {
+      finish: (value) => {
+        clearTimeout(timeout);
+        pendingRequests.delete(body.id);
+        resolve(value);
+      }
+    });
+    deliverTask(task);
+  });
+  sendSignedRemoteJson(response, result, origin, timestamp, nonce);
+}
+
 async function loadCredentials() {
   await fs.mkdir(DATA_DIRECTORY, { recursive: true });
   try {
@@ -255,7 +428,8 @@ async function loadCredentials() {
     if (error.code !== "ENOENT") throw error;
     credentials = {
       primaryToken: crypto.randomBytes(32).toString("base64url"),
-      clientToken: crypto.randomBytes(32).toString("base64url")
+      clientToken: crypto.randomBytes(32).toString("base64url"),
+      remoteCreateToken: crypto.randomBytes(32).toString("base64url")
     };
     await fs.writeFile(CREDENTIALS_PATH, `${JSON.stringify(credentials, null, 2)}\n`, {
       encoding: "utf8",
@@ -266,9 +440,21 @@ async function loadCredentials() {
   if (typeof credentials.primaryToken !== "string" || typeof credentials.clientToken !== "string") {
     throw new Error(`El archivo de credenciales local no es válido: ${CREDENTIALS_PATH}`);
   }
+  if (credentials.remoteCreateToken === undefined) {
+    credentials.remoteCreateToken = crypto.randomBytes(32).toString("base64url");
+    await fs.writeFile(CREDENTIALS_PATH, `${JSON.stringify(credentials, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600
+    });
+  }
+  if (typeof credentials.remoteCreateToken !== "string" ||
+    !/^[A-Za-z0-9_-]{40,64}$/.test(credentials.remoteCreateToken)) {
+    throw new Error(`El código de creación remota local no es válido: ${CREDENTIALS_PATH}`);
+  }
 }
 
 loadCredentials().then(() => {
+  const allowRemoteCreate = process.argv.includes("--allow-remote-creation");
   const server = http.createServer((request, response) => {
     handleRequest(request, response).catch((error) => {
       if (!response.headersSent) {
@@ -288,6 +474,27 @@ loadCredentials().then(() => {
     console.error(`No se pudo iniciar el puente local en ${HOST}:${PORT}: ${error.message}`);
     process.exitCode = 1;
   });
+
+  if (allowRemoteCreate) {
+    const remoteServer = http.createServer((request, response) => {
+      handleRemoteCreateRequest(request, response).catch((error) => {
+        if (!response.headersSent) {
+          sendJson(response, 500, { ok: false, error: "Error interno de creación remota." }, request.headers.origin);
+        } else {
+          response.destroy(error);
+        }
+        console.error("Error de creación remota:", error.message);
+      });
+    });
+    remoteServer.listen(REMOTE_CREATE_PORT, REMOTE_CREATE_HOST, () => {
+      remoteCreateActive = true;
+      console.log(`Creación remota restringida activa en puerto ${REMOTE_CREATE_PORT} (solo redes privadas).`);
+    });
+    remoteServer.on("error", (error) => {
+      remoteCreateActive = false;
+      console.error(`No se pudo iniciar la creación remota en ${REMOTE_CREATE_HOST}:${REMOTE_CREATE_PORT}: ${error.message}`);
+    });
+  }
 }).catch((error) => {
   console.error("No se pudieron inicializar las credenciales del puente:", error.message);
   process.exitCode = 1;

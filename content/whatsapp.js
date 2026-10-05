@@ -3,7 +3,8 @@
   const AGENT_BALANCE_HOST_ID = "ganamos-agent-balance";
   const TOAST_HOST_ID = "ganamos-toast-host";
   const AGENT_MOVEMENT_PREFIX = "agentMovement:";
-  const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "total"];
+  const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "weekly", "monthly", "total"];
+  const AGENT_MOVEMENT_VIEWS = ["daily", "weekly", "monthly", "total"];
   let scheduled = false;
   let activeAccountsKey = null;
   let selectingAgentBalanceText = false;
@@ -12,6 +13,7 @@
   let agentBalanceView = "balance";
   let agentBalanceContactKey = null;
   let platformSuffixes = { ganamos: "f", multipanel: "y" };
+  let remoteCreateDestinations = [];
   const agentBalanceErrors = {};
   const withdrawalChecksInProgress = new WeakSet();
 
@@ -29,6 +31,11 @@
     .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar los sufijos de plataformas.", error));
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes.remoteCreateDestinations) {
+      remoteCreateDestinations = Array.isArray(changes.remoteCreateDestinations.newValue)
+        ? changes.remoteCreateDestinations.newValue
+        : [];
+    }
     if (areaName !== "local" || (!changes.ganamosSuffix && !changes.multiPanelSuffix)) return;
     const ganamos = changes.ganamosSuffix?.newValue ?? platformSuffixes.ganamos;
     const multipanel = changes.multiPanelSuffix?.newValue ?? platformSuffixes.multipanel;
@@ -38,6 +45,12 @@
       scheduleUpdate();
     }
   });
+
+  chrome.storage.local.get("remoteCreateDestinations")
+    .then(({ remoteCreateDestinations: storedDestinations }) => {
+      remoteCreateDestinations = Array.isArray(storedDestinations) ? storedDestinations : [];
+    })
+    .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar las PCs de destino.", error));
 
   function isVisible(element) {
     return Boolean(element && element.getClientRects().length);
@@ -311,7 +324,9 @@
       const button = document.createElement("button");
       const label = `$${formatBalance(shortcutAmount)}`;
       button.type = "button";
-      button.textContent = label;
+      const buttonLabel = document.createElement("span");
+      buttonLabel.textContent = label;
+      button.append(buttonLabel);
       button.setAttribute("aria-label", `Sumar ${label} al monto`);
       button.addEventListener("click", () => {
         const currentAmount = numericInputValue(input) || 0;
@@ -333,7 +348,9 @@
     for (const percentage of [20, 30, 40, 50, 60]) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = `${percentage}%`;
+      const buttonLabel = document.createElement("span");
+      buttonLabel.textContent = `${percentage}%`;
+      button.append(buttonLabel);
       button.setAttribute("aria-label", `Usar ${percentage}%`);
       button.addEventListener("click", () => {
         input.value = String(percentage);
@@ -362,9 +379,15 @@
     return {
       minimized: "Ver balances",
       balance: "Ver movimientos del día",
-      daily: "Ver movimientos totales",
+      daily: "Ver movimientos de la semana",
+      weekly: "Ver movimientos del mes",
+      monthly: "Ver movimientos totales",
       total: "Minimizar balances"
     }[view];
+  }
+
+  function isAgentMovementView(view) {
+    return AGENT_MOVEMENT_VIEWS.includes(view);
   }
 
   function selectCurrencyAmount(element) {
@@ -412,12 +435,12 @@
     card.classList.toggle("is-minimized", minimized);
     card.classList.toggle("has-errors", hasErrors);
     rows.hidden = hasErrors || view !== "balance";
-    movements.hidden = hasErrors || (view !== "daily" && view !== "total");
+    movements.hidden = hasErrors || !isAgentMovementView(view);
     errors.hidden = !hasErrors;
     host.style.width = minimized && !hasErrors
       ? "28px"
       : "min(210px, calc(100vw - 56px))";
-    if (view === "balance" || view === "daily") {
+    if (view === "balance" || view === "daily" || view === "weekly") {
       toggle.replaceChildren(createStatisticsIcon());
     } else {
       toggle.textContent = view === "minimized" ? "▸" : "◂";
@@ -425,7 +448,7 @@
     toggle.title = getAgentBalanceViewTitle(view);
     toggle.setAttribute("aria-label", toggle.title);
     toggle.setAttribute("aria-expanded", String(!minimized));
-    if (view === "daily" || view === "total") void renderAgentMovements(host, view);
+    if (isAgentMovementView(view)) void renderAgentMovements(host, view);
   }
 
   function updateAgentBalanceErrors(host) {
@@ -439,7 +462,7 @@
     errors.hidden = !hasErrors;
     card.querySelector(".agent-balance-rows").hidden = hasErrors || agentBalanceView !== "balance";
     card.querySelector(".agent-movement-view").hidden = hasErrors ||
-      (agentBalanceView !== "daily" && agentBalanceView !== "total");
+      !isAgentMovementView(agentBalanceView);
     host.style.width = agentBalanceView === "minimized" && !hasErrors
       ? "28px"
       : "min(210px, calc(100vw - 56px))";
@@ -494,16 +517,41 @@
         .map(([, record]) => record)
         .sort((first, second) => second.timestamp - first.timestamp);
 
-      const today = new Date().toDateString();
-      const selectedMovements = view === "daily"
-        ? movements.filter((movement) => new Date(movement.timestamp).toDateString() === today)
+      const now = new Date();
+      const start = view === "daily"
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate())
+        : view === "weekly"
+          ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - (now.getDay() + 6) % 7)
+          : view === "monthly"
+            ? new Date(now.getFullYear(), now.getMonth(), 1)
+            : null;
+      const end = view === "daily"
+        ? new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1)
+        : view === "weekly"
+          ? new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7)
+          : view === "monthly"
+            ? new Date(start.getFullYear(), start.getMonth() + 1, 1)
+            : null;
+      const selectedMovements = start && end
+        ? movements.filter((movement) =>
+          movement.timestamp >= start.getTime() && movement.timestamp < end.getTime())
         : movements;
+      const periodName = {
+        daily: "Hoy",
+        weekly: "Sem.",
+        monthly: "Mes",
+        total: "Total"
+      }[view] || "Total";
 
       if (!selectedMovements.length) {
         const empty = document.createElement("div");
         empty.className = "agent-movement-empty";
         empty.textContent = view === "daily"
           ? contactKey ? "Sin movimientos hoy." : "No hay movimientos guardados hoy."
+          : view === "weekly" || view === "monthly"
+            ? contactKey
+              ? `Sin movimientos en ${view === "weekly" ? "la semana" : "el mes"}.`
+              : `No hay movimientos guardados en ${view === "weekly" ? "la semana" : "el mes"}.`
           : contactKey
             ? "Sin movimientos registrados."
             : "No hay movimientos guardados.";
@@ -512,8 +560,8 @@
       }
 
       for (const [label, operation, className] of [
-        [view === "daily" ? "Depósitos Hoy" : "Depósitos Total", "deposit", "agent-movement-deposits"],
-        [view === "daily" ? "Retiros Hoy" : "Retiros Total", "withdrawal", "agent-movement-withdrawals"]
+        [`Depósitos ${periodName}`, "deposit", "agent-movement-deposits"],
+        [`Retiros ${periodName}`, "withdrawal", "agent-movement-withdrawals"]
       ]) {
         const total = selectedMovements
           .filter((movement) => movement.operation === operation)
@@ -1937,6 +1985,7 @@
         const bonusValue = bonus?.enabled ? Number(bonus.value) : 0;
         const creditedAmount = operation === "deposit" ? amountValue + bonusValue : amountValue;
         const amountSummary = `$${formatCurrency(creditedAmount)}`;
+        const bonusSummary = `$${formatCurrency(bonusValue)}`;
         const pendingVerification = operation === "deposit" &&
           response.verification?.status !== "verified";
         let movementSaved = true;
@@ -1965,11 +2014,13 @@
             ? ""
             : " Tampoco se pudo guardar el movimiento localmente.";
           showToast(host, username,
-            `La plataforma respondió, pero no se pudo confirmar el depósito de ${amountSummary}. Quedó pendiente de verificación; revisá el saldo o historial antes de volver a cargar.${observed}${historyNotice}`,
+            `La plataforma respondió, pero no se pudo confirmar el depósito de ${amountSummary} (incluye $${bonusSummary} de bono). Quedó pendiente de verificación; revisá el saldo o historial antes de volver a cargar.${observed}${historyNotice}`,
             "warning");
         } else {
           showToast(host, username,
-            `${operation === "deposit" ? "Depósito verificado" : "Retiro"} ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} (${amountSummary}).`,
+            operation === "deposit"
+              ? `Depósito - ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} ${amountSummary} (+${bonusSummary}).`
+              : `Retiro ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} (${amountSummary}).`,
             "success");
           if (!movementSaved) {
             showToast(host, username, "La operación se completó, pero no se pudo guardar el movimiento.", "error");
@@ -2029,6 +2080,33 @@
       : "Crear Usuario";
     dialog.append(title);
 
+    const destinations = remoteCreateDestinations.filter((destination) =>
+      typeof destination?.id === "string" && typeof destination.name === "string");
+    let selectedDestinationId = destinations.length ? "" : "local";
+    let destinationSelect = null;
+    if (destinations.length) {
+      const destinationLabel = document.createElement("label");
+      destinationLabel.textContent = "Equipo destino";
+      destinationSelect = document.createElement("select");
+      destinationSelect.className = "create-destination-select";
+      const placeholderOption = document.createElement("option");
+      placeholderOption.value = "";
+      placeholderOption.textContent = "Elegí una computadora";
+      destinationSelect.append(placeholderOption);
+      const localOption = document.createElement("option");
+      localOption.value = "local";
+      localOption.textContent = "Esta PC";
+      destinationSelect.append(localOption);
+      for (const destination of destinations) {
+        const option = document.createElement("option");
+        option.value = destination.id;
+        option.textContent = destination.name;
+        destinationSelect.append(option);
+      }
+      destinationLabel.append(destinationSelect);
+      dialog.append(destinationLabel);
+    }
+
     const selector = document.createElement("div");
     selector.className = "platform-selector";
     const nicknameLabel = document.createElement("label");
@@ -2062,14 +2140,25 @@
       .toLowerCase()
       .replace(/[^a-z0-9]/g, "");
     const getGeneratedUsername = () => {
+      if (destinations.length && !selectedDestinationId) return "";
       const nickname = generatedNickname();
-      const suffix = platformSuffixes[selectedPlatform];
+      const suffix = getSelectedSuffix();
       const phoneSuffix = phone.length >= 4 ? phone.slice(-4) : "";
       return nickname ? `${nickname}${phoneSuffix}${suffix}` : "";
+    };
+    const getSelectedSuffix = () => {
+      const destination = destinations.find((item) => item.id === selectedDestinationId);
+      return selectedPlatform === "ganamos"
+        ? destination?.ganamosSuffix || platformSuffixes.ganamos
+        : destination?.multiPanelSuffix || platformSuffixes.multipanel;
     };
     const updateGeneratedUsername = () => {
       usernameInput.value = getGeneratedUsername();
     };
+    destinationSelect?.addEventListener("change", () => {
+      selectedDestinationId = destinationSelect.value;
+      updateGeneratedUsername();
+    });
     nicknameInput.addEventListener("input", updateGeneratedUsername);
     updateGeneratedUsername();
 
@@ -2112,6 +2201,11 @@
     dialog.addEventListener("submit", async (event) => {
       event.preventDefault();
       const nickname = generatedNickname();
+      if (destinations.length && !selectedDestinationId) {
+        showToast(host, phone, "Elegí la computadora donde se creará el usuario.", "error");
+        destinationSelect.focus();
+        return;
+      }
       if (!nickname) {
         showToast(host, phone, "Ingresá un apodo con letras o números.", "error");
         nicknameInput.focus();
@@ -2134,10 +2228,16 @@
           }
           const response = await chrome.runtime.sendMessage({
             type: "CREATE_USER_REQUEST",
-            data: { platform: selectedPlatform, username }
+            data: {
+              platform: selectedPlatform,
+              username,
+              ...(selectedDestinationId && selectedDestinationId !== "local"
+                ? { destinationId: selectedDestinationId }
+                : {})
+            }
           });
           if (response?.usernameExists) {
-            const nextUsername = `${username}${platformSuffixes[selectedPlatform]}`;
+            const nextUsername = `${username}${getSelectedSuffix()}`;
             const retry = await confirmDuplicateUsername(root, username, nextUsername);
             if (!retry) {
               dismissToast(toastKey);
@@ -2148,7 +2248,10 @@
             continue;
           }
           if (!response?.ok) throw new Error(response?.error || "La plataforma no confirmó la creación.");
-          showToast(host, username, `Usuario creado${response.userId ? ` (ID ${response.userId})` : ""}.`, "success", toastKey);
+          const destinationName = destinations.find((item) => item.id === selectedDestinationId)?.name;
+          showToast(host, username,
+            `Usuario creado${destinationName ? ` en ${destinationName}` : ""}${response.userId ? ` (ID ${response.userId})` : ""}.`,
+            "success", toastKey);
           try {
             await navigator.clipboard.writeText(username);
             showToast(host, username, "Usuario copiado al portapapeles.", "success", toastKey);
@@ -2345,7 +2448,7 @@
       activeAccountsKey = null;
       const contactChanged = agentBalanceContactKey !== null;
       agentBalanceContactKey = null;
-      if (contactChanged && agentBalanceHost && (agentBalanceView === "daily" || agentBalanceView === "total")) {
+      if (contactChanged && agentBalanceHost && isAgentMovementView(agentBalanceView)) {
         void renderAgentMovements(agentBalanceHost);
       }
       return;
@@ -2394,7 +2497,7 @@
     host.balanceStates = {};
     activeAccountsKey = accountsKey;
     agentBalanceContactKey = accountsKey;
-    if (agentBalanceHost && (agentBalanceView === "daily" || agentBalanceView === "total")) {
+    if (agentBalanceHost && isAgentMovementView(agentBalanceView)) {
       void renderAgentMovements(agentBalanceHost);
     }
     if (hasPlatformUsers) void refreshBalance(host);

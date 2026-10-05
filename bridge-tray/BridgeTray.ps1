@@ -7,6 +7,7 @@ $script:extensionDirectory = Split-Path -Parent $script:appDirectory
 $script:serverPath = Join-Path $script:extensionDirectory "bridge\server.js"
 $script:dataDirectory = Join-Path $env:LOCALAPPDATA "GanamosWhatsAppBridge"
 $script:credentialsPath = Join-Path $script:dataDirectory "credentials.json"
+$script:remoteCreationFlagPath = Join-Path $script:dataDirectory "remote-creation-enabled"
 $script:logPath = Join-Path $script:dataDirectory "bridge-tray.log"
 $script:startupKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $script:startupValueName = "GanamosWhatsAppBridge"
@@ -15,6 +16,7 @@ $script:bridgeManaged = $false
 $script:closing = $false
 $script:lastTrayIconState = ""
 $script:processDiscoveryWarningLogged = $false
+$script:bridgeRemoteCreationActive = $false
 $script:trayIconResources = New-Object 'System.Collections.Generic.List[System.Drawing.Icon]'
 
 Add-Type -Namespace GanamosBridge -Name IconMethods `
@@ -37,17 +39,26 @@ function Test-BridgeHealth {
         $request.ReadWriteTimeout = 500
         $asyncResult = $request.BeginGetResponse($null, $null)
         if (-not $asyncResult.AsyncWaitHandle.WaitOne(500)) {
+            $script:bridgeRemoteCreationActive = $false
             $request.Abort()
             return $false
         }
 
         $response = $request.EndGetResponse($asyncResult)
         try {
+            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+            try {
+                $health = $reader.ReadToEnd() | ConvertFrom-Json
+                $script:bridgeRemoteCreationActive = [bool]$health.remoteCreate
+            } finally {
+                $reader.Dispose()
+            }
             return [int]$response.StatusCode -eq 200
         } finally {
             $response.Close()
         }
     } catch {
+        $script:bridgeRemoteCreationActive = $false
         return $false
     } finally {
         if ($asyncResult) {
@@ -141,6 +152,7 @@ function Update-TrayState {
     }
 
     $isHealthy = Test-BridgeHealth
+    $remoteCreationItem.Checked = Test-Path -LiteralPath $script:remoteCreationFlagPath
     if ($isHealthy -and -not $script:bridgeProcess) {
         $script:bridgeProcess = Find-BridgeProcess
         if ($script:bridgeProcess) {
@@ -159,15 +171,26 @@ function Update-TrayState {
     }
 
     if ($isHealthy) {
-        $statusItem.Text = if ($script:bridgeManaged) {
+        $statusItem.Text = if ($script:bridgeRemoteCreationActive) {
+            "Estado: activo (altas remotas habilitadas)"
+        } elseif (Test-Path -LiteralPath $script:remoteCreationFlagPath) {
+            "Estado: bridge activo; falló el puerto remoto"
+        } elseif ($script:bridgeManaged) {
             "Estado: activo (administrado por la app)"
         } else {
             "Estado: activo (otro proceso)"
         }
         $startItem.Enabled = $false
         $stopItem.Enabled = $script:bridgeManaged
-        $notifyIcon.Text = "Bridge local: activo"
-        Set-TrayIconState "running"
+        $notifyIcon.Text = if ($script:bridgeRemoteCreationActive) {
+            "Bridge local: activo (alta remota)"
+        } elseif (Test-Path -LiteralPath $script:remoteCreationFlagPath) {
+            "Bridge local: error en puerto remoto"
+        } else {
+            "Bridge local: activo"
+        }
+        Set-TrayIconState $(if ($script:bridgeRemoteCreationActive -or
+            -not (Test-Path -LiteralPath $script:remoteCreationFlagPath)) { "running" } else { "starting" })
     } else {
         $statusItem.Text = "Estado: detenido"
         $startItem.Enabled = $true
@@ -229,7 +252,12 @@ function Start-Bridge {
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $nodePath
-    $startInfo.Arguments = "`"$($script:serverPath)`""
+    $remoteArgument = if (Test-Path -LiteralPath $script:remoteCreationFlagPath) {
+        " --allow-remote-creation"
+    } else {
+        ""
+    }
+    $startInfo.Arguments = "`"$($script:serverPath)`"$remoteArgument"
     $startInfo.WorkingDirectory = $script:extensionDirectory
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
@@ -246,6 +274,93 @@ function Start-Bridge {
     $script:bridgeManaged = $true
     Write-BridgeLog "Proceso del bridge iniciado (PID $($process.Id))."
     Update-TrayState
+}
+
+function Set-RemoteCreationEnabled {
+    param([bool]$Enabled)
+
+    $isHealthy = Test-BridgeHealth
+    $wasEnabled = Test-Path -LiteralPath $script:remoteCreationFlagPath
+    if ($isHealthy -and -not $script:bridgeManaged) {
+        $remoteCreationItem.Checked = $wasEnabled
+        [System.Windows.Forms.MessageBox]::Show(
+            "El bridge activo lo inició otro proceso y no se puede reiniciar desde esta app. Detenelo y volvé a iniciar el bridge desde el ícono B.",
+            "No se pudo cambiar la configuración remota",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
+    }
+
+    if ($isHealthy) {
+        $result = [System.Windows.Forms.MessageBox]::Show(
+            "Para cambiar el acceso remoto se reiniciará el bridge. Las solicitudes en curso podrían interrumpirse. ¿Querés continuar?",
+            "Reiniciar bridge",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+            $remoteCreationItem.Checked = $wasEnabled
+            return
+        }
+    }
+
+    try {
+        if ($Enabled) {
+            if (-not (Test-Path -LiteralPath $script:dataDirectory)) {
+                New-Item -Path $script:dataDirectory -ItemType Directory -Force | Out-Null
+            }
+            Set-Content -LiteralPath $script:remoteCreationFlagPath -Value "enabled" -Encoding ASCII
+        } elseif (Test-Path -LiteralPath $script:remoteCreationFlagPath) {
+            Remove-Item -LiteralPath $script:remoteCreationFlagPath -Force
+        }
+
+        if ($isHealthy) {
+            $script:bridgeProcess.Kill()
+            $script:bridgeProcess.WaitForExit(5000) | Out-Null
+            $script:bridgeProcess.Dispose()
+            $script:bridgeProcess = $null
+            $script:bridgeManaged = $false
+        }
+        $remoteCreationItem.Checked = $Enabled
+        if ($Enabled -or $isHealthy) {
+            Start-Bridge
+        } else {
+            Update-TrayState
+        }
+        if ($Enabled) {
+            for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                if ((Test-BridgeHealth) -and $script:bridgeRemoteCreationActive) {
+                    break
+                }
+                Start-Sleep -Milliseconds 200
+            }
+            if ($script:bridgeRemoteCreationActive) {
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Las altas remotas firmadas están activas en el puerto 32146. Permití Node.js o ese puerto solo para redes privadas en el firewall y compartí únicamente remoteCreateToken con la PC de publicidad.",
+                    "Altas remotas habilitadas",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Information
+                ) | Out-Null
+            } else {
+                [System.Windows.Forms.MessageBox]::Show(
+                    "El bridge local sigue funcionando, pero no se pudo confirmar el listener remoto del puerto 32146. Revisá los logs y que ese puerto esté disponible; el acceso remoto no quedó operativo.",
+                    "No se activó el acceso remoto",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                ) | Out-Null
+            }
+        }
+    } catch {
+        if ($wasEnabled) {
+            Set-Content -LiteralPath $script:remoteCreationFlagPath -Value "enabled" -Encoding ASCII
+        } elseif (Test-Path -LiteralPath $script:remoteCreationFlagPath) {
+            Remove-Item -LiteralPath $script:remoteCreationFlagPath -Force
+        }
+        $remoteCreationItem.Checked = $wasEnabled
+        Update-TrayState
+        throw
+    }
 }
 
 function Stop-Bridge {
@@ -343,6 +458,8 @@ $statusItem = New-Object System.Windows.Forms.ToolStripMenuItem("Estado: consult
 $statusItem.Enabled = $false
 $startItem = New-Object System.Windows.Forms.ToolStripMenuItem("Iniciar bridge")
 $stopItem = New-Object System.Windows.Forms.ToolStripMenuItem("Detener bridge")
+$remoteCreationItem = New-Object System.Windows.Forms.ToolStripMenuItem("Permitir altas remotas")
+$remoteCreationItem.CheckOnClick = $true
 $autoStartItem = New-Object System.Windows.Forms.ToolStripMenuItem("Iniciar con Windows")
 $credentialsItem = New-Object System.Windows.Forms.ToolStripMenuItem("Abrir credenciales")
 $logsItem = New-Object System.Windows.Forms.ToolStripMenuItem("Ver logs")
@@ -352,6 +469,7 @@ $contextMenu.Items.AddRange(@(
     (New-Object System.Windows.Forms.ToolStripSeparator),
     $startItem,
     $stopItem,
+    $remoteCreationItem,
     $autoStartItem,
     (New-Object System.Windows.Forms.ToolStripSeparator),
     $credentialsItem,
@@ -367,8 +485,13 @@ $notifyIcon.ContextMenuStrip = $contextMenu
 $notifyIcon.Visible = $true
 $notifyIcon.add_DoubleClick({
     if (Test-BridgeHealth) {
+        $bridgeMessage = if ($script:bridgeRemoteCreationActive) {
+            "El bridge local está activo en 127.0.0.1:32145 y las altas remotas firmadas están habilitadas en el puerto 32146 para redes privadas."
+        } else {
+            "El bridge local está activo y escucha solo en 127.0.0.1:32145."
+        }
         [System.Windows.Forms.MessageBox]::Show(
-            "El bridge local está activo y escucha solo en 127.0.0.1:32145.",
+            $bridgeMessage,
             "Bridge local",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information
@@ -401,6 +524,19 @@ $startItem.add_Click({
     }
 })
 $stopItem.add_Click({ Stop-Bridge })
+$remoteCreationItem.add_Click({
+    try {
+        Set-RemoteCreationEnabled $remoteCreationItem.Checked
+    } catch {
+        Write-BridgeLog "No se pudo cambiar la configuración de altas remotas: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show(
+            "No se pudo cambiar la configuración de altas remotas:`r`n$($_.Exception.Message)",
+            "Error de configuración remota",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    }
+})
 $autoStartItem.add_Click({
     try {
         Set-AutoStart (-not $autoStartItem.Checked)

@@ -11,6 +11,7 @@
     "https://wallet.casinoenvivo.club/*",
     "http://127.0.0.1/*"
   ],
+  "optional_host_permissions": ["http://*/*"],
   "options_page": "options.html",
   "background": {
     "service_worker": "background.js"

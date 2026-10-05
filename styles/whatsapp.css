@@ -287,6 +287,20 @@
   outline: 2px solid #3979b833;
 }
 
+.dialog select.create-destination-select {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid #53615f;
+  border-radius: 7px;
+  color: #e2e8e7;
+  background: #182323;
+  font: inherit;
+}
+
 .bonus-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -327,19 +341,27 @@
 }
 
 .amount-shortcuts button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-width: 0;
   min-height: 27px;
   padding: 0 2px;
   border-color: #344546;
   color: #cbd4d2;
   background: #202d2d;
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1;
   white-space: nowrap;
 }
 
 .amount-shortcuts button:hover:not(:disabled) {
   border-color: #53615f;
   background: #2b3a39;
+}
+
+.amount-shortcuts button > span {
+  transform: translateY(2px);
 }
 
 .input-affix {
@@ -447,7 +469,7 @@ button[data-action="withdrawal"]:hover:not(:disabled) {
   min-height: 32px;
   padding: 0 10px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.35;
 }
 
@@ -516,7 +538,7 @@ button:disabled {
   color: #e2e8e7;
   background: #1d2929;
   box-shadow: 0 18px 55px #0009;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.45;
 }
 
@@ -540,7 +562,7 @@ button:disabled {
 .last-withdrawal {
   flex: 0 0 auto;
   color: #aab6b5;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.2;
   text-align: right;
   white-space: nowrap;
@@ -746,7 +768,7 @@ button:disabled {
 .movement-history-summary time {
   flex: 0 0 auto;
   color: #9eadaa;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.2;
   white-space: nowrap;
 }
@@ -760,7 +782,7 @@ button:disabled {
   gap: 7px;
   min-width: 0;
   overflow: hidden;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.25;
 }
 
@@ -781,7 +803,7 @@ button:disabled {
   transform: translateY(1px);
   color: #55c99b;
   font-variant-numeric: tabular-nums;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   line-height: 1.2;
 }
@@ -827,7 +849,7 @@ button:disabled {
 .movement-history-verification {
   flex: 0 1 auto;
   overflow: hidden;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -835,17 +857,18 @@ button:disabled {
 .movement-history-bonus {
   flex: 0 1 auto;
   color: #fff;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .movement-history-total {
   color: #9eadaa;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .movement-history-empty {
   margin: 10px 0;
   color: #aab6b5;
+  font-size: 14px;
 }
 
 .movement-history-error {
@@ -905,14 +928,14 @@ h2 {
   margin: 0 0 15px;
   overflow-wrap: anywhere;
   color: #aab6b5;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 label {
   display: block;
   margin: 14px 0 6px;
   color: #b5c0bf;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
 }
 
@@ -927,7 +950,7 @@ input {
   color: #e7edef;
   background: #1b2727;
   font-family: Arial, Helvetica, sans-serif;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.4;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
@@ -1008,7 +1031,7 @@ input::placeholder {
   flex: 0 1 auto;
   min-width: 0;
   color: #e2e8e7;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   text-align: left;
   white-space: nowrap;

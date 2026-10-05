@@ -816,6 +816,154 @@ async function sendRequestThroughBridge(message) {
   });
 }
 
+function getRemoteCreateOrigin(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("La dirección de la PC destino no es válida.");
+  }
+  if (url.protocol !== "http:" || url.port !== "32146" || url.pathname !== "/" ||
+    url.search || url.hash || url.username || url.password) {
+    throw new Error("La dirección de la PC destino no usa el puerto remoto autorizado.");
+  }
+  const host = url.hostname.toLowerCase();
+  const parts = host.split(".");
+  const isIPv4 = parts.length === 4 &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+  const isPrivateIPv4 = isIPv4 && (
+    Number(parts[0]) === 10 ||
+    Number(parts[0]) === 172 && Number(parts[1]) >= 16 && Number(parts[1]) <= 31 ||
+    Number(parts[0]) === 192 && Number(parts[1]) === 168 ||
+    Number(parts[0]) === 100 && Number(parts[1]) >= 64 && Number(parts[1]) <= 127 ||
+    Number(parts[0]) === 169 && Number(parts[1]) === 254 ||
+    Number(parts[0]) === 127
+  );
+  const ipv6Host = host.startsWith("[") ? host.slice(1, -1) : "";
+  const isPrivateIPv6 = ipv6Host === "::1" || /^f[cd][0-9a-f]{2}:/i.test(ipv6Host) ||
+    /^fe[89ab][0-9a-f]:/i.test(ipv6Host);
+  const isPrivateHostname = /^[a-z0-9.-]+$/.test(host) &&
+    /\.(local|lan|internal)$/.test(host);
+  if (!isPrivateIPv4 && !isPrivateIPv6 && !isPrivateHostname) {
+    throw new Error("La PC destino debe tener una dirección de red privada.");
+  }
+  return url.origin;
+}
+
+async function sendRemoteCreateUserRequest(data) {
+  if (!["ganamos", "multipanel"].includes(data?.platform) ||
+    typeof data.username !== "string") {
+    throw new Error("La plataforma o el nombre de usuario para creación remota no son válidos.");
+  }
+  const stored = await chrome.storage.local.get("remoteCreateDestinations");
+  const destination = (Array.isArray(stored.remoteCreateDestinations)
+    ? stored.remoteCreateDestinations
+    : []).find((item) => item?.id === data.destinationId);
+  if (!destination) throw new Error("La PC elegida no está configurada en las opciones de la extensión.");
+
+  const origin = getRemoteCreateOrigin(destination.url);
+  if (typeof destination.token !== "string" || !/^[A-Za-z0-9_-]{40,64}$/.test(destination.token)) {
+    throw new Error(`El código de creación remota de ${destination.name || "la PC destino"} no es válido.`);
+  }
+  const suffix = data.platform === "ganamos"
+    ? destination.ganamosSuffix
+    : destination.multiPanelSuffix;
+  if (!/^[a-z]$/i.test(suffix || "") ||
+    !new RegExp(`^[a-z0-9]+${suffix}+$`, "i").test(data.username) ||
+    data.username.length > 64) {
+    throw new Error(`El usuario no cumple el sufijo configurado para ${destination.name || "la PC destino"}.`);
+  }
+
+  const targetUrl = new URL(origin);
+  const permissionPattern = `${targetUrl.protocol}//${targetUrl.hostname}/*`;
+  const permission = await chrome.permissions.contains({ origins: [permissionPattern] });
+  if (!permission) {
+    throw new Error(`Falta permiso de conexión para ${destination.name || "la PC destino"}. Volvé a guardar las opciones.`);
+  }
+
+  const timestamp = String(Date.now());
+  const nonce = crypto.randomUUID();
+  const body = JSON.stringify({
+    id: crypto.randomUUID(),
+    message: {
+      type: "CREATE_USER_REQUEST",
+      data: { platform: data.platform, username: data.username }
+    }
+  });
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(destination.token),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const requestSignature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(`${timestamp}\n${nonce}\n${body}`)
+  );
+  const toHex = (bytes) => [...new Uint8Array(bytes)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 95_000);
+  try {
+    const response = await fetch(`${origin}/v1/remote-create-user`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-bridge-timestamp": timestamp,
+        "x-bridge-nonce": nonce,
+        "x-bridge-signature": toHex(requestSignature)
+      },
+      body,
+      cache: "no-store",
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      let failure;
+      try {
+        failure = JSON.parse(await response.text());
+      } catch {
+        throw new Error("La PC destino devolvió una respuesta no válida.");
+      }
+      const result = failure;
+      throw new Error(result?.error || `La PC destino respondió HTTP ${response.status}.`);
+    }
+    const responseBody = await response.text();
+    const responseSignature = response.headers.get("x-bridge-response-signature") || "";
+    const expectedResponseSignature = await crypto.subtle.sign(
+      "HMAC",
+      key,
+      encoder.encode(`${timestamp}\n${nonce}\n${responseBody}`)
+    );
+    const expectedHex = toHex(expectedResponseSignature);
+    let signaturesMatch = responseSignature.length === expectedHex.length;
+    for (let index = 0; signaturesMatch && index < expectedHex.length; index += 1) {
+      signaturesMatch = responseSignature.charCodeAt(index) === expectedHex.charCodeAt(index);
+    }
+    if (!signaturesMatch) {
+      throw new Error("No se pudo verificar la respuesta firmada de la PC destino. Comprobá allí si el usuario se creó antes de volver a intentarlo.");
+    }
+    try {
+      return JSON.parse(responseBody);
+    } catch {
+      throw new Error("La PC destino devolvió una respuesta no válida.");
+    }
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Se agotó el tiempo de espera de la PC destino. Verificá si el usuario se creó antes de volver a intentarlo.");
+    }
+    if (error instanceof TypeError) {
+      throw new Error(`No se pudo conectar con ${destination.name || "la PC destino"}. Verificá el bridge, la dirección y el firewall de red privada.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function validateApiMessage(message, suffixes) {
   if (!API_MESSAGE_TYPES.has(message?.type)) return false;
   if (message.type === "AGENT_BALANCE_REQUEST" ||
@@ -930,6 +1078,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return executeApiMessage(message.message);
     }).then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo ejecutar la solicitud en el perfil principal." }));
+    return true;
+  }
+
+  if (message?.type === "CREATE_USER_REQUEST" &&
+    Object.hasOwn(message.data || {}, "destinationId")) {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud no válida o enviada desde una página no autorizada." });
+      return;
+    }
+    sendRemoteCreateUserRequest(message.data)
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo crear el usuario en la PC destino." }));
     return true;
   }
 

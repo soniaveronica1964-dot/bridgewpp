@@ -13,9 +13,12 @@
         font: 14px/1.5 Arial, sans-serif;
       }
       h1 { font-size: 22px; }
+      h2 { margin-top: 28px; font-size: 18px; }
       label { display: block; margin: 18px 0 6px; font-weight: 600; }
       select, input, button { box-sizing: border-box; width: 100%; padding: 9px; font: inherit; }
       .hint { color: #5f6368; }
+      fieldset { margin: 18px 0; padding: 0 14px 14px; border: 1px solid #dadce0; border-radius: 8px; }
+      legend { padding: 0 6px; font-weight: 600; }
       #status { min-height: 1.5em; margin-top: 12px; }
       button { margin-top: 12px; cursor: pointer; }
     </style>
@@ -44,6 +47,47 @@
       <label for="userCreationPassword">Contraseña automática para nuevos usuarios</label>
       <input id="userCreationPassword" name="userCreationPassword" type="password" autocomplete="new-password">
       <p class="hint">El perfil que ejecuta el alta usa esta contraseña para Ganamos y MultiPanel, también para solicitudes de perfiles secundarios.</p>
+      <h2>Destinos para crear usuarios desde otra PC (opcional)</h2>
+      <p class="hint">En cada PC destino, habilitá “Permitir altas remotas” en el menú del bridge. Configurá aquí su dirección privada, el remoteCreateToken de credentials.json y los sufijos de esa PC. Permití el puerto 32146 en el firewall solo para redes privadas.</p>
+      <fieldset>
+        <legend>Destino 1</legend>
+        <label for="remoteName1">Nombre visible</label>
+        <input id="remoteName1" autocomplete="off">
+        <label for="remoteUrl1">Dirección (por ejemplo, http://192.168.1.20:32146)</label>
+        <input id="remoteUrl1" inputmode="url" autocomplete="url">
+        <label for="remoteToken1">Código de creación remota</label>
+        <input id="remoteToken1" type="password" autocomplete="off" spellcheck="false">
+        <label for="remoteGanamosSuffix1">Sufijo Ganamos de esta PC</label>
+        <input id="remoteGanamosSuffix1" maxlength="1" pattern="[A-Za-z]">
+        <label for="remoteMultiPanelSuffix1">Sufijo MultiPanel de esta PC</label>
+        <input id="remoteMultiPanelSuffix1" maxlength="1" pattern="[A-Za-z]">
+      </fieldset>
+      <fieldset>
+        <legend>Destino 2</legend>
+        <label for="remoteName2">Nombre visible</label>
+        <input id="remoteName2" autocomplete="off">
+        <label for="remoteUrl2">Dirección (por ejemplo, http://192.168.1.21:32146)</label>
+        <input id="remoteUrl2" inputmode="url" autocomplete="url">
+        <label for="remoteToken2">Código de creación remota</label>
+        <input id="remoteToken2" type="password" autocomplete="off" spellcheck="false">
+        <label for="remoteGanamosSuffix2">Sufijo Ganamos de esta PC</label>
+        <input id="remoteGanamosSuffix2" maxlength="1" pattern="[A-Za-z]">
+        <label for="remoteMultiPanelSuffix2">Sufijo MultiPanel de esta PC</label>
+        <input id="remoteMultiPanelSuffix2" maxlength="1" pattern="[A-Za-z]">
+      </fieldset>
+      <fieldset>
+        <legend>Destino 3</legend>
+        <label for="remoteName3">Nombre visible</label>
+        <input id="remoteName3" autocomplete="off">
+        <label for="remoteUrl3">Dirección (por ejemplo, http://192.168.1.22:32146)</label>
+        <input id="remoteUrl3" inputmode="url" autocomplete="url">
+        <label for="remoteToken3">Código de creación remota</label>
+        <input id="remoteToken3" type="password" autocomplete="off" spellcheck="false">
+        <label for="remoteGanamosSuffix3">Sufijo Ganamos de esta PC</label>
+        <input id="remoteGanamosSuffix3" maxlength="1" pattern="[A-Za-z]">
+        <label for="remoteMultiPanelSuffix3">Sufijo MultiPanel de esta PC</label>
+        <input id="remoteMultiPanelSuffix3" maxlength="1" pattern="[A-Za-z]">
+      </fieldset>
       <button type="submit">Guardar configuración</button>
       <p id="status" role="status" aria-live="polite"></p>
     </form>
