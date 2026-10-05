@@ -59,6 +59,14 @@
   chrome.storage.local.get("remoteCreateDestinations")
     .then(({ remoteCreateDestinations: storedDestinations }) => {
       remoteCreateDestinations = Array.isArray(storedDestinations) ? storedDestinations : [];
+      const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+      if (balanceHost) {
+        setAgentBalancePanelWidth(
+          balanceHost,
+          agentBalanceView === "minimized",
+          Object.keys(agentBalanceErrors).length > 0
+        );
+      }
     })
     .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar las PCs de destino.", error));
 
@@ -401,9 +409,11 @@
   }
 
   function setAgentBalancePanelWidth(host, minimized, hasErrors) {
+    const hasRemoteDestinations = remoteCreateDestinations.some((destination) =>
+      typeof destination?.id === "string" && typeof destination.name === "string");
     host.style.width = minimized && !hasErrors
       ? "28px"
-      : "min(270px, calc(100vw - 56px))";
+      : `min(${hasRemoteDestinations ? 320 : 230}px, calc(100vw - 56px))`;
   }
 
   function selectCurrencyAmount(element) {
@@ -1087,7 +1097,11 @@
     host.id = AGENT_BALANCE_HOST_ID;
     host.style.left = "68px";
     host.style.top = "2px";
-    host.style.width = "min(270px, calc(100vw - 56px))";
+    setAgentBalancePanelWidth(
+      host,
+      agentBalanceView === "minimized",
+      Object.keys(agentBalanceErrors).length > 0
+    );
     host.style.visibility = "hidden";
 
     const shadow = host.attachShadow({ mode: "open" });
