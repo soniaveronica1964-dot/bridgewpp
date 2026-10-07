@@ -363,7 +363,11 @@ async function handleRequest(request, response) {
       return;
     }
 
-    const task = { id: body.id, message: body.message };
+    const task = {
+      id: body.id,
+      message: body.message,
+      expiresAt: Date.now() + REQUEST_TIMEOUT_MS
+    };
     const result = await new Promise((resolve) => {
       const timeout = setTimeout(() => {
         pendingRequests.delete(body.id);
@@ -506,7 +510,7 @@ async function handleRemoteCreateRequest(request, response) {
     return;
   }
 
-  const task = { id: body.id, message: body.message.type === "CREATE_USER_REQUEST"
+  const task = { id: body.id, expiresAt: Date.now() + REQUEST_TIMEOUT_MS, message: body.message.type === "CREATE_USER_REQUEST"
     ? {
         type: "CREATE_USER_REQUEST",
         data: {

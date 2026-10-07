@@ -3,6 +3,7 @@ const MULTIPANEL_API_ORIGIN = "https://wallet.casinoenvivo.club";
 const MULTIPANEL_WEB_ORIGIN = "https://bo.casinoenvivo.club";
 const DEFAULT_AGENT_USER_ID = "38175478";
 const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
+const PLATFORM_REQUEST_TIMEOUT_MS = 45_000;
 const MULTIPANEL_WEBSITES = [
   "megafaraon.pw", "esmeralda.uno", "esmeralda.digital", "fortubet.pw", "ganaencasa.pw",
   "ganaencasa.ws", "ganaencasa.one", "grancasinozeus.pw", "granposeidon.pw", "jokervip.pw",
@@ -49,34 +50,58 @@ async function getAgentUserId(requestData) {
   return userId;
 }
 
+async function withPlatformRequestTimeout(platform, mayHaveChangedData, request) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PLATFORM_REQUEST_TIMEOUT_MS);
+  try {
+    return await request(controller.signal);
+  } catch (error) {
+    if (!controller.signal.aborted) throw error;
+    const timeoutError = new Error(
+      `${platform} no respondió en ${PLATFORM_REQUEST_TIMEOUT_MS / 1000} segundos.` +
+      (mayHaveChangedData
+        ? " La plataforma podría haber procesado la operación; verificá el saldo o el usuario antes de volver a intentarla."
+        : "")
+    );
+    timeoutError.code = "PLATFORM_TIMEOUT";
+    throw timeoutError;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function requestGanamosJson(path, options = {}) {
   const url = new URL(path, GANAMOS_API_ORIGIN);
   if (url.origin !== GANAMOS_API_ORIGIN) {
     throw new Error("Se rechazó una URL fuera del dominio de Ganamos.");
   }
 
-  const response = await fetch(url, {
-    ...options,
-    credentials: "include",
-    headers: {
-      accept: "application/json, text/plain, */*",
-      ...options.headers
-    },
-    cache: "no-store"
-  });
+  const mayHaveChangedData = (options.method || "GET").toUpperCase() !== "GET";
+  return withPlatformRequestTimeout("Ganamos", mayHaveChangedData, async (signal) => {
+    const response = await fetch(url, {
+      ...options,
+      credentials: "include",
+      headers: {
+        accept: "application/json, text/plain, */*",
+        ...options.headers
+      },
+      cache: "no-store",
+      signal
+    });
 
-  if (!response.ok) {
-    if (response.status === 401 || response.status === 403) {
-      throw new Error("La sesión de Ganamos no está disponible o no tiene permisos.");
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new Error("La sesión de Ganamos no está disponible o no tiene permisos.");
+      }
+      throw new Error(`Ganamos respondió HTTP ${response.status}.`);
     }
-    throw new Error(`Ganamos respondió HTTP ${response.status}.`);
-  }
 
-  try {
-    return await response.json();
-  } catch {
-    throw new Error("Ganamos devolvió una respuesta que no es JSON válido.");
-  }
+    try {
+      return await response.json();
+    } catch {
+      throw new Error("Ganamos devolvió una respuesta que no es JSON válido.");
+    }
+  });
 }
 
 function extractUserRecords(payload) {
@@ -247,36 +272,44 @@ async function requestMultiPanelForm(path, fields) {
     throw new Error("Se rechazó una URL fuera del dominio de MultiPanel.");
   }
 
-  const response = await fetch(url, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      accept: "application/json, text/plain, */*",
-      "content-type": "application/x-www-form-urlencoded"
-    },
-    body: new URLSearchParams(fields),
-    cache: "no-store"
-  });
+  const mayHaveChangedData = [
+    "/api/admin/manualDeposit",
+    "/api/admin/register",
+    "/api/admin/updatePasswordAgent"
+  ].includes(url.pathname);
+  return withPlatformRequestTimeout("MultiPanel", mayHaveChangedData, async (signal) => {
+    const response = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        accept: "application/json, text/plain, */*",
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams(fields),
+      cache: "no-store",
+      signal
+    });
 
-  let payload;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new Error("MultiPanel devolvió una respuesta que no es JSON válido.");
-  }
-  if (!response.ok) {
-    const error = new Error(payload?.message || payload?.description || `MultiPanel respondió HTTP ${response.status}.`);
-    error.code = payload?.code;
-    error.payload = payload;
-    throw error;
-  }
-  if (payload?.result !== "OK" || (payload?.code != null && payload.code !== 0)) {
-    const error = new Error(payload?.message || payload?.description || "MultiPanel no pudo completar la consulta.");
-    error.code = payload?.code;
-    error.payload = payload;
-    throw error;
-  }
-  return payload;
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error("MultiPanel devolvió una respuesta que no es JSON válido.");
+    }
+    if (!response.ok) {
+      const error = new Error(payload?.message || payload?.description || `MultiPanel respondió HTTP ${response.status}.`);
+      error.code = payload?.code;
+      error.payload = payload;
+      throw error;
+    }
+    if (payload?.result !== "OK" || (payload?.code != null && payload.code !== 0)) {
+      const error = new Error(payload?.message || payload?.description || "MultiPanel no pudo completar la consulta.");
+      error.code = payload?.code;
+      error.payload = payload;
+      throw error;
+    }
+    return payload;
+  });
 }
 
 function isInvalidMultiPanelSession(error) {
@@ -544,6 +577,7 @@ async function verifyBalanceIncrease(getBalance, initialBalance, expectedIncreas
       }
     } catch (error) {
       lastError = error;
+      if (error?.code === "PLATFORM_TIMEOUT") break;
     }
   }
 
@@ -1165,7 +1199,7 @@ async function getRemoteAgentBalance(data) {
   const messageType = data.platform === "ganamos"
     ? "AGENT_BALANCE_REQUEST"
     : "MULTIPANEL_AGENT_BALANCE_REQUEST";
-  return sendRemoteOperation(data.destinationId, { type: messageType }, 25_000);
+  return sendRemoteOperation(data.destinationId, { type: messageType }, 60_000);
 }
 
 async function getRemoteUserSearch(data) {

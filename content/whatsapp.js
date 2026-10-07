@@ -28,6 +28,7 @@
   let platformSuffixes = { ganamos: "f", multipanel: "y" };
   let remoteCreateDestinations = [];
   const agentBalanceErrors = {};
+  const agentBalanceToastErrors = {};
   const withdrawalChecksInProgress = new WeakSet();
 
   chrome.storage.local.get(["ganamosSuffix", "multiPanelSuffix"])
@@ -255,6 +256,23 @@
         toast.remove();
       }
     }
+  }
+
+  function reportAgentBalanceError(platform, message) {
+    if (agentBalanceToastErrors[platform] === message) return;
+    agentBalanceToastErrors[platform] = message;
+    showToast(
+      null,
+      platform === "ganamos" ? "Ganamos" : "MultiPanel",
+      message,
+      "error",
+      `agent-balance:${platform}`
+    );
+  }
+
+  function clearAgentBalanceErrorToast(platform) {
+    delete agentBalanceToastErrors[platform];
+    dismissToast(`agent-balance:${platform}`);
   }
 
   function formatCurrency(amount) {
@@ -558,6 +576,7 @@
     };
     const bonusName = enabled ? bonusNames[config.type] : "Sin bono";
     host.dataset.bonusType = enabled ? config.type : "none";
+    updateDepositBonusBypassVisibility(enabled);
     if (enabled && config.type === "specific") host.dataset.platform = config.platform;
     else delete host.dataset.platform;
     percentLabel.textContent = enabled ? bonusPercentages[config.type] : "";
@@ -565,6 +584,14 @@
     button.setAttribute("aria-pressed", String(enabled));
     button.title = enabled ? `Configurar bono activo: ${bonusName}` : "Colocar bono activo";
     button.setAttribute("aria-label", button.title);
+  }
+
+  function updateDepositBonusBypassVisibility(bonusEnabled) {
+    const bypassButton = document.getElementById(HOST_ID)?.shadowRoot?.querySelector(".deposit-bonus-bypass");
+    if (!bypassButton) return;
+    const accountHost = document.getElementById(HOST_ID);
+    const hasPlatformUsers = Boolean(accountHost?.dataset.username || accountHost?.dataset.multipanelUsername);
+    bypassButton.hidden = !bonusEnabled || !hasPlatformUsers;
   }
 
   async function openActiveBonusDialog(host) {
@@ -1108,11 +1135,20 @@
       }
     }));
 
-    setAgentBalanceError(host, platform);
     const readings = results.map(({ balance, error }) =>
       balance === null ? "Error" : `$${formatCurrency(balance)}`);
     const names = results.map(({ destination }) => destination.name);
     const failures = results.filter(({ error }) => error);
+    if (failures.length) {
+      setAgentBalanceError(host, platform);
+      reportAgentBalanceError(
+        platform,
+        failures.map(({ destination, error }) => `${destination.name}: ${error}`).join(" | ")
+      );
+    } else {
+      setAgentBalanceError(host, platform);
+      clearAgentBalanceErrorToast(platform);
+    }
     amount.classList.toggle("agent-balance-error", failures.length > 0);
     amount.textContent = readings.join(" / ");
     amount.title = results.map(({ destination, balance, error }) =>
@@ -1384,7 +1420,7 @@
     });
   }
 
-  async function startWithdrawal(host) {
+  async function startWithdrawal(host, { skipMovementRecord = false } = {}) {
     if (withdrawalChecksInProgress.has(host)) return;
     withdrawalChecksInProgress.add(host);
     const root = host.shadowRoot?.querySelector(".dialog-root");
@@ -1399,14 +1435,16 @@
       if (!root || !contactKey || !username) {
         throw new Error("No se pudo identificar el usuario para verificar retiros recientes.");
       }
-      const recentWithdrawal = await findRecentUserWithdrawal(contactKey);
-      if (host.dataset.accounts !== contactKey) return;
-      if (recentWithdrawal &&
-        !(await confirmRecentWithdrawal(root, username, recentWithdrawal))) {
-        return;
+      if (!skipMovementRecord) {
+        const recentWithdrawal = await findRecentUserWithdrawal(contactKey);
+        if (host.dataset.accounts !== contactKey) return;
+        if (recentWithdrawal &&
+          !(await confirmRecentWithdrawal(root, username, recentWithdrawal))) {
+          return;
+        }
       }
       if (host.dataset.accounts !== contactKey) return;
-      await openTransactionDialog(host, "withdrawal");
+      await openTransactionDialog(host, "withdrawal", { skipMovementRecord });
     } catch (error) {
       showToast(
         host,
@@ -1505,7 +1543,27 @@
     const list = document.createElement("div");
     list.className = "movement-history-list";
     list.setAttribute("aria-live", "polite");
-    dialog.append(heading, filters, dates, list);
+    const totals = document.createElement("div");
+    totals.className = "movement-history-totals";
+    totals.setAttribute("aria-live", "polite");
+    const createTotal = (label, operation, colorClass) => {
+      const item = document.createElement("span");
+      item.className = `movement-history-total-item ${colorClass}`;
+      item.dataset.operation = operation;
+      const labelText = document.createElement("span");
+      labelText.className = "movement-history-total-label";
+      labelText.textContent = `${label}:`;
+      const value = document.createElement("span");
+      value.className = "movement-history-total-value";
+      item.append(labelText, value);
+      totals.append(item);
+      return { item, label: labelText, value };
+    };
+    const depositTotal = createTotal("Depósitos", "deposit", "movement-history-total-deposits");
+    const withdrawalTotal = createTotal("Retiros", "withdrawal", "movement-history-total-withdrawals");
+    const bonusTotal = createTotal("Bonos", "bonus", "movement-history-total-bonuses");
+    const differenceTotal = createTotal("Diferencia", "difference", "movement-history-total-difference");
+    dialog.append(heading, filters, dates, list, totals);
     modal.append(dialog);
     root.append(modal);
 
@@ -1546,6 +1604,43 @@
         visibleMovements = filtered.filter((movement) =>
           (fromTimestamp === null || movement.timestamp >= fromTimestamp) &&
           (toTimestamp === null || movement.timestamp <= toTimestamp));
+      }
+
+      const sums = visibleMovements.reduce((total, movement) => {
+        if (movement.operation === "deposit") {
+          if (Number.isFinite(movement.transactionAmount)) {
+            total.deposits += movement.transactionAmount;
+          } else if (Number.isFinite(movement.bonusAmount)) {
+            total.deposits += Math.max(0, movement.amount - movement.bonusAmount);
+          } else {
+            total.unknownDeposits += 1;
+          }
+          if (Number.isFinite(movement.bonusAmount)) {
+            total.bonuses += movement.bonusAmount;
+          }
+        } else if (movement.operation === "withdrawal") {
+          total.withdrawals += movement.amount;
+        }
+        return total;
+      }, { deposits: 0, withdrawals: 0, bonuses: 0, unknownDeposits: 0 });
+      depositTotal.value.textContent = `$${formatCurrency(sums.deposits)}`;
+      withdrawalTotal.value.textContent = `$${formatCurrency(sums.withdrawals)}`;
+      bonusTotal.value.textContent = `$${formatCurrency(sums.bonuses)}`;
+      const difference = sums.deposits - sums.withdrawals;
+      const differenceSign = difference > 0 ? "positive" : difference < 0 ? "negative" : "zero";
+      differenceTotal.value.dataset.sign = differenceSign;
+      differenceTotal.value.textContent = difference === 0
+        ? `$${formatCurrency(0)}`
+        : `${difference > 0 ? "+" : "−"}$${formatCurrency(Math.abs(difference))}`;
+      if (sums.unknownDeposits) {
+        const explanation = `No incluye ${sums.unknownDeposits} depósito(s) histórico(s) cuyo monto original y bono no se guardaron por separado.`;
+        depositTotal.item.title = explanation;
+        depositTotal.label.textContent = "Depósitos:";
+        depositTotal.value.title = explanation;
+      } else {
+        depositTotal.item.removeAttribute("title");
+        depositTotal.label.textContent = "Depósitos:";
+        depositTotal.value.removeAttribute("title");
       }
 
       if (!visibleMovements.length) {
@@ -1818,6 +1913,7 @@
       const response = await chrome.runtime.sendMessage({ type: "AGENT_BALANCE_REQUEST" });
       if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el balance del agente.");
       setAgentBalanceError(host, "ganamos");
+      clearAgentBalanceErrorToast("ganamos");
       label.title = `Ganamos: $${formatCurrency(Number(response.balance))}`;
       amount.title = label.title;
       amount.textContent = `$${formatCurrency(Number(response.balance))}`;
@@ -1826,7 +1922,9 @@
       amount.classList.add("agent-balance-error");
       amount.title = label.title;
       amount.textContent = "Error";
-      setAgentBalanceError(host, "ganamos", error.message || "Error al consultar el balance.");
+      const message = error.message || "Error al consultar el balance.";
+      setAgentBalanceError(host, "ganamos", message);
+      reportAgentBalanceError("ganamos", message);
     } finally {
       agentBalanceLoading = false;
       refreshButtons.forEach((refresh) => { refresh.disabled = false; });
@@ -1857,6 +1955,7 @@
       const response = await chrome.runtime.sendMessage({ type: "MULTIPANEL_AGENT_BALANCE_REQUEST" });
       if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el balance del agente MultiPanel.");
       setAgentBalanceError(host, "multipanel");
+      clearAgentBalanceErrorToast("multipanel");
       label.title = `MultiPanel: $${formatCurrency(Number(response.balance))}`;
       amount.title = label.title;
       amount.textContent = `$${formatCurrency(Number(response.balance))}`;
@@ -1865,7 +1964,9 @@
       amount.classList.add("agent-balance-error");
       amount.title = label.title;
       amount.textContent = "Error";
-      setAgentBalanceError(host, "multipanel", error.message || "Error al consultar el balance.");
+      const message = error.message || "Error al consultar el balance.";
+      setAgentBalanceError(host, "multipanel", message);
+      reportAgentBalanceError("multipanel", message);
     } finally {
       multiPanelAgentBalanceLoading = false;
       refreshButtons.forEach((refresh) => { refresh.disabled = false; });
@@ -1968,14 +2069,48 @@
     status.append(balanceLabel, refresh);
     const actions = document.createElement("div");
     actions.className = "actions";
-    for (const [action, label] of [["deposit", "Depositar"]]) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.dataset.action = action;
-      button.textContent = label;
-      button.addEventListener("click", () => openTransactionDialog(host, action));
-      actions.append(button);
+    const depositGroup = document.createElement("div");
+    depositGroup.className = "deposit-action-group";
+    const bypassBonusButton = document.createElement("button");
+    bypassBonusButton.type = "button";
+    bypassBonusButton.className = "deposit-bonus-bypass";
+    bypassBonusButton.title = "Depositar sin aplicar el bono automático";
+    bypassBonusButton.setAttribute("aria-label", bypassBonusButton.title);
+    bypassBonusButton.hidden = true;
+    const bypassBonusIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    bypassBonusIcon.setAttribute("viewBox", "0 0 24 24");
+    bypassBonusIcon.setAttribute("aria-hidden", "true");
+    bypassBonusIcon.setAttribute("focusable", "false");
+    for (const pathData of [
+      "M3 10h18v11H3z",
+      "M2 7h20v3H2z",
+      "M12 7v14",
+      "M12 7H7.5a2.5 2.5 0 1 1 2.2-3.7L12 7Z",
+      "M12 7h4.5a2.5 2.5 0 1 0-2.2-3.7L12 7Z",
+      "M4 4l16 16"
+    ]) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", pathData);
+      bypassBonusIcon.append(path);
     }
+    bypassBonusButton.append(bypassBonusIcon);
+    bypassBonusButton.addEventListener("click", () =>
+      openTransactionDialog(host, "deposit", { skipAutomaticBonus: true }));
+    void readActiveBonusConfig()
+      .then((config) => {
+        updateDepositBonusBypassVisibility(Boolean(config?.enabled && config.type !== "none"));
+      })
+      .catch((error) => console.error(
+        "[Ganamos balance extension] No se pudo actualizar el botón para omitir el bono.",
+        error
+      ));
+    const depositButton = document.createElement("button");
+    depositButton.type = "button";
+    depositButton.dataset.action = "deposit";
+    depositButton.textContent = "Depositar";
+    depositButton.addEventListener("click", () => openTransactionDialog(host, "deposit"));
+    depositGroup.append(bypassBonusButton, depositButton);
+    actions.append(depositGroup);
     const withdrawalGroup = document.createElement("div");
     withdrawalGroup.className = "withdrawal-action-group";
     const withdrawalButton = document.createElement("button");
@@ -1983,6 +2118,21 @@
     withdrawalButton.dataset.action = "withdrawal";
     withdrawalButton.textContent = "Retirar";
     withdrawalButton.addEventListener("click", () => void startWithdrawal(host));
+    const untrackedWithdrawalButton = document.createElement("button");
+    untrackedWithdrawalButton.type = "button";
+    untrackedWithdrawalButton.className = "untracked-withdrawal-button";
+    untrackedWithdrawalButton.title = "Retirar sin registrar en movimientos";
+    untrackedWithdrawalButton.setAttribute("aria-label", untrackedWithdrawalButton.title);
+    const untrackedWithdrawalIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    untrackedWithdrawalIcon.setAttribute("viewBox", "0 0 24 24");
+    untrackedWithdrawalIcon.setAttribute("aria-hidden", "true");
+    untrackedWithdrawalIcon.setAttribute("focusable", "false");
+    const untrackedWithdrawalArrow = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    untrackedWithdrawalArrow.setAttribute("d", "M12 15V3m0 0-4 4m4-4 4 4M5 13v7h14v-7");
+    untrackedWithdrawalIcon.append(untrackedWithdrawalArrow);
+    untrackedWithdrawalButton.append(untrackedWithdrawalIcon);
+    untrackedWithdrawalButton.addEventListener("click", () =>
+      void startWithdrawal(host, { skipMovementRecord: true }));
     const passwordResetButton = document.createElement("button");
     passwordResetButton.type = "button";
     passwordResetButton.className = "password-reset-button";
@@ -1997,7 +2147,7 @@
     passwordIcon.append(passwordIconPath);
     passwordResetButton.append(passwordIcon);
     passwordResetButton.addEventListener("click", () => openPasswordResetDialog(host));
-    withdrawalGroup.append(withdrawalButton);
+    withdrawalGroup.append(withdrawalButton, untrackedWithdrawalButton);
     actions.append(withdrawalGroup);
     const createUserButton = document.createElement("button");
     createUserButton.type = "button";
@@ -2059,9 +2209,12 @@
         if (!response?.ok) throw new Error(response?.error || "consulta fallida");
         if (host.dataset.accounts !== requestAccountsKey) return;
         host.balanceStates[platform] = { balance: response.balance };
+        dismissToast(`balance:${requestAccountsKey}:${platform}`);
       } catch (error) {
         if (host.dataset.accounts !== requestAccountsKey) return;
-        host.balanceStates[platform] = { error: error.message || "consulta fallida" };
+        const message = error.message || "consulta fallida";
+        host.balanceStates[platform] = { error: message };
+        showToast(host, username, message, "error", `balance:${requestAccountsKey}:${platform}`);
       }
       if (document.getElementById(HOST_ID) === host && host.dataset.accounts === requestAccountsKey) {
         renderBalanceRows(host, accounts);
@@ -2372,7 +2525,10 @@
     })();
   }
 
-  async function openTransactionDialog(host, operation) {
+  async function openTransactionDialog(host, operation, {
+    skipAutomaticBonus = false,
+    skipMovementRecord = false
+  } = {}) {
     const shadow = host.shadowRoot;
     const root = shadow?.querySelector(".dialog-root");
     const openedAccountsKey = host.dataset.accounts;
@@ -2410,7 +2566,9 @@
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
     const title = document.createElement("h2");
-    title.textContent = operation === "deposit" ? "Depositar" : "Retirar";
+    title.textContent = operation === "deposit"
+      ? "Depositar"
+      : skipMovementRecord ? "Retirar (Excepción)" : "Retirar";
     const heading = document.createElement("div");
     heading.className = "transaction-heading";
     heading.append(title);
@@ -2584,14 +2742,14 @@
         if (!applyingAutomaticBonusPercent) manuallyChangedBonusPercent = true;
       });
       applyPlatformBonus = () => {
-        if (!activeBonusConfig?.enabled ||
+        if (skipAutomaticBonus || !activeBonusConfig?.enabled ||
           !["double", "specific"].includes(activeBonusConfig.type)) return;
         manuallyChangedBonusPercent = false;
         applyAutomaticBonusPercent();
       };
       amountInput.addEventListener("input", () => {
         const thresholdExceeded = (numberValue(amountInput) || 0) >= 10_000;
-        if (activeBonusConfig?.enabled && activeBonusConfig.type === "special" &&
+        if (!skipAutomaticBonus && activeBonusConfig?.enabled && activeBonusConfig.type === "special" &&
           thresholdExceeded !== specialBonusThresholdExceeded) {
           specialBonusThresholdExceeded = thresholdExceeded;
           manuallyChangedBonusPercent = false;
@@ -2601,7 +2759,7 @@
       amountInput.addEventListener("input", updateDepositSummary);
       bonusPercentInput.addEventListener("input", updateDepositSummary);
       bonusInput.addEventListener("input", updateDepositSummary);
-      if (activeBonusConfig?.enabled) applyAutomaticBonusPercent();
+      if (!skipAutomaticBonus && activeBonusConfig?.enabled) applyAutomaticBonusPercent();
       updateDepositSummary();
     }
 
@@ -2762,21 +2920,23 @@
         const pendingVerification = operation === "deposit" &&
           response.verification?.status !== "verified";
         let movementSaved = true;
-        try {
-          await saveAgentMovement(openedAccountsKey, operation, creditedAmount, selectedPlatform, {
-            username,
-            transactionAmount: amountValue,
-            bonusAmount: operation === "deposit" ? bonusValue : 0,
-            status: pendingVerification ? "pending-verification" : undefined,
-            verification: response.verification
-          });
-          if (agentBalanceContactKey === openedAccountsKey) {
-            const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
-            if (agentBalanceHost) void renderAgentMovements(agentBalanceHost);
+        if (!skipMovementRecord) {
+          try {
+            await saveAgentMovement(openedAccountsKey, operation, creditedAmount, selectedPlatform, {
+              username,
+              transactionAmount: amountValue,
+              bonusAmount: operation === "deposit" ? bonusValue : 0,
+              status: pendingVerification ? "pending-verification" : undefined,
+              verification: response.verification
+            });
+            if (agentBalanceContactKey === openedAccountsKey) {
+              const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+              if (agentBalanceHost) void renderAgentMovements(agentBalanceHost);
+            }
+          } catch (error) {
+            movementSaved = false;
+            console.error("[Ganamos balance extension] No se pudo guardar el movimiento de la operación.", error);
           }
-        } catch (error) {
-          movementSaved = false;
-          console.error("[Ganamos balance extension] No se pudo guardar el movimiento de la operación.", error);
         }
         if (pendingVerification) {
           const verification = response.verification;
@@ -2788,7 +2948,7 @@
             : " Tampoco se pudo guardar el movimiento localmente.";
           showToast(host, username,
             `La plataforma respondió, pero no se pudo confirmar el depósito de ${amountSummary} (incluye $${bonusSummary} de bono). Quedó pendiente de verificación; revisá el saldo o historial antes de volver a cargar.${observed}${historyNotice}`,
-            "warning");
+            "error");
         } else {
           showToast(host, username,
             operation === "deposit"
@@ -3212,6 +3372,7 @@
     const appendSearchResult = (name, result, requestError = null) => {
       if (requestError) {
         console.error(`[Ganamos balance extension] No se pudieron buscar usuarios en ${name}.`, requestError);
+        showToast(host, name, String(requestError), "error", `user-search:${name}:${digits}`);
         const error = document.createElement("div");
         error.className = "contact-user-search-error";
         error.textContent = `${name}: no se pudo completar la búsqueda.`;
@@ -3219,6 +3380,7 @@
         resultsContainer.append(error);
         return;
       }
+      dismissToast(`user-search:${name}:${digits}`);
       const namesByPlatform = [];
       result ||= {};
       result.errors ||= {};
@@ -3265,11 +3427,21 @@
       for (const [platform, message] of Object.entries(result?.errors || {})) {
         if (!["ganamos", "multipanel"].includes(platform) || !message) continue;
         console.error(`[Ganamos balance extension] No se pudieron buscar usuarios en ${name} (${platform}).`, message);
+        showToast(
+          host,
+          name,
+          `${platform === "ganamos" ? "Ganamos" : "MultiPanel"}: ${message}`,
+          "error",
+          `user-search:${name}:${digits}:${platform}`
+        );
         const error = document.createElement("div");
         error.className = "contact-user-search-error";
         error.textContent = `${name}: error al consultar ${platform === "ganamos" ? "Ganamos" : "MultiPanel"}.`;
         error.title = String(message);
         resultsContainer.append(error);
+      }
+      for (const platform of ["ganamos", "multipanel"]) {
+        if (!result.errors[platform]) dismissToast(`user-search:${name}:${digits}:${platform}`);
       }
     };
 
@@ -3305,11 +3477,13 @@
         });
         if (!isCurrentContact()) return;
         if (!response?.ok) throw new Error(response?.error || "La búsqueda en esta PC no se completó.");
+        dismissToast(`user-search:local:${digits}`);
         appendSearchResult("Esta PC", response);
       }
     } catch (error) {
       if (!isCurrentContact()) return;
       console.error("[Ganamos balance extension] No se pudieron buscar usuarios por los últimos cuatro números.", error);
+      showToast(host, "Búsqueda de usuarios", error.message || "No se pudo completar la búsqueda.", "error", `user-search:local:${digits}`);
       const failure = document.createElement("div");
       failure.className = "contact-user-search-error";
       failure.textContent = `No se pudo completar la búsqueda: ${error.message || "error desconocido."}`;
@@ -3368,6 +3542,9 @@
     host.dataset.defaultPlatform = usernames?.firstPlatform || (usernames?.ganamos ? "ganamos" : "multipanel");
     host.dataset.contactPhone = phone || "";
     const hasPlatformUsers = Boolean(usernames?.ganamos || usernames?.multipanel);
+    updateDepositBonusBypassVisibility(
+      Boolean(activeBonusHost?.dataset.bonusType && activeBonusHost.dataset.bonusType !== "none")
+    );
     const contactUserSearch = host.shadowRoot.querySelector(".contact-user-search");
     contactUserSearch.hidden = true;
     contactUserSearch.querySelector(".contact-user-search-results").replaceChildren();

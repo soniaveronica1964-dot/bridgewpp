@@ -2,9 +2,72 @@
   const BRIDGE_URL = "http://127.0.0.1:32145";
   const RETRY_DELAY_MS = 1500;
   const sleep = (delay) => new Promise((resolve) => window.setTimeout(resolve, delay));
+  const platformQueues = {
+    ganamos: Promise.resolve(),
+    multipanel: Promise.resolve()
+  };
+  let searchQueue = Promise.resolve();
 
   async function sendRuntimeMessage(message) {
     return chrome.runtime.sendMessage(message);
+  }
+
+  function getTaskPlatform(message) {
+    if (message.type === "AGENT_BALANCE_REQUEST") return "ganamos";
+    if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return "multipanel";
+    if (message.type === "BALANCE_REQUEST" || message.type === "TRANSACTION_REQUEST" ||
+      message.type === "CREATE_USER_REQUEST" || message.type === "PASSWORD_RESET_REQUEST") {
+      return message.data?.platform === "multipanel" ? "multipanel" : "ganamos";
+    }
+    if (message.type === "WITHDRAWAL_HISTORY_REQUEST") return "ganamos";
+    return null;
+  }
+
+  async function executePrimaryTask(task) {
+    if (Number.isFinite(task.expiresAt) && Date.now() >= task.expiresAt) return;
+    let result;
+    try {
+      result = await sendRuntimeMessage({
+        type: "BRIDGE_EXECUTE",
+        message: task.message
+      });
+    } catch (error) {
+      result = { ok: false, error: error.message || "No se pudo ejecutar la solicitud en el perfil principal." };
+    }
+
+    try {
+      await sendRuntimeMessage({
+        type: "BRIDGE_COMPLETE",
+        id: task.id,
+        result
+      });
+    } catch (error) {
+      console.error("[Ganamos balance extension] No se pudo completar la solicitud del puente.", error);
+    }
+  }
+
+  function enqueuePrimaryTask(task) {
+    if (task.message.type === "EXCHANGE_REQUEST") {
+      const exchange = Promise.all([platformQueues.ganamos, platformQueues.multipanel])
+        .then(() => executePrimaryTask(task));
+      platformQueues.ganamos = exchange;
+      platformQueues.multipanel = exchange;
+      return;
+    }
+
+    const platform = getTaskPlatform(task.message);
+    if (platform) {
+      platformQueues[platform] = platformQueues[platform]
+        .then(() => executePrimaryTask(task));
+      return;
+    }
+
+    if (task.message.type === "USER_SEARCH_REQUEST") {
+      searchQueue = searchQueue.then(() => executePrimaryTask(task));
+      return;
+    }
+
+    void executePrimaryTask(task);
   }
 
   async function runPrimaryBridge() {
@@ -16,21 +79,7 @@
           continue;
         }
         if (!polled.task) continue;
-
-        let result;
-        try {
-          result = await sendRuntimeMessage({
-            type: "BRIDGE_EXECUTE",
-            message: polled.task.message
-          });
-        } catch (error) {
-          result = { ok: false, error: error.message || "No se pudo ejecutar la solicitud en el perfil principal." };
-        }
-        await sendRuntimeMessage({
-          type: "BRIDGE_COMPLETE",
-          id: polled.task.id,
-          result
-        });
+        enqueuePrimaryTask(polled.task);
       } catch (error) {
         console.error("[Ganamos balance extension] Error de conexión con el puente local.", error);
         await sleep(RETRY_DELAY_MS);
