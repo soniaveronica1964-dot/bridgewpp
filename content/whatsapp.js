@@ -1,8 +1,10 @@
 (() => {
   const HOST_ID = "ganamos-balance-extension";
   const AGENT_BALANCE_HOST_ID = "ganamos-agent-balance";
+  const CONTACT_FLOW_COUNTER_HOST_ID = "ganamos-contact-flow-counters";
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
+  const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
   const TOAST_HOST_ID = "ganamos-toast-host";
   const AGENT_MOVEMENT_PREFIX = "agentMovement:";
   const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "weekly", "monthly", "total"];
@@ -27,6 +29,17 @@
   let agentBalanceContactKey = null;
   let platformSuffixes = { ganamos: "f", multipanel: "y" };
   let remoteCreateDestinations = [];
+  let remoteCreateDestinationsLoaded = false;
+  let contactFlowCounters = { arrived: 0, derived: {}, countedNumbers: [], panels: [] };
+  let contactFlowCounterRows = new Map();
+  let contactFlowDerivedRows = null;
+  let contactFlowPanelConfigRefresh = null;
+  let contactFlowCounterSaveQueue = Promise.resolve();
+  let contactFlowCountersLoaded = false;
+  let contactFlowMessageObserverStarted = false;
+  const contactFlowChatNumbers = new WeakMap();
+  const processedIncomingMessages = new WeakSet();
+  const processedOutgoingMessages = new WeakSet();
   const agentBalanceErrors = {};
   const agentBalanceToastErrors = {};
   const withdrawalChecksInProgress = new WeakSet();
@@ -45,6 +58,13 @@
     .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar los sufijos de plataformas.", error));
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes[CONTACT_FLOW_COUNTERS_KEY]) {
+      contactFlowCounters = normalizeContactFlowCounters(
+        changes[CONTACT_FLOW_COUNTERS_KEY].newValue
+      );
+      for (const updateRow of contactFlowCounterRows.values()) updateRow();
+      contactFlowPanelConfigRefresh?.();
+    }
     if (areaName === "local" && changes.activeBonusConfig) {
       const bonusHost = document.getElementById(ACTIVE_BONUS_HOST_ID);
       if (bonusHost) {
@@ -60,6 +80,10 @@
       remoteCreateDestinations = Array.isArray(changes.remoteCreateDestinations.newValue)
         ? changes.remoteCreateDestinations.newValue
         : [];
+      remoteCreateDestinationsLoaded = true;
+      renderContactFlowDerivedCounters();
+      updateContactFlowCounterVisibility();
+      updateActiveBonusVisibility();
       const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
       if (balanceHost) {
         setAgentBalancePanelWidth(
@@ -84,6 +108,10 @@
   chrome.storage.local.get("remoteCreateDestinations")
     .then(({ remoteCreateDestinations: storedDestinations }) => {
       remoteCreateDestinations = Array.isArray(storedDestinations) ? storedDestinations : [];
+      remoteCreateDestinationsLoaded = true;
+      renderContactFlowDerivedCounters();
+      updateContactFlowCounterVisibility();
+      updateActiveBonusVisibility();
       const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
       if (balanceHost) {
         setAgentBalancePanelWidth(
@@ -93,7 +121,28 @@
         );
       }
     })
-    .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar las PCs de destino.", error));
+    .catch((error) => {
+      remoteCreateDestinationsLoaded = true;
+      updateContactFlowCounterVisibility();
+      updateActiveBonusVisibility();
+      console.error("[Ganamos balance extension] No se pudieron cargar las PCs de destino.", error);
+    });
+
+  chrome.storage.local.get(CONTACT_FLOW_COUNTERS_KEY)
+    .then((stored) => {
+      contactFlowCounters = normalizeContactFlowCounters(stored[CONTACT_FLOW_COUNTERS_KEY]);
+      contactFlowCountersLoaded = true;
+      for (const updateRow of contactFlowCounterRows.values()) updateRow();
+      startContactFlowMessageObserver();
+    })
+    .catch((error) => {
+      contactFlowCountersLoaded = true;
+      console.error(
+        "[Ganamos balance extension] No se pudieron cargar los contadores de llegados y derivados.",
+        error
+      );
+      startContactFlowMessageObserver();
+    });
 
   function isVisible(element) {
     return Boolean(element && element.getClientRects().length);
@@ -546,12 +595,1031 @@
     return AGENT_MOVEMENT_VIEWS.includes(view);
   }
 
-  function setAgentBalancePanelWidth(host, minimized, hasErrors) {
-    const hasRemoteDestinations = remoteCreateDestinations.some((destination) =>
+  function hasConfiguredRemoteDestinations() {
+    return remoteCreateDestinations.some((destination) =>
       typeof destination?.id === "string" && typeof destination.name === "string");
+  }
+
+  function normalizeContactFlowCounters(value) {
+    const counters = { arrived: 0, derived: {}, countedNumbers: [], panels: [] };
+    if (!value || typeof value !== "object") return counters;
+    if (Number.isSafeInteger(value.arrived) && value.arrived >= 0) {
+      counters.arrived = value.arrived;
+    }
+    if (Array.isArray(value.countedNumbers)) {
+      counters.countedNumbers = [...new Set(value.countedNumbers.filter((number) =>
+        typeof number === "string" && /^\d{7,20}$/.test(number)))];
+    }
+    if (Array.isArray(value.panels)) {
+      const panelIds = new Set();
+      counters.panels = value.panels.flatMap((panel) => {
+        if (!panel || typeof panel !== "object" ||
+          typeof panel.id !== "string" || !panel.id ||
+          typeof panel.keyword !== "string" || !panel.keyword.trim() ||
+          typeof panel.destinationId !== "string" || !panel.destinationId ||
+          panelIds.has(panel.id)) return [];
+        panelIds.add(panel.id);
+        return [{
+          id: panel.id,
+          title: typeof panel.title === "string" && panel.title.trim()
+            ? panel.title.trim()
+            : panel.keyword.trim(),
+          keyword: panel.keyword,
+          destinationId: panel.destinationId,
+          count: Number.isSafeInteger(panel.count) && panel.count >= 0 ? panel.count : 0,
+          countedNumbers: Array.isArray(panel.countedNumbers)
+            ? [...new Set(panel.countedNumbers.filter((number) =>
+              typeof number === "string" && /^\d{7,20}$/.test(number)))]
+            : []
+        }];
+      });
+    }
+    if (value.derived && typeof value.derived === "object" && !Array.isArray(value.derived)) {
+      for (const [destinationId, count] of Object.entries(value.derived)) {
+        if (Number.isSafeInteger(count) && count >= 0) {
+          counters.derived[destinationId] = count;
+        }
+      }
+    }
+    return counters;
+  }
+
+  function getContactFlowCounterValue(key) {
+    return key === "arrived" ? contactFlowCounters.arrived : contactFlowCounters.derived[key] || 0;
+  }
+
+  function getIncomingMessageDetails(metadataElement) {
+    const metadata = metadataElement.getAttribute("data-pre-plain-text");
+    const match = metadata?.match(/^\[([^\]]+)\]\s*(.*?):(?:\s|$)/);
+    let isIncoming = false;
+    const senderText = (match?.[2] || "").replace(/[\u200e\u200f\u202a-\u202e]/g, "").trim();
+    const senderDigits = /^[+\d\s().-]+$/.test(senderText)
+      ? senderText.replace(/\D/g, "")
+      : "";
+    let jidMatch = null;
+    const chat = metadataElement.closest("#main");
+    const chatTitle = chat?.querySelector('[data-testid="conversation-info-header-chat-title"]') ||
+      chat?.querySelector("header h1, header h2, header [role='heading']");
+    const chatTitleText = chatTitle?.textContent
+      ?.replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+      .trim() || "";
+    const chatTitleDigits = /^[+\d\s().-]+$/.test(chatTitleText)
+      ? chatTitleText.replace(/\D/g, "")
+      : "";
+    const normalizeIdentity = (value) => value
+      .normalize("NFKC")
+      .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]/gu, "");
+    const senderMatchesChat = Boolean(senderText && (
+      senderDigits && senderDigits === chatTitleDigits ||
+      normalizeIdentity(senderText) === normalizeIdentity(chatTitleText)
+    ));
+    const messageContainer = metadataElement.closest(".message-in, .message-out");
+    const nestedMessageId = messageContainer?.querySelector("[data-id]")?.getAttribute("data-id") || "";
+    if (/@g\.us(?:_|$)/i.test(nestedMessageId)) return null;
+    jidMatch = nestedMessageId.match(/(?:^|_)(\d{7,20})@(?:c\.us|s\.whatsapp\.net)(?:_|$)/i);
+    for (let ancestor = metadataElement; ancestor; ancestor = ancestor.parentElement) {
+      if (ancestor.classList.contains("message-out")) return null;
+      if (ancestor.classList.contains("message-in")) isIncoming = true;
+      const dataId = ancestor.getAttribute("data-id") || "";
+      if (/@g\.us(?:_|$)/i.test(dataId)) return null;
+      jidMatch ||= dataId.match(/(?:^|_)(\d{7,20})@(?:c\.us|s\.whatsapp\.net)(?:_|$)/i);
+      if (ancestor.matches("#main")) break;
+    }
+    isIncoming ||= senderMatchesChat;
+    if (!isIncoming) return null;
+    const chatNumber = getPhoneFromContactTitle(chatTitle);
+    const number = jidMatch?.[1] ||
+      (/^\d{7,20}$/.test(senderDigits) ? senderDigits : "") ||
+      (/^\d{7,20}$/.test(chatNumber || "") ? chatNumber : "");
+    const timestamp = match ? parseIncomingMessageTimestamp(match[1]) : null;
+    return number && timestamp ? { number, timestamp, chat } : null;
+  }
+
+  function parseIncomingMessageTimestamp(value) {
+    const timeMatch = value.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(a\s*\.?\s*m\s*\.?|p\s*\.?\s*m\s*\.?)?/i);
+    if (!timeMatch) return null;
+    const dateMatch = value.match(/\b(\d{1,4})[./-](\d{1,2})[./-](\d{1,4})\b/);
+    const dateParts = [];
+    if (dateMatch) {
+      const first = Number(dateMatch[1]);
+      const second = Number(dateMatch[2]);
+      const third = Number(dateMatch[3]);
+      const yearFirst = dateMatch[1].length === 4;
+      if (yearFirst) {
+        dateParts.push({ year: first, month: second, day: third });
+      } else {
+        let year = third;
+        if (year < 100) year += year >= 70 ? 1900 : 2000;
+        dateParts.push({ year, month: second, day: first });
+        if (first !== second) dateParts.push({ year, month: first, day: second });
+      }
+    } else {
+      const now = new Date();
+      for (const offset of [-1, 0, 1]) {
+        const candidate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
+        dateParts.push({
+          year: candidate.getFullYear(),
+          month: candidate.getMonth() + 1,
+          day: candidate.getDate()
+        });
+      }
+    }
+
+    let hour = Number(timeMatch[1]);
+    const minute = Number(timeMatch[2]);
+    const second = Number(timeMatch[3] || 0);
+    const meridiem = timeMatch[4] || "";
+    if (minute > 59 || second > 59) return null;
+    if (meridiem) {
+      if (hour < 1 || hour > 12) return null;
+      if (/p/i.test(meridiem) && hour < 12) hour += 12;
+      if (/a/i.test(meridiem) && hour === 12) hour = 0;
+    } else if (hour > 23) {
+      return null;
+    }
+
+    const now = Date.now();
+    const candidates = dateParts
+      .filter(({ year, month, day }) => month >= 1 && month <= 12 && day >= 1 && day <= 31)
+      .map(({ year, month, day }) => {
+        const date = new Date(year, month - 1, day, hour, minute, second);
+        return date.getFullYear() === year && date.getMonth() === month - 1 &&
+          date.getDate() === day
+          ? date.getTime()
+          : null;
+      })
+      .filter((timestamp) => Number.isFinite(timestamp));
+    if (!candidates.length) return null;
+    return candidates.reduce((closest, timestamp) =>
+      Math.abs(timestamp - now) < Math.abs(closest - now) ? timestamp : closest);
+  }
+
+  function countIncomingMessageNumber(metadataElement) {
+    if (processedIncomingMessages.has(metadataElement)) return;
+    const details = getIncomingMessageDetails(metadataElement);
+    if (!details) return;
+    if (details.chat) contactFlowChatNumbers.set(details.chat, details.number);
+    if (contactFlowCounters.countedNumbers.includes(details.number)) {
+      processedIncomingMessages.add(metadataElement);
+      return;
+    }
+    const now = Date.now();
+    if (now - details.timestamp > 15000 * 60_000) {
+      processedIncomingMessages.add(metadataElement);
+      return;
+    }
+    if (details.timestamp > now + 30_000) return;
+    if (contactFlowCounters.arrived >= Number.MAX_SAFE_INTEGER) {
+      processedIncomingMessages.add(metadataElement);
+      console.error("[Ganamos balance extension] No se contó un número nuevo: el contador llegó al límite seguro.");
+      return;
+    }
+    processedIncomingMessages.add(metadataElement);
+    contactFlowCounters.countedNumbers.push(details.number);
+    contactFlowCounters.arrived += 1;
+    contactFlowCounterRows.get("arrived")?.();
+    saveContactFlowCounters();
+  }
+
+  function getOutgoingMessageDetails(metadataElement) {
+    const metadata = metadataElement.getAttribute("data-pre-plain-text");
+    const match = metadata?.match(/^\[([^\]]+)\]/);
+    if (!match) return null;
+    const senderMatch = metadata.match(/^\[[^\]]+\]\s*(.*?):(?:\s|$)/);
+    const senderName = senderMatch?.[1]
+      ?.replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+      .trim() || "";
+    const ancestors = [];
+    let messageContainer = null;
+    let isIncomingMessage = false;
+    for (let ancestor = metadataElement; ancestor; ancestor = ancestor.parentElement) {
+      ancestors.push(ancestor);
+      if (ancestor.classList.contains("message-in")) {
+        isIncomingMessage = true;
+      }
+      if (!messageContainer &&
+        (ancestor.classList.contains("message-out") ||
+          ancestor.matches('[data-testid="msg-container"]'))) messageContainer = ancestor;
+      if (ancestor.matches("#main")) break;
+    }
+    const outgoingMessageId = ancestors
+      .map((ancestor) => ancestor.getAttribute("data-id") || "")
+      .find((id) => /^true_\d{7,20}@(?:c\.us|s\.whatsapp\.net)_/i.test(id));
+    if (!messageContainer && outgoingMessageId) {
+      messageContainer = ancestors.find((ancestor) =>
+        ancestor.getAttribute("data-id") === outgoingMessageId
+      ) || metadataElement.parentElement;
+    }
+    if (!messageContainer) {
+      for (const ancestor of ancestors) {
+        if (ancestor.matches("#main")) break;
+        const descendantOutgoingId = [...ancestor.querySelectorAll("[data-id]")]
+          .map((element) => element.getAttribute("data-id") || "")
+          .find((id) => /^true_\d{7,20}@(?:c\.us|s\.whatsapp\.net)_/i.test(id));
+        if (!descendantOutgoingId) continue;
+        messageContainer ||= ancestor;
+        break;
+      }
+    }
+    if (!messageContainer) return null;
+    const chat = metadataElement.closest("#main");
+    const chatTitle = chat?.querySelector('[data-testid="conversation-info-header-chat-title"]') ||
+      chat?.querySelector("header h1, header h2, header [role='heading']");
+    const messageIds = [
+      ...ancestors.map((ancestor) => ancestor.getAttribute("data-id") || ""),
+      ...[...messageContainer.querySelectorAll("[data-id]")]
+        .map((element) => element.getAttribute("data-id") || "")
+    ].filter(Boolean);
+    if (messageIds.some((id) => /@g\.us(?:_|$)/i.test(id))) return null;
+    const chatTitleText = chatTitle?.textContent
+      ?.replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+      .trim() || "";
+    const normalizeIdentity = (value) => value
+      .normalize("NFKC")
+      .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]/gu, "");
+    const senderDiffersFromChat = Boolean(senderName && chatTitleText &&
+      normalizeIdentity(senderName) !== normalizeIdentity(chatTitleText));
+    if (isIncomingMessage ||
+      (!messageContainer.classList.contains("message-out") &&
+        !outgoingMessageId && !senderDiffersFromChat)) return null;
+    const jidMatch = messageIds
+      .map((id) => id.match(/(?:^|_)(\d{7,20})@(?:c\.us|s\.whatsapp\.net)(?:_|$)/i))
+      .find(Boolean);
+    const chatNumber = jidMatch?.[1] ||
+      getPhoneFromContactTitle(chatTitle) ||
+      contactFlowChatNumbers.get(chat);
+    if (!chatNumber || !/^\d{7,20}$/.test(chatNumber)) return null;
+    const timestamp = parseIncomingMessageTimestamp(match[1]);
+    if (!timestamp) return null;
+    const textElements = messageContainer.querySelectorAll(
+      '[data-testid="selectable-text"], .selectable-text'
+    );
+    const text = [
+      messageContainer.textContent || "",
+      ...[...textElements].map((element) => element.textContent || "")
+    ].join("\n")
+      .normalize("NFKC")
+      .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+      .toLocaleLowerCase();
+    return { number: chatNumber, timestamp, text };
+  }
+
+  function countOutgoingMessagePanels(metadataElement) {
+    if (processedOutgoingMessages.has(metadataElement)) return;
+    const details = getOutgoingMessageDetails(metadataElement);
+    if (!details) return;
+    const now = Date.now();
+    if (now - details.timestamp > 15000 * 60_000) {
+      processedOutgoingMessages.add(metadataElement);
+      return;
+    }
+    if (details.timestamp > now + 30_000) return;
+    const matchingPanels = contactFlowCounters.panels.filter((panel) =>
+      details.text.includes(panel.keyword.normalize("NFKC").toLocaleLowerCase()) &&
+      !panel.countedNumbers.includes(details.number) &&
+      remoteCreateDestinations.some((destination) =>
+        destination?.id === panel.destinationId &&
+        typeof destination.name === "string")
+    );
+    if (!matchingPanels.length) return;
+
+    processedOutgoingMessages.add(metadataElement);
+    let counted = false;
+    for (const panel of matchingPanels) {
+      const derivedCount = getContactFlowCounterValue(panel.destinationId);
+      if (panel.count >= Number.MAX_SAFE_INTEGER ||
+        derivedCount >= Number.MAX_SAFE_INTEGER) {
+        console.error(
+          "[Ganamos balance extension] No se contó un derivado: uno de sus contadores llegó al límite seguro."
+        );
+        continue;
+      }
+      panel.countedNumbers.push(details.number);
+      panel.count += 1;
+      contactFlowCounters.derived[panel.destinationId] = derivedCount + 1;
+      counted = true;
+    }
+    if (!counted) return;
+    for (const updateRow of contactFlowCounterRows.values()) updateRow();
+    contactFlowPanelConfigRefresh?.();
+    saveContactFlowCounters();
+  }
+
+  function inspectIncomingMessageNode(node, includeDescendants = false) {
+    const element = node instanceof Element ? node : node.parentElement;
+    if (!element) return;
+    const metadataElements = new Set();
+    if (element.matches("[data-pre-plain-text]")) metadataElements.add(element);
+    const closestMetadata = element.closest("[data-pre-plain-text]");
+    if (closestMetadata) metadataElements.add(closestMetadata);
+    const messageContainer = element.closest(".message-in, .message-out");
+    const scanContainer = messageContainer || (includeDescendants ? element : null);
+    if (scanContainer) {
+      for (const metadataElement of scanContainer.querySelectorAll("[data-pre-plain-text]")) {
+        metadataElements.add(metadataElement);
+      }
+    }
+    for (const metadataElement of metadataElements) {
+      countIncomingMessageNumber(metadataElement);
+      countOutgoingMessagePanels(metadataElement);
+    }
+  }
+
+  function startContactFlowMessageObserver() {
+    if (!contactFlowCountersLoaded || contactFlowMessageObserverStarted) return;
+    contactFlowMessageObserverStarted = true;
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          inspectIncomingMessageNode(node, true);
+          const element = node instanceof Element ? node : node.parentElement;
+          const metadataElement = element?.matches("[data-pre-plain-text]")
+            ? element
+            : element?.querySelector("[data-pre-plain-text]");
+          if (metadataElement) {
+            for (const delay of [150, 500, 1200]) {
+              setTimeout(() => {
+                if (metadataElement.isConnected) {
+                  countIncomingMessageNumber(metadataElement);
+                  countOutgoingMessagePanels(metadataElement);
+                }
+              }, delay);
+            }
+          }
+        }
+        if (mutation.type === "attributes" || mutation.type === "characterData") {
+          inspectIncomingMessageNode(
+            mutation.target,
+            Boolean(mutation.target.parentElement?.closest(".message-in, .message-out"))
+          );
+        }
+      }
+    });
+    for (const metadataElement of document.querySelectorAll("[data-pre-plain-text]")) {
+      processedIncomingMessages.add(metadataElement);
+      processedOutgoingMessages.add(metadataElement);
+    }
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "data-id", "data-pre-plain-text"],
+      childList: true,
+      characterData: true,
+      subtree: true
+    });
+  }
+
+  function saveContactFlowCounters() {
+    const snapshot = {
+      arrived: contactFlowCounters.arrived,
+      derived: { ...contactFlowCounters.derived },
+      countedNumbers: [...contactFlowCounters.countedNumbers],
+      panels: contactFlowCounters.panels.map((panel) => ({
+        ...panel,
+        countedNumbers: [...panel.countedNumbers]
+      }))
+    };
+    contactFlowCounterSaveQueue = contactFlowCounterSaveQueue
+      .then(() => chrome.storage.local.set({ [CONTACT_FLOW_COUNTERS_KEY]: snapshot }))
+      .catch((error) => console.error(
+        "[Ganamos balance extension] No se pudieron guardar los contadores de llegados y derivados.",
+        error
+      ));
+  }
+
+  function createContactFlowCounterRow(key, label) {
+    const row = document.createElement("div");
+    row.className = "contact-flow-counter";
+    const name = document.createElement("span");
+    name.className = "contact-flow-counter-name";
+    name.textContent = label;
+    name.title = label;
+    const controls = document.createElement("div");
+    controls.className = "contact-flow-counter-controls";
+    const decrement = document.createElement("button");
+    decrement.type = "button";
+    decrement.className = "contact-flow-counter-step";
+    decrement.textContent = "▼";
+    decrement.title = `Restar uno a ${label}`;
+    decrement.setAttribute("aria-label", decrement.title);
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.step = "1";
+    input.inputMode = "numeric";
+    input.className = "contact-flow-counter-value";
+    input.setAttribute("aria-label", label);
+    const increment = document.createElement("button");
+    increment.type = "button";
+    increment.className = "contact-flow-counter-step";
+    increment.textContent = "▲";
+    increment.title = `Sumar uno a ${label}`;
+    increment.setAttribute("aria-label", increment.title);
+    const updateRow = () => {
+      const count = getContactFlowCounterValue(key);
+      if (document.activeElement !== input) input.value = String(count);
+      decrement.disabled = count === 0;
+      increment.disabled = count >= Number.MAX_SAFE_INTEGER;
+    };
+    const commitValue = () => {
+      const count = Number(input.value);
+      if (!input.value || !Number.isSafeInteger(count) || count < 0) {
+        updateRow();
+        return;
+      }
+      if (key === "arrived") contactFlowCounters.arrived = count;
+      else contactFlowCounters.derived[key] = count;
+      updateRow();
+      saveContactFlowCounters();
+    };
+    decrement.addEventListener("click", () => {
+      const count = getContactFlowCounterValue(key);
+      if (count === 0) return;
+      if (key === "arrived") contactFlowCounters.arrived = count - 1;
+      else contactFlowCounters.derived[key] = count - 1;
+      updateRow();
+      saveContactFlowCounters();
+    });
+    increment.addEventListener("click", () => {
+      const count = getContactFlowCounterValue(key);
+      if (count >= Number.MAX_SAFE_INTEGER) return;
+      if (key === "arrived") contactFlowCounters.arrived = count + 1;
+      else contactFlowCounters.derived[key] = count + 1;
+      updateRow();
+      saveContactFlowCounters();
+    });
+    input.addEventListener("change", commitValue);
+    controls.append(increment, input, decrement);
+    row.append(name, controls);
+    contactFlowCounterRows.set(key, updateRow);
+    updateRow();
+    return row;
+  }
+
+  function renderContactFlowDerivedCounters() {
+    if (!contactFlowDerivedRows) return;
+    contactFlowDerivedRows.replaceChildren();
+    contactFlowCounterRows = new Map(
+      [...contactFlowCounterRows].filter(([key]) => key === "arrived")
+    );
+    const destinations = remoteCreateDestinations.filter((destination) =>
+      typeof destination?.id === "string" && typeof destination.name === "string");
+    if (!destinations.length) {
+      const empty = document.createElement("span");
+      empty.className = "contact-flow-counter-empty";
+      empty.textContent = "Sin conexiones";
+      contactFlowDerivedRows.append(empty);
+      return;
+    }
+    for (const destination of destinations) {
+      contactFlowDerivedRows.append(
+        createContactFlowCounterRow(destination.id, destination.name)
+      );
+    }
+  }
+
+  function updateContactFlowCounterVisibility() {
+    const host = document.getElementById(CONTACT_FLOW_COUNTER_HOST_ID);
+    if (!host) return;
+    host.style.display = remoteCreateDestinationsLoaded && hasConfiguredRemoteDestinations()
+      ? ""
+      : "none";
+  }
+
+  function resetContactFlowCounters(clearCountedNumbers = true) {
+    contactFlowCounters = {
+      arrived: 0,
+      derived: {},
+      countedNumbers: clearCountedNumbers ? [] : contactFlowCounters.countedNumbers,
+      panels: contactFlowCounters.panels.map((panel) => ({
+        ...panel,
+        count: 0,
+        countedNumbers: clearCountedNumbers ? [] : panel.countedNumbers
+      }))
+    };
+    for (const updateRow of contactFlowCounterRows.values()) updateRow();
+    contactFlowPanelConfigRefresh?.();
+    saveContactFlowCounters();
+  }
+
+  function openContactFlowPanelConfiguration(triggerButton) {
+    if (document.querySelector("#ganamos-contact-flow-panel-config")) return;
+    const dialogHost = document.createElement("div");
+    dialogHost.id = "ganamos-contact-flow-panel-config";
+    dialogHost.style.position = "fixed";
+    dialogHost.style.inset = "0";
+    dialogHost.style.zIndex = "2147483647";
+    dialogHost.style.width = "100vw";
+    dialogHost.style.height = "100vh";
+    dialogHost.style.pointerEvents = "none";
+    const shadow = dialogHost.attachShadow({ mode: "open" });
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
+    stylesheet.addEventListener("error", () => console.error(
+      "[Ganamos balance extension] No se pudo cargar styles/whatsapp.css para configurar los paneles."
+    ), { once: true });
+    const modal = document.createElement("div");
+    modal.className = "modal";
+    modal.style.pointerEvents = "auto";
+    const destinations = remoteCreateDestinations.filter((destination) =>
+      typeof destination?.id === "string" && typeof destination.name === "string");
+    const closeDialog = () => {
+      contactFlowPanelConfigRefresh = null;
+      dialogHost.remove();
+      triggerButton.focus();
+    };
+    let closeAddDialog = () => {};
+    modal.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (addModal.style.display !== "none") closeAddDialog();
+      else closeDialog();
+    }, true);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "dialog contact-flow-panel-dialog";
+    dialog.dataset.operation = "contact-flow-panels";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const heading = document.createElement("h2");
+    heading.id = "contact-flow-panel-heading";
+    heading.textContent = "Configurar paneles derivados";
+    dialog.setAttribute("aria-labelledby", heading.id);
+    const description = document.createElement("p");
+    description.className = "contact-flow-panel-description";
+    description.textContent = "";
+    const addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "contact-flow-panel-add-button";
+    addButton.textContent = "Agregar Panel";
+    addButton.disabled = destinations.length === 0;
+    const listHeading = document.createElement("h3");
+    listHeading.className = "contact-flow-panel-list-heading";
+    listHeading.textContent = "Paneles configurados";
+    const panelList = document.createElement("div");
+    panelList.className = "contact-flow-panel-list";
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "secondary contact-flow-panel-close-button";
+    closeButton.textContent = "Cerrar";
+    closeButton.addEventListener("click", closeDialog);
+
+    const addModal = document.createElement("div");
+    addModal.className = "modal contact-flow-panel-add-modal";
+    addModal.style.display = "none";
+    addModal.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (event.target === addModal) closeAddDialog();
+    });
+    const addDialog = document.createElement("section");
+    addDialog.className = "dialog contact-flow-panel-add-dialog";
+    addDialog.dataset.operation = "contact-flow-panel-add";
+    addDialog.setAttribute("role", "dialog");
+    addDialog.setAttribute("aria-modal", "true");
+    const addHeading = document.createElement("h2");
+    addHeading.id = "contact-flow-panel-add-heading";
+    addHeading.textContent = "Agregar Panel";
+    addDialog.setAttribute("aria-labelledby", addHeading.id);
+    let editingPanelId = null;
+    const form = document.createElement("form");
+    form.className = "contact-flow-panel-form";
+    const titleLabel = document.createElement("label");
+    titleLabel.htmlFor = "contact-flow-panel-title";
+    titleLabel.textContent = "Título";
+    const titleInput = document.createElement("input");
+    titleInput.id = "contact-flow-panel-title";
+    titleInput.type = "text";
+    titleInput.autocomplete = "off";
+    titleInput.required = true;
+    titleInput.maxLength = 80;
+    const keywordLabel = document.createElement("label");
+    keywordLabel.htmlFor = "contact-flow-panel-keyword";
+    keywordLabel.textContent = "Palabra clave (texto)";
+    const keywordInput = document.createElement("input");
+    keywordInput.id = "contact-flow-panel-keyword";
+    keywordInput.type = "text";
+    keywordInput.inputMode = "text";
+    keywordInput.autocomplete = "off";
+    keywordInput.required = true;
+    keywordInput.maxLength = 120;
+    keywordInput.placeholder = "Ej.: 5491123456789";
+    const destinationLabel = document.createElement("label");
+    destinationLabel.htmlFor = "contact-flow-panel-destination";
+    destinationLabel.textContent = "PC asociada";
+    const destinationSelect = document.createElement("select");
+    destinationSelect.id = "contact-flow-panel-destination";
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = "Elegí una PC";
+    destinationSelect.append(emptyOption);
+    for (const destination of destinations) {
+      const option = document.createElement("option");
+      option.value = destination.id;
+      option.textContent = destination.name;
+      destinationSelect.append(option);
+    }
+    const error = document.createElement("p");
+    error.className = "contact-flow-panel-error";
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.textContent = "Guardar Panel";
+    submit.disabled = destinations.length === 0;
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.textContent = "Cancelar";
+    cancel.addEventListener("click", () => closeAddDialog());
+    const formActions = document.createElement("div");
+    formActions.className = "dialog-actions contact-flow-panel-form-actions";
+    formActions.append(cancel, submit);
+    form.append(
+      titleLabel,
+      titleInput,
+      keywordLabel,
+      keywordInput,
+      destinationLabel,
+      destinationSelect,
+      error,
+      formActions
+    );
+    addDialog.append(addHeading, form);
+    addModal.append(addDialog);
+    closeAddDialog = () => {
+      addModal.style.display = "none";
+      editingPanelId = null;
+      addHeading.textContent = "Agregar Panel";
+      submit.textContent = "Guardar Panel";
+      titleInput.value = "";
+      keywordInput.value = "";
+      error.hidden = true;
+      addButton.focus();
+    };
+    const openAddDialog = (panel = null) => {
+      editingPanelId = panel?.id || null;
+      addHeading.textContent = panel ? "Editar Panel" : "Agregar Panel";
+      submit.textContent = panel ? "Guardar cambios" : "Guardar Panel";
+      titleInput.value = panel?.title || "";
+      keywordInput.value = panel?.keyword || "";
+      destinationSelect.value = panel?.destinationId || "";
+      error.hidden = true;
+      addModal.style.display = "";
+      titleInput.focus();
+    };
+    addButton.addEventListener("click", () => {
+      openAddDialog();
+    });
+
+    const renderPanelList = () => {
+      panelList.replaceChildren();
+      if (!contactFlowCounters.panels.length) {
+        const empty = document.createElement("p");
+        empty.className = "contact-flow-panel-empty";
+        empty.textContent = "Todavía no hay paneles configurados.";
+        panelList.append(empty);
+        return;
+      }
+      const destinationOrder = new Map(
+        destinations.map((destination, index) => [destination.id, index])
+      );
+      const sortedPanels = [...contactFlowCounters.panels].sort((left, right) => {
+        const leftDestinationOrder = destinationOrder.get(left.destinationId) ?? Number.MAX_SAFE_INTEGER;
+        const rightDestinationOrder = destinationOrder.get(right.destinationId) ?? Number.MAX_SAFE_INTEGER;
+        return leftDestinationOrder - rightDestinationOrder ||
+          left.title.localeCompare(right.title, "es", { sensitivity: "base" });
+      });
+      for (const panel of sortedPanels) {
+        const row = document.createElement("div");
+        row.className = "contact-flow-panel-item";
+        const destinationIndex = destinations.findIndex(({ id }) => id === panel.destinationId);
+        const destinationColors = ["#ffd166", "#c08cff", "#ffffff"];
+        row.style.setProperty(
+          "--contact-flow-panel-color",
+          destinationColors[destinationIndex] || "#ffffff"
+        );
+        const details = document.createElement("div");
+        details.className = "contact-flow-panel-item-details";
+        const title = document.createElement("strong");
+        title.textContent = panel.title;
+        const keyword = document.createElement("span");
+        keyword.className = "contact-flow-panel-item-keyword";
+        keyword.textContent = `(${panel.keyword})`;
+        details.append(title, keyword);
+        const count = document.createElement("input");
+        count.className = "contact-flow-panel-item-count";
+        count.type = "number";
+        count.value = String(panel.count);
+        count.readOnly = true;
+        count.tabIndex = -1;
+        count.setAttribute("aria-label", `Conteo del panel ${panel.title}`);
+        const actions = document.createElement("div");
+        actions.className = "contact-flow-panel-item-actions";
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.className = "contact-flow-panel-edit";
+        edit.textContent = "Editar";
+        edit.setAttribute("aria-label", `Editar el panel ${panel.title}`);
+        edit.addEventListener("click", () => openAddDialog(panel));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "contact-flow-panel-remove";
+        remove.textContent = "Quitar";
+        remove.setAttribute("aria-label", `Quitar el panel ${panel.title}`);
+        remove.addEventListener("click", () => {
+          contactFlowCounters.panels = contactFlowCounters.panels.filter(({ id }) => id !== panel.id);
+          saveContactFlowCounters();
+          renderPanelList();
+        });
+        actions.append(edit, remove);
+        const pill = document.createElement("div");
+        pill.className = "contact-flow-panel-pill";
+        pill.append(details, actions);
+        row.append(pill, count);
+        panelList.append(row);
+      }
+    };
+    contactFlowPanelConfigRefresh = renderPanelList;
+    renderPanelList();
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const title = titleInput.value.trim();
+      const keyword = keywordInput.value.trim();
+      const destinationId = destinationSelect.value;
+      if (!title || !keyword ||
+        !destinations.some(({ id }) => id === destinationId)) {
+        error.textContent = "Ingresá un título y una palabra clave, y seleccioná una PC configurada.";
+        error.hidden = false;
+        return;
+      }
+      const editingPanel = contactFlowCounters.panels.find(({ id }) => id === editingPanelId);
+      if (editingPanel) {
+        if (editingPanel.destinationId !== destinationId) {
+          const oldDerived = getContactFlowCounterValue(editingPanel.destinationId);
+          const newDerived = getContactFlowCounterValue(destinationId);
+          if (newDerived > Number.MAX_SAFE_INTEGER - editingPanel.count) {
+            error.textContent = "No se puede cambiar la PC: el contador de destino llegó al límite seguro.";
+            error.hidden = false;
+            return;
+          }
+          contactFlowCounters.derived[editingPanel.destinationId] = Math.max(
+            0,
+            oldDerived - editingPanel.count
+          );
+          contactFlowCounters.derived[destinationId] = newDerived + editingPanel.count;
+          editingPanel.destinationId = destinationId;
+          for (const updateRow of contactFlowCounterRows.values()) updateRow();
+        }
+        editingPanel.title = title;
+        editingPanel.keyword = keyword;
+      } else {
+        contactFlowCounters.panels.push({
+          id: crypto.randomUUID(),
+          title,
+          keyword,
+          destinationId,
+          count: 0,
+          countedNumbers: []
+        });
+      }
+      saveContactFlowCounters();
+      renderPanelList();
+      closeAddDialog();
+    });
+    dialog.append(heading, description, addButton, listHeading, panelList, closeButton);
+    modal.append(dialog);
+    modal.append(addModal);
+    shadow.append(stylesheet, modal);
+    document.documentElement.append(dialogHost);
+    addButton.focus();
+  }
+
+  function openContactFlowResetConfirmation(resetButton) {
+    const dialogHost = document.createElement("div");
+    dialogHost.style.position = "fixed";
+    dialogHost.style.inset = "0";
+    dialogHost.style.zIndex = "2147483647";
+    dialogHost.style.width = "100vw";
+    dialogHost.style.height = "100vh";
+    dialogHost.style.pointerEvents = "none";
+    const shadow = dialogHost.attachShadow({ mode: "open" });
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
+    stylesheet.addEventListener("error", () => console.error(
+      "[Ganamos balance extension] No se pudo cargar styles/whatsapp.css para confirmar el reinicio."
+    ), { once: true });
+    const modal = document.createElement("div");
+    modal.className = "modal";
+    modal.style.pointerEvents = "auto";
+    modal.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      dialogHost.remove();
+      resetButton.focus();
+    }, true);
+    modal.addEventListener("click", (event) => {
+      if (event.target !== modal) return;
+      dialogHost.remove();
+      resetButton.focus();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "dialog contact-flow-reset-dialog";
+    dialog.dataset.operation = "contact-flow-reset";
+    dialog.setAttribute("role", "alertdialog");
+    dialog.setAttribute("aria-modal", "true");
+    const heading = document.createElement("h2");
+    heading.id = "contact-flow-reset-heading";
+    heading.textContent = "¿Reiniciar contadores?";
+    const message = document.createElement("p");
+    message.id = "contact-flow-reset-message";
+    message.textContent = "Elegí si también querés borrar el registro de números ya contabilizados. En ambos casos los contadores volverán a cero y se conservará la configuración de los paneles.";
+    dialog.setAttribute("aria-labelledby", heading.id);
+    dialog.setAttribute("aria-describedby", message.id);
+    const actions = document.createElement("div");
+    actions.className = "dialog-actions contact-flow-reset-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.textContent = "Cancelar";
+    cancel.addEventListener("click", () => {
+      dialogHost.remove();
+      resetButton.focus();
+    });
+    const resetValues = document.createElement("button");
+    resetValues.type = "button";
+    resetValues.textContent = "Reiniciar valores";
+    resetValues.title = "Pone los contadores en cero y conserva los registros de números contados.";
+    resetValues.addEventListener("click", () => {
+      resetContactFlowCounters(false);
+      dialogHost.remove();
+      resetButton.focus();
+    });
+    const resetEverything = document.createElement("button");
+    resetEverything.type = "button";
+    resetEverything.textContent = "Reiniciar todo";
+    resetEverything.title = "Pone los contadores en cero y borra los registros de números contados.";
+    resetEverything.addEventListener("click", () => {
+      resetContactFlowCounters(true);
+      dialogHost.remove();
+      resetButton.focus();
+    });
+    actions.append(cancel, resetValues, resetEverything);
+    dialog.append(heading, message, actions);
+    modal.append(dialog);
+    shadow.append(stylesheet, modal);
+    document.documentElement.append(dialogHost);
+    cancel.focus();
+  }
+
+  async function copyContactFlowCounters() {
+    const destinations = remoteCreateDestinations.filter((destination) =>
+      typeof destination?.id === "string" && typeof destination.name === "string");
+    const derivedTotal = destinations.reduce(
+      (total, destination) => total + getContactFlowCounterValue(destination.id),
+      0
+    );
+    const effectiveness = contactFlowCounters.arrived
+      ? Math.round(derivedTotal / contactFlowCounters.arrived * 100)
+      : 0;
+    const derivedLines = destinations.map((destination) =>
+      `${destination.name.replace(/\s+/g, " ").trim()}: ${getContactFlowCounterValue(destination.id)}`);
+    const text = [
+      "*CONTEO DE PUBLICIDAD:*",
+      `*Efectividad: ${effectiveness}%*`,
+      "",
+      `*Llegados: ${contactFlowCounters.arrived}*`,
+      "",
+      `*Derivados: ${derivedTotal}*`,
+      ...derivedLines
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(null, "Conteo de publicidad", "Copiado al portapapeles.", "success");
+    } catch (error) {
+      console.error("[Ganamos balance extension] No se pudo copiar el conteo al portapapeles.", error);
+      showToast(
+        null,
+        "Conteo de publicidad",
+        error.message || "No se pudo copiar al portapapeles.",
+        "error"
+      );
+    }
+  }
+
+  function createContactFlowActionButton(action, title, pathData, onClick) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "contact-flow-counter-action";
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("aria-hidden", "true");
+    icon.setAttribute("focusable", "false");
+    for (const path of pathData) {
+      const element = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      element.setAttribute("d", path);
+      icon.append(element);
+    }
+    button.dataset.action = action;
+    button.append(icon);
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  function createContactFlowCounterPanel() {
+    const host = document.createElement("div");
+    host.id = CONTACT_FLOW_COUNTER_HOST_ID;
+    host.style.display = "none";
+    host.style.left = "0";
+    host.style.top = "250px";
+    host.style.width = "64px";
+    host.style.maxHeight = "calc(100vh - 200px)";
+    host.style.visibility = "hidden";
+    const shadow = host.attachShadow({ mode: "open" });
+    for (const eventName of [
+      "click",
+      "contextmenu",
+      "dblclick",
+      "mousedown",
+      "mouseup",
+      "pointerdown",
+      "pointerup",
+      "selectstart"
+    ]) {
+      shadow.addEventListener(eventName, (event) => event.stopPropagation());
+    }
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
+    stylesheet.addEventListener("load", () => {
+      host.style.visibility = "";
+    }, { once: true });
+    stylesheet.addEventListener("error", () => {
+      console.error("[Ganamos balance extension] No se pudo cargar styles/whatsapp.css para los contadores.");
+      host.style.visibility = "";
+    }, { once: true });
+    const panel = document.createElement("section");
+    panel.className = "contact-flow-counter-panel";
+    panel.setAttribute("aria-label", "Contadores de llegados y derivados");
+    const arrivedHeading = document.createElement("h2");
+    arrivedHeading.textContent = "Llegados";
+    const arrivedRows = document.createElement("div");
+    arrivedRows.className = "contact-flow-counter-rows";
+    arrivedRows.append(createContactFlowCounterRow("arrived", "Total"));
+    const derivedHeading = document.createElement("button");
+    derivedHeading.type = "button";
+    derivedHeading.className = "contact-flow-counter-configure";
+    derivedHeading.textContent = "Derivados";
+    derivedHeading.title = "Configurar paneles de conteo";
+    derivedHeading.setAttribute("aria-haspopup", "dialog");
+    derivedHeading.addEventListener("click", () =>
+      openContactFlowPanelConfiguration(derivedHeading));
+    contactFlowDerivedRows = document.createElement("div");
+    contactFlowDerivedRows.className = "contact-flow-counter-rows";
+    const actions = document.createElement("div");
+    actions.className = "contact-flow-counter-actions";
+    const resetButton = createContactFlowActionButton(
+      "reset",
+      "Reiniciar contador",
+      ["M20 11a8 8 0 1 1-2.34-5.66L20 8", "M20 3v5h-5"],
+      () => openContactFlowResetConfirmation(resetButton)
+    );
+    const copyButton = createContactFlowActionButton(
+      "copy",
+      "Copiar al portapapeles",
+      ["M8 8V4a2 2 0 0 1 2-2h9l3 3v13a2 2 0 0 1-2 2h-4", "M3 8h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Z", "M16 2v4h5"],
+      () => void copyContactFlowCounters()
+    );
+    actions.append(resetButton, copyButton);
+    panel.append(arrivedHeading, arrivedRows, derivedHeading, contactFlowDerivedRows, actions);
+    shadow.append(stylesheet, panel);
+    document.documentElement.append(host);
+    renderContactFlowDerivedCounters();
+    updateContactFlowCounterVisibility();
+    return host;
+  }
+
+  function updateActiveBonusVisibility(zoomViewOpen = [...document.querySelectorAll('button[aria-label="Acercar"]')]
+    .some(isRenderedVisible)) {
+    const host = document.getElementById(ACTIVE_BONUS_HOST_ID);
+    if (!host) return;
+    host.style.display = zoomViewOpen || hasConfiguredRemoteDestinations() ? "none" : "";
+  }
+
+  function setAgentBalancePanelWidth(host, minimized, hasErrors) {
     host.style.width = minimized && !hasErrors
       ? "28px"
-      : `min(${hasRemoteDestinations ? 320 : 230}px, calc(100vw - 56px))`;
+      : `min(${hasConfiguredRemoteDestinations() ? 320 : 230}px, calc(100vw - 56px))`;
   }
 
   function updateActiveBonusButton(host, config) {
@@ -930,6 +1998,7 @@
     host.style.height = "58px";
     host.style.pointerEvents = "none";
     host.style.visibility = "hidden";
+    host.style.display = "none";
 
     const shadow = host.attachShadow({ mode: "open" });
     const stylesheet = document.createElement("link");
@@ -991,6 +2060,7 @@
     button.style.pointerEvents = "auto";
     root.style.pointerEvents = "auto";
     document.documentElement.append(host);
+    if (remoteCreateDestinationsLoaded) updateActiveBonusVisibility();
     void readActiveBonusConfig()
       .then((config) => updateActiveBonusButton(host, config))
       .catch((error) => console.error(
@@ -1303,6 +2373,7 @@
       host.recentWithdrawalTimer = null;
     }
     button.classList.remove("recent-withdrawal");
+    button.textContent = "Retirar";
     button.title = "Retirar";
 
     try {
@@ -1310,8 +2381,14 @@
       if (host.dataset.accounts !== contactKey) return;
       if (!recentWithdrawal) return;
 
+      const withdrawalTime = new Intl.DateTimeFormat("es-AR", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23"
+      }).format(recentWithdrawal.timestamp);
       button.classList.add("recent-withdrawal");
-      button.title = "Hubo un retiro en las últimas 24 horas";
+      button.textContent = `Ret. (${withdrawalTime})`;
+      button.title = `Hubo un retiro en las últimas 24 horas (${withdrawalTime})`;
       const timeUntilExpiry = recentWithdrawal.timestamp + 24 * 60 * 60 * 1000 - Date.now();
       if (timeUntilExpiry > 0) {
         host.recentWithdrawalTimer = window.setTimeout(
@@ -1550,18 +2627,17 @@
       const item = document.createElement("span");
       item.className = `movement-history-total-item ${colorClass}`;
       item.dataset.operation = operation;
-      const labelText = document.createElement("span");
-      labelText.className = "movement-history-total-label";
-      labelText.textContent = `${label}:`;
+      item.title = label;
+      item.setAttribute("aria-label", label);
       const value = document.createElement("span");
       value.className = "movement-history-total-value";
-      item.append(labelText, value);
+      item.append(value);
       totals.append(item);
-      return { item, label: labelText, value };
+      return { item, value, label };
     };
     const depositTotal = createTotal("Depósitos", "deposit", "movement-history-total-deposits");
-    const withdrawalTotal = createTotal("Retiros", "withdrawal", "movement-history-total-withdrawals");
     const bonusTotal = createTotal("Bonos", "bonus", "movement-history-total-bonuses");
+    const withdrawalTotal = createTotal("Retiros", "withdrawal", "movement-history-total-withdrawals");
     const differenceTotal = createTotal("Diferencia", "difference", "movement-history-total-difference");
     dialog.append(heading, filters, dates, list, totals);
     modal.append(dialog);
@@ -1628,19 +2704,19 @@
       bonusTotal.value.textContent = `$${formatCurrency(sums.bonuses)}`;
       const difference = sums.deposits - sums.withdrawals;
       const differenceSign = difference > 0 ? "positive" : difference < 0 ? "negative" : "zero";
+      differenceTotal.item.dataset.sign = differenceSign;
       differenceTotal.value.dataset.sign = differenceSign;
       differenceTotal.value.textContent = difference === 0
         ? `$${formatCurrency(0)}`
         : `${difference > 0 ? "+" : "−"}$${formatCurrency(Math.abs(difference))}`;
+      for (const total of [depositTotal, withdrawalTotal, bonusTotal, differenceTotal]) {
+        total.item.setAttribute("aria-label", `${total.label}: ${total.value.textContent}`);
+      }
       if (sums.unknownDeposits) {
         const explanation = `No incluye ${sums.unknownDeposits} depósito(s) histórico(s) cuyo monto original y bono no se guardaron por separado.`;
-        depositTotal.item.title = explanation;
-        depositTotal.label.textContent = "Depósitos:";
-        depositTotal.value.title = explanation;
+        depositTotal.item.title = `Depósitos. ${explanation}`;
       } else {
-        depositTotal.item.removeAttribute("title");
-        depositTotal.label.textContent = "Depósitos:";
-        depositTotal.value.removeAttribute("title");
+        depositTotal.item.title = "Depósitos";
       }
 
       if (!visibleMovements.length) {
@@ -2664,6 +3740,21 @@
       bonusPercentLabel.textContent = "Bono (%)";
       bonusPercentInput = document.createElement("input");
       configureNumericInput(bonusPercentInput);
+      bonusPercentInput.addEventListener("beforeinput", (event) => {
+        if (!event.inputType.startsWith("insert")) return;
+        const insertedText = event.data ?? event.dataTransfer?.getData("text/plain");
+        if (insertedText == null) return;
+        const start = bonusPercentInput.selectionStart ?? bonusPercentInput.value.length;
+        const end = bonusPercentInput.selectionEnd ?? start;
+        const candidate = `${bonusPercentInput.value.slice(0, start)}${insertedText}${bonusPercentInput.value.slice(end)}`;
+        const normalized = normalizeNumericInput(candidate);
+        if (!normalized.integer) return;
+        const value = Number(normalized.value);
+        if ((normalized.integer.length > 2 && normalized.integer !== "100") ||
+          (Number.isFinite(value) && value > 100)) {
+          event.preventDefault();
+        }
+      });
       bonusPercentInput.placeholder = "-";
 
       bonusPercentLabel.append(createInputAffix(bonusPercentInput, "%", "suffix"));
@@ -3501,10 +4592,7 @@
       const display = zoomViewOpen ? "none" : "";
       if (agentBalanceHost.style.display !== display) agentBalanceHost.style.display = display;
     }
-    if (activeBonusHost) {
-      const display = zoomViewOpen ? "none" : "";
-      if (activeBonusHost.style.display !== display) activeBonusHost.style.display = display;
-    }
+    updateActiveBonusVisibility(zoomViewOpen);
     if (zoomViewOpen) {
       const host = document.getElementById(HOST_ID);
       if (host && host.style.display !== "none") host.style.display = "none";
@@ -3627,7 +4715,8 @@
 
   const observer = new MutationObserver((mutations) => {
     if (mutations.every(({ target }) =>
-      target.id === HOST_ID || target.id === AGENT_BALANCE_HOST_ID)) return;
+      target.id === HOST_ID || target.id === AGENT_BALANCE_HOST_ID ||
+      target.id === CONTACT_FLOW_COUNTER_HOST_ID)) return;
     scheduleUpdate();
   });
   observer.observe(document.documentElement, {
@@ -3655,6 +4744,7 @@
     selectingContactUserText = false;
   });
   createActiveBonusHost();
+  createContactFlowCounterPanel();
   const agentBalanceHost = createAgentBalancePanel();
   void refreshAgentBalance(agentBalanceHost);
   void refreshMultiPanelAgentBalance(agentBalanceHost);
