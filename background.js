@@ -6,16 +6,27 @@ const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 const PLATFORM_REQUEST_TIMEOUT_MS = 45_000;
 const DATA_HOST_NAME = "com.bridgewpp.data";
 const DATA_PROFILE_SELECTOR_KEY = "dataProfileSelector";
+const PROFILE_RUNTIME_STATE_KEYS = [
+  "bridgeRole",
+  "bridgeToken",
+  "ganamosUserId",
+  "ganamosSuffix",
+  "multiPanelSuffix",
+  "multiPanelSession"
+];
 const SHARED_STATE_KEYS = new Set([
   "contactFlowCounters",
   "activeBonusConfig"
 ]);
 const stateChangedListeners = new Set();
+const loadedProfileStateKeys = new Set();
 let cachedStateRevision = null;
 let cachedChangeRevision = null;
 let statePollInProgress = null;
 let lastStatePollAt = 0;
 let extensionStateCache = {};
+const withdrawalUserCache = new Map();
+let profileRuntimeStatePromise = null;
 let dataProfileSelectorPromise = null;
 const extensionStateOnChanged = {
   addListener(listener) {
@@ -175,7 +186,27 @@ async function getExtensionState(keys = null) {
     }
     Object.assign(extensionStateCache, response.values);
   }
+  const loadedKeys = selectedKeys === null || selectedKeys === undefined
+    ? PROFILE_RUNTIME_STATE_KEYS
+    : selectedKeys;
+  for (const key of loadedKeys) loadedProfileStateKeys.add(key);
   return response.values;
+}
+
+async function getProfileRuntimeState() {
+  if (!profileRuntimeStatePromise) {
+    profileRuntimeStatePromise = (async () => {
+      const missingKeys = PROFILE_RUNTIME_STATE_KEYS.filter((key) =>
+        !loadedProfileStateKeys.has(key));
+      if (missingKeys.length) await getExtensionState(missingKeys);
+      return extensionStateCache;
+    })();
+  }
+  try {
+    return await profileRuntimeStatePromise;
+  } finally {
+    profileRuntimeStatePromise = null;
+  }
 }
 
 async function writeExtensionState(changes, removes = [], expectedRevision) {
@@ -205,6 +236,7 @@ async function writeExtensionState(changes, removes = [], expectedRevision) {
   cachedChangeRevision = response.changeRevision;
   Object.assign(extensionStateCache, changes);
   for (const key of removes) delete extensionStateCache[key];
+  for (const key of keys) loadedProfileStateKeys.add(key);
   const event = {};
   for (const key of keys) {
     event[key] = {
@@ -277,6 +309,7 @@ async function pollExtensionState() {
       else delete current[key];
     }
     extensionStateCache = current;
+    for (const key of result.keys) loadedProfileStateKeys.add(key);
     cachedStateRevision = result.stateRevision;
     cachedChangeRevision = result.revision;
     const changes = {};
@@ -326,7 +359,7 @@ function normalizeUsernameSuffix(username, suffix) {
 }
 
 async function getPlatformSuffixes() {
-  const stored = await getExtensionState(["ganamosSuffix", "multiPanelSuffix"]);
+  const stored = await getProfileRuntimeState();
   const ganamos = typeof stored.ganamosSuffix === "string" ? stored.ganamosSuffix.toLowerCase() : "f";
   const multipanel = typeof stored.multiPanelSuffix === "string" ? stored.multiPanelSuffix.toLowerCase() : "y";
   if (!/^[a-z]$/.test(ganamos) || !/^[a-z]$/.test(multipanel) || ganamos === multipanel) {
@@ -336,7 +369,7 @@ async function getPlatformSuffixes() {
 }
 
 async function getAgentUserId(requestData) {
-  const stored = await getExtensionState("ganamosUserId");
+  const stored = await getProfileRuntimeState();
   const userId = String(requestData?.user_id ?? stored.ganamosUserId ?? DEFAULT_AGENT_USER_ID);
   if (!/^\d+$/.test(userId)) {
     throw new Error("El user_id configurado para Ganamos no es válido.");
@@ -683,8 +716,11 @@ async function createMultiPanelUser(data) {
 }
 
 async function getMultiPanelSession() {
-  const stored = await getExtensionState("multiPanelSession");
-  const session = stored.multiPanelSession;
+  let session = extensionStateCache.multiPanelSession;
+  if (!isValidMultiPanelSession(session)) {
+    const stored = await getProfileRuntimeState();
+    session = stored.multiPanelSession;
+  }
   if (isValidMultiPanelSession(session)) return session.trim();
   return getMultiPanelSessionFromOpenTab();
 }
@@ -820,13 +856,45 @@ async function getMultiPanelBalance(data) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const user = await findMultiPanelUser(data.nombre.trim());
-      return await getMultiPanelBalanceForUser(user);
+      const balance = await getMultiPanelBalanceForUser(user);
+      if (data.force === true) {
+        rememberWithdrawalUser("multipanel", data.nombre, user);
+      }
+      return balance;
     } catch (error) {
       if (!isInvalidMultiPanelSession(error) || attempt > 0) throw error;
       await getMultiPanelSessionFromOpenTab();
     }
   }
   throw new Error("No se pudo consultar el saldo de MultiPanel.");
+}
+
+function withdrawalUserCacheKey(platform, username) {
+  return `${platform}:${username.trim().toLocaleLowerCase()}`;
+}
+
+function rememberWithdrawalUser(platform, username, user) {
+  const now = Date.now();
+  for (const [key, cached] of withdrawalUserCache) {
+    if (cached.expiresAt <= now) withdrawalUserCache.delete(key);
+  }
+  if (withdrawalUserCache.size >= 100) {
+    withdrawalUserCache.delete(withdrawalUserCache.keys().next().value);
+  }
+  const operationUser = platform === "ganamos"
+    ? { username: user.username, userId: user.userId }
+    : { session: user.session, user: user.user, db: user.db, alias: user.alias };
+  withdrawalUserCache.set(withdrawalUserCacheKey(platform, username), {
+    user: operationUser,
+    expiresAt: now + 15_000
+  });
+}
+
+function takeWithdrawalUser(platform, username) {
+  const key = withdrawalUserCacheKey(platform, username);
+  const cached = withdrawalUserCache.get(key);
+  withdrawalUserCache.delete(key);
+  return cached && cached.expiresAt > Date.now() ? cached.user : null;
 }
 
 async function getMultiPanelBalanceForUser(user) {
@@ -948,7 +1016,10 @@ async function runTransactionRequest(data) {
     return runMultiPanelManualOperation(data);
   }
 
-  const user = await findGanamosUser(data);
+  const validatedUser = takeWithdrawalUser("ganamos", data.nombre);
+  const user = data.operation === "withdrawal" && validatedUser
+    ? validatedUser
+    : await findGanamosUser(data);
   if (!/^\d+$/.test(String(user.userId ?? ""))) {
     throw new Error("Ganamos encontró el usuario, pero no devolvió un ID válido para la operación.");
   }
@@ -999,10 +1070,13 @@ async function runTransactionRequest(data) {
 
 async function runMultiPanelManualOperation(data) {
   const idempotence = crypto.randomUUID().replace(/-/g, "");
+  let validatedUser = takeWithdrawalUser("multipanel", data.nombre);
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const user = await findMultiPanelUser(data.nombre.trim());
+      const user = data.operation === "withdrawal" && validatedUser
+        ? validatedUser
+        : await findMultiPanelUser(data.nombre.trim());
       const initialBalanceResult = data.operation === "deposit"
         ? await getMultiPanelBalanceForUser(user)
         : null;
@@ -1034,7 +1108,7 @@ async function runMultiPanelManualOperation(data) {
 
       const expectedIncrease = Number(amount) / 100 + Number(bonusAmount) / 100;
       const verification = await verifyBalanceIncrease(async () => {
-        const refreshed = await getMultiPanelBalance({ nombre: data.nombre });
+        const refreshed = await getMultiPanelBalanceForUser(user);
         const balance = Number(refreshed.balance);
         if (!Number.isFinite(balance)) throw new Error("MultiPanel devolvió un saldo no numérico al verificar.");
         return balance;
@@ -1054,6 +1128,7 @@ async function runMultiPanelManualOperation(data) {
       lastError = error;
       if (!isInvalidMultiPanelSession(error) || attempt > 0) throw error;
       await getMultiPanelSessionFromOpenTab();
+      validatedUser = null;
     }
   }
   throw lastError || new Error("No se pudo completar el depósito en MultiPanel.");
@@ -1199,8 +1274,7 @@ function isStateStorageSender(sender) {
 }
 
 async function getBridgeSettings() {
-  const { bridgeRole = "standalone", bridgeToken = "" } =
-    await getExtensionState(["bridgeRole", "bridgeToken"]);
+  const { bridgeRole = "standalone", bridgeToken = "" } = await getProfileRuntimeState();
   return { role: bridgeRole, token: bridgeToken };
 }
 
@@ -1545,7 +1619,13 @@ function validateApiMessage(message, suffixes) {
 }
 
 async function executeApiMessage(message) {
-  const suffixes = await getPlatformSuffixes();
+  const suffixes = [
+    "AGENT_BALANCE_REQUEST",
+    "MULTIPANEL_AGENT_BALANCE_REQUEST",
+    "USER_SEARCH_REQUEST"
+  ].includes(message.type)
+    ? null
+    : await getPlatformSuffixes();
   if (!validateApiMessage(message, suffixes)) {
     return { ok: false, error: "Solicitud no válida." };
   }
@@ -1567,9 +1647,16 @@ async function executeApiMessage(message) {
   if (message.type === "EXCHANGE_REQUEST") return runExchangeRequest(message.data);
   if (message.type === "BALANCE_REQUEST") {
     const platform = message.data?.platform || "ganamos";
+    const cacheKey = withdrawalUserCacheKey(platform, message.data?.nombre || "");
+    if (message.data?.force === true) withdrawalUserCache.delete(cacheKey);
     return platform === "multipanel"
       ? getMultiPanelBalance(message.data)
-      : findGanamosUser(message.data);
+      : findGanamosUser(message.data).then((user) => {
+          if (message.data?.force === true) {
+            rememberWithdrawalUser("ganamos", message.data.nombre, user);
+          }
+          return user;
+        });
   }
   return runTransactionRequest(message.data);
 }
@@ -1618,6 +1705,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ok: false,
       error: error.message || "Falló la operación de estado PostgreSQL."
     }));
+    return true;
+  }
+
+  if (message?.type === "MOVEMENTS_GET") {
+    if (!isStateStorageSender(sender)) {
+      sendResponse({ ok: false, error: "El origen no está autorizado para consultar movimientos." });
+      return;
+    }
+    const filters = message.filters && typeof message.filters === "object" &&
+      !Array.isArray(message.filters) ? message.filters : {};
+    const allowedFilters = new Set(["contactKey", "operation", "since", "limit"]);
+    if (Object.keys(filters).some((key) => !allowedFilters.has(key)) ||
+      (Object.hasOwn(filters, "contactKey") &&
+        (typeof filters.contactKey !== "string" || !filters.contactKey)) ||
+      (Object.hasOwn(filters, "operation") &&
+        !["deposit", "withdrawal", "exchange"].includes(filters.operation)) ||
+      (Object.hasOwn(filters, "since") &&
+        (!Number.isSafeInteger(filters.since) || filters.since < 0)) ||
+      (Object.hasOwn(filters, "limit") &&
+        (!Number.isSafeInteger(filters.limit) || filters.limit < 1 || filters.limit > 10000))) {
+      sendResponse({ ok: false, error: "Los filtros de movimientos solicitados no son válidos." });
+      return;
+    }
+    const query = new URLSearchParams();
+    if (typeof filters.contactKey === "string") query.set("contactKey", filters.contactKey);
+    if (typeof filters.operation === "string") query.set("operation", filters.operation);
+    if (Number.isSafeInteger(filters.since)) query.set("since", String(filters.since));
+    if (Number.isSafeInteger(filters.limit)) query.set("limit", String(filters.limit));
+    requestDataApi(`/v1/movements?${query}`)
+      .then((response) => {
+        if (!Array.isArray(response.movements)) {
+          throw new Error("La API PostgreSQL devolvió una lista de movimientos incompleta.");
+        }
+        sendResponse({ ok: true, movements: response.movements });
+      })
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudieron consultar los movimientos."
+      }));
     return true;
   }
 

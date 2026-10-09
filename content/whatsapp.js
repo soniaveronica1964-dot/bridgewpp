@@ -31,6 +31,7 @@
   let platformSuffixes = { ganamos: "f", multipanel: "y" };
   let remoteCreateDestinations = [];
   let remoteCreateDestinationsLoaded = false;
+  let remoteCreateDestinationsLoadPromise = null;
   let contactFlowCounters = { arrived: 0, derived: {}, countedNumbers: [], panels: [] };
   let contactFlowCounterRows = new Map();
   let contactFlowDerivedRows = null;
@@ -110,28 +111,40 @@
     }
   });
 
-  stateStorage.get("remoteCreateDestinations")
-    .then(({ remoteCreateDestinations: storedDestinations }) => {
-      remoteCreateDestinations = Array.isArray(storedDestinations) ? storedDestinations : [];
-      remoteCreateDestinationsLoaded = true;
-      renderContactFlowDerivedCounters();
-      updateContactFlowCounterVisibility();
-      updateActiveBonusVisibility();
-      const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
-      if (balanceHost) {
-        setAgentBalancePanelWidth(
-          balanceHost,
-          agentBalanceView === "minimized",
-          Object.keys(agentBalanceErrors).length > 0
-        );
-      }
-    })
-    .catch((error) => {
-      remoteCreateDestinationsLoaded = true;
-      updateContactFlowCounterVisibility();
-      updateActiveBonusVisibility();
-      console.error("[Ganamos balance extension] No se pudieron cargar las PCs de destino.", error);
-    });
+  function loadRemoteCreateDestinations() {
+    if (!remoteCreateDestinationsLoadPromise) {
+      remoteCreateDestinationsLoadPromise = stateStorage.get("remoteCreateDestinations")
+        .then(({ remoteCreateDestinations: storedDestinations }) => {
+          remoteCreateDestinations = Array.isArray(storedDestinations) ? storedDestinations : [];
+          remoteCreateDestinationsLoaded = true;
+          renderContactFlowDerivedCounters();
+          updateContactFlowCounterVisibility();
+          updateActiveBonusVisibility();
+          const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+          if (balanceHost) {
+            setAgentBalancePanelWidth(
+              balanceHost,
+              agentBalanceView === "minimized",
+              Object.keys(agentBalanceErrors).length > 0
+            );
+          }
+        })
+        .catch((error) => {
+          remoteCreateDestinationsLoadPromise = null;
+          remoteCreateDestinationsLoaded = true;
+          updateContactFlowCounterVisibility();
+          updateActiveBonusVisibility();
+          throw error;
+        });
+    }
+    return remoteCreateDestinationsLoadPromise;
+  }
+
+  void loadRemoteCreateDestinations()
+    .catch((error) => console.error(
+      "[Ganamos balance extension] No se pudieron cargar las PCs de destino.",
+      error
+    ));
 
   stateStorage.get(CONTACT_FLOW_COUNTERS_KEY)
     .then((stored) => {
@@ -2344,18 +2357,15 @@
   }
 
   async function getConfiguredRemoteBalanceDestinations(host) {
-    const { remoteCreateDestinations: destinations } =
-      await stateStorage.get("remoteCreateDestinations");
-    remoteCreateDestinations = Array.isArray(destinations)
-      ? destinations.filter((destination) =>
-        typeof destination?.id === "string" && typeof destination.name === "string")
-      : [];
+    await loadRemoteCreateDestinations();
+    const destinations = remoteCreateDestinations.filter((destination) =>
+      typeof destination?.id === "string" && typeof destination.name === "string");
     setAgentBalancePanelWidth(
       host,
       agentBalanceView === "minimized",
       Object.keys(agentBalanceErrors).length > 0
     );
-    return remoteCreateDestinations;
+    return destinations;
   }
 
   async function renderRemoteAgentBalances(host, platform, label, amount, destinations) {
@@ -2403,17 +2413,6 @@
     list.replaceChildren();
 
     try {
-      const stored = await stateStorage.get(null);
-      if (contactKey !== agentBalanceContactKey || view !== agentBalanceView) return;
-      const movements = Object.entries(stored)
-        .filter(([key, record]) =>
-          key.startsWith(AGENT_MOVEMENT_PREFIX) &&
-          (!contactKey || record?.contactKey === contactKey) &&
-          ["deposit", "withdrawal"].includes(record?.operation) &&
-          record.status !== "pending-verification")
-        .map(([, record]) => record)
-        .sort((first, second) => second.timestamp - first.timestamp);
-
       const now = new Date();
       const start = view === "daily"
         ? new Date(now.getFullYear(), now.getMonth(), now.getDate())
@@ -2422,6 +2421,17 @@
           : view === "monthly"
             ? new Date(now.getFullYear(), now.getMonth(), 1)
             : null;
+      const storedMovements = await stateStorage.getMovements({
+        ...(contactKey ? { contactKey } : {}),
+        ...(start ? { since: start.getTime() } : {})
+      });
+      if (contactKey !== agentBalanceContactKey || view !== agentBalanceView) return;
+      const movements = storedMovements
+        .filter((record) =>
+          ["deposit", "withdrawal"].includes(record?.operation) &&
+          record.status !== "pending-verification")
+        .sort((first, second) => second.timestamp - first.timestamp);
+
       const end = view === "daily"
         ? new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1)
         : view === "weekly"
@@ -2518,20 +2528,18 @@
   }
 
   async function findRecentUserWithdrawal(contactKey) {
-    const stored = await stateStorage.get(null);
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    return Object.entries(stored)
-      .filter(([key, movement]) =>
-        key.startsWith(AGENT_MOVEMENT_PREFIX) &&
-        movement?.contactKey === contactKey &&
-        movement.operation === "withdrawal" &&
-        Number.isFinite(movement.timestamp) &&
-        Number.isFinite(movement.amount) &&
-        ["ganamos", "multipanel"].includes(movement.platform) &&
-        movement.timestamp >= cutoff &&
-        movement.timestamp <= Date.now())
-      .map(([, movement]) => movement)
-      .sort((first, second) => second.timestamp - first.timestamp)[0] || null;
+    const movements = await stateStorage.getMovements({
+      contactKey,
+      operation: "withdrawal",
+      since: cutoff,
+      limit: 1
+    });
+    return movements.filter((movement) =>
+      Number.isFinite(movement.timestamp) &&
+      Number.isFinite(movement.amount) &&
+      ["ganamos", "multipanel"].includes(movement.platform) &&
+      movement.timestamp <= Date.now())[0] || null;
   }
 
   async function updateWithdrawalButtonState(host, contactKey) {
@@ -2575,19 +2583,16 @@
     if (!label) return;
     label.hidden = true;
     try {
-      const stored = await stateStorage.get(null);
+      const [lastWithdrawal] = await stateStorage.getMovements({
+        contactKey,
+        operation: "withdrawal",
+        limit: 1
+      });
       if (host.dataset.accounts !== contactKey) return;
-      const lastWithdrawal = Object.entries(stored)
-        .filter(([key, movement]) =>
-          key.startsWith(AGENT_MOVEMENT_PREFIX) &&
-          movement?.contactKey === contactKey &&
-          movement.operation === "withdrawal" &&
-          Number.isFinite(movement.timestamp) &&
-          ["ganamos", "multipanel"].includes(movement.platform) &&
-          movement.timestamp <= Date.now())
-        .map(([, movement]) => movement)
-        .sort((first, second) => second.timestamp - first.timestamp)[0];
-      if (!lastWithdrawal) return;
+      if (!lastWithdrawal ||
+        !Number.isFinite(lastWithdrawal.timestamp) ||
+        !["ganamos", "multipanel"].includes(lastWithdrawal.platform) ||
+        lastWithdrawal.timestamp > Date.now()) return;
 
       const formattedDate = new Intl.DateTimeFormat("es-AR", {
         dateStyle: "short",
@@ -2976,18 +2981,15 @@
       loading.textContent = "Cargando movimientos...";
       list.append(loading);
       try {
-        const stored = await stateStorage.get(null);
+        const movements = await stateStorage.getMovements({ contactKey });
         if (host.dataset.accounts !== contactKey || !root.contains(modal)) return;
-        storedMovements = Object.entries(stored)
-          .filter(([key, record]) =>
-            key.startsWith(AGENT_MOVEMENT_PREFIX) &&
-            record?.contactKey === contactKey &&
+        storedMovements = movements
+          .filter((record) =>
             ["ganamos", "multipanel"].includes(record.platform) &&
             (!record.username || (
               typeof record.username === "string" &&
               record.username.toLowerCase() === platformUsernames[record.platform]?.toLowerCase()
             )))
-          .map(([, record]) => record)
           .filter((record) =>
             Number.isFinite(record.timestamp) &&
             !Number.isNaN(new Date(record.timestamp).getTime()) &&

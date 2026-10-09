@@ -54,6 +54,10 @@
       }
       return values;
     },
+    async getMovements(filters = {}) {
+      const response = await send("MOVEMENTS_GET", { filters });
+      return response.movements;
+    },
     set(changes) {
       return send("STATE_SET", {
         changes,

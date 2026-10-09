@@ -301,9 +301,28 @@ prueba.
 
 El puerto `5432` debe permanecer accesible solo localmente. El puerto TLS de la
 API debe permitirse en el firewall únicamente para la LAN y la IP privada
-concreta del servidor. Para despliegue permanente, la API debe ejecutarse como
-servicio con un rol PostgreSQL de privilegios mínimos, secretos protegidos y
-procedimientos probados de backup/restauración y revocación.
+concreta del servidor. En Windows, instalar las tareas de producción desde
+PowerShell como administrador, usando la misma cuenta que posee
+`%LOCALAPPDATA%\BridgeWppDataApi\api-config.json`:
+
+```powershell
+Set-Location 'C:\ruta\al\repositorio\bridgewpp'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\data-api\install-windows-tasks.ps1
+```
+
+El instalador configura `BridgeWpp Data API` para iniciar al arrancar Windows
+y al iniciar sesión, sin detenerse por inactividad o batería. También instala
+`BridgeWpp Data API Keepalive`, que consulta `/health` cada minuto. Antes de
+recuperar la API realiza tres intentos, separados por cinco segundos; no la
+reinicia si recibió respuesta HTTP (por ejemplo, una indisponibilidad temporal
+de PostgreSQL), ni si el puerto sigue escuchando, y limita reinicios repetidos.
+Los fallos y recuperaciones del watchdog quedan en
+`%LOCALAPPDATA%\BridgeWppDataApi\keepalive.log`; la salida de la API, en
+`api.log`. El PostgreSQL sigue enlazado solo a loopback.
+
+Para despliegue permanente, mantener un rol PostgreSQL de privilegios mínimos,
+secretos protegidos y procedimientos probados de backup/restauración y
+revocación.
 
 ### Componentes
 

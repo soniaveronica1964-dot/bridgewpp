@@ -117,7 +117,7 @@ function sendJson(response, status, body, origin, allowedOrigin) {
 function getRoute(request) {
   const url = new URL(request.url, "https://localhost");
   const stateReadQuery = request.method === "GET" &&
-    ["/v1/state", "/v1/state/changes"].includes(url.pathname);
+    ["/v1/state", "/v1/state/changes", "/v1/movements"].includes(url.pathname);
   if (url.hash || url.search && !stateReadQuery) {
     throw new ApiError(400, "invalid_url", "La ruta de la solicitud no es válida.");
   }
@@ -1558,6 +1558,64 @@ function createDataApiServer({ pool, config }) {
         return;
       }
 
+      if (route === "/v1/movements" && request.method === "GET") {
+        const identity = await authenticate(request);
+        const query = new URL(request.url, "https://localhost").searchParams;
+        const allowedParameters = new Set(["contactKey", "operation", "since", "limit"]);
+        if ([...query.keys()].some((key) => !allowedParameters.has(key)) ||
+          [...allowedParameters].some((key) => query.getAll(key).length > 1)) {
+          throw new ApiError(400, "invalid_movement_query", "Los filtros de movimientos no son válidos.");
+        }
+        const contactKey = query.get("contactKey");
+        if (contactKey !== null &&
+          (!contactKey || contactKey.length > 2048 || /[\u0000-\u001f\u007f]/.test(contactKey))) {
+          throw new ApiError(400, "invalid_movement_query", "El contacto consultado no es válido.");
+        }
+        const operation = query.get("operation");
+        if (operation !== null && !["deposit", "withdrawal", "exchange"].includes(operation)) {
+          throw new ApiError(400, "invalid_movement_query", "El tipo de movimiento consultado no es válido.");
+        }
+        const since = query.get("since");
+        if (since !== null && (!/^\d{1,16}$/.test(since) || !Number.isSafeInteger(Number(since)))) {
+          throw new ApiError(400, "invalid_movement_query", "La fecha mínima de movimientos no es válida.");
+        }
+        const limit = query.get("limit");
+        if (limit !== null && (!/^[1-9]\d{0,4}$/.test(limit) || Number(limit) > 10000)) {
+          throw new ApiError(400, "invalid_movement_query", "El límite de movimientos debe estar entre 1 y 10000.");
+        }
+        const parameters = [identity.workspace_id];
+        const filters = ["workspace_id = $1"];
+        if (contactKey !== null) {
+          parameters.push(contactKey);
+          filters.push(`contact_key = $${parameters.length}`);
+        }
+        if (operation !== null) {
+          parameters.push(operation);
+          filters.push(`operation = $${parameters.length}`);
+        }
+        if (since !== null) {
+          parameters.push(Number(since));
+          filters.push(`timestamp_ms >= $${parameters.length}`);
+        }
+        let limitClause = "";
+        if (limit !== null) {
+          parameters.push(Number(limit));
+          limitClause = `LIMIT $${parameters.length}`;
+        }
+        const result = await pool.query(`
+          SELECT legacy_record_json
+          FROM agent_movements
+          WHERE ${filters.join(" AND ")}
+          ORDER BY timestamp_ms DESC NULLS LAST, legacy_storage_key DESC
+          ${limitClause}
+        `, parameters);
+        sendJson(response, 200, {
+          ok: true,
+          movements: result.rows.map(({ legacy_record_json: movement }) => movement)
+        }, origin, extensionId && `chrome-extension://${extensionId}`);
+        return;
+      }
+
       if (route === "/v1/state" && request.method === "POST") {
         const identity = await authenticate(request);
         const body = requireObjectBody(await parseBody(request, MAX_STATE_REQUEST_BYTES));
@@ -1783,7 +1841,18 @@ function createDataApiServer({ pool, config }) {
   }
 
   return https.createServer({ cert: config.cert, key: config.key, minVersion: "TLSv1.2" }, (request, response) => {
-    handle(request, response);
+    void handle(request, response).catch((error) => {
+      console.error(`Fallo no controlado al atender ${request.method}: ${error.code || error.name || "unknown"}`);
+      if (response.headersSent || response.destroyed) {
+        response.destroy(error);
+        return;
+      }
+      sendJson(response, 500, {
+        ok: false,
+        code: "internal_error",
+        error: "Error interno del servicio de datos."
+      }, request.headers.origin, null);
+    });
   }).setTimeout(30_000);
 }
 
@@ -1805,7 +1874,10 @@ function main() {
   server.maxHeadersCount = 32;
   server.on("error", (error) => {
     console.error(`No se pudo iniciar la API de datos: ${error.code || error.name}`);
-    process.exitCode = 1;
+    process.exit(1);
+  });
+  process.on("uncaughtExceptionMonitor", (error, origin) => {
+    console.error(`Excepción fatal de Node (${origin}): ${error.stack || error.message || error.name}`);
   });
   const shutdown = () => {
     server.close(() => pool.end().finally(() => process.exit(0)));

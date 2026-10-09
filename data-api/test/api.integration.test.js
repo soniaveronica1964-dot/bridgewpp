@@ -424,6 +424,27 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       bonus_minor: "55",
       contact_key: "contact-key-1"
     });
+    const movementHistory = await request(
+      port,
+      "GET",
+      "/v1/movements?contactKey=contact-key-1&operation=deposit&since=1759999999000&limit=1",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(movementHistory.status, 200, JSON.stringify(movementHistory.body));
+    assert.equal(movementHistory.body.movements.length, 1);
+    assert.equal(movementHistory.body.movements[0].username, "user-a");
+    const invalidMovementQuery = await request(
+      port,
+      "GET",
+      "/v1/movements?limit=0",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(invalidMovementQuery.status, 400);
+    assert.equal(invalidMovementQuery.body.code, "invalid_movement_query");
     const bonus = await pool.query(`
       SELECT value_json FROM workspace_settings WHERE setting_key = 'activeBonusConfig'
     `);
