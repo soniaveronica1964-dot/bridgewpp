@@ -58,7 +58,7 @@ bridge; no debe presentarse como un backup integral del equipo.
 
 ## Interfaz en Opciones
 
-Agregar una sección independiente **Respaldo de este perfil Chrome** a
+La sección **Respaldo de este perfil Chrome** está implementada en
 `options.html`/`options.js`:
 
 - **Exportar perfil**: crea y descarga un archivo cifrado del perfil que tiene
@@ -66,10 +66,25 @@ Agregar una sección independiente **Respaldo de este perfil Chrome** a
 - **Importar a PostgreSQL**: selecciona un archivo, lo descifra y lo entrega al
   proceso de importación/staging de PostgreSQL descrito en
   [MIGRACION_POSTGRESQL.md](./MIGRACION_POSTGRESQL.md).
-- Mostrar estado de servicio, workspace/perfil destino, versión del archivo,
-  cantidades y diferencias antes de confirmar la importación.
+- El cliente v1 acepta una API HTTPS en loopback o en una IP/nombre privado de
+  la LAN con certificado confiable. Requiere un código de enrolamiento de un
+  solo uso para perfiles nuevos. El token individual queda protegido por DPAPI
+  en el host nativo de Windows, y cada solicitud autenticada lleva una firma
+  HMAC de dispositivo con nonce anti-replay.
+- El host nativo debe instalarse en cada PC para el ID exacto de la extensión.
+  La API permanece en PostgreSQL central; el navegador nunca se conecta al
+  puerto SQL.
+- El exportador de la versión PostgreSQL descarga el estado accesible a ese
+  perfil desde la API, incluidos sus secretos y movimientos compartidos. El
+  formato del archivo conserva `chrome.storage.local` como procedencia
+  heredada para poder importar los respaldos creados antes de la migración.
+- Mostrar estado de servicio, workspace/perfil destino, versión/fecha del
+  archivo, cantidades y conflictos antes del commit.
 - Deshabilitar el envío/confirmación hasta que el archivo haya sido validado y
   el servicio destino haya confirmado su identidad.
+- La vista previa se calcula después de cargar el contenido a staging cifrado.
+  La UI ofrece descartar staging no confirmado; el commit es un segundo acto
+  explícito y no hay botón para borrar una importación confirmada.
 - El texto de estado nunca muestra contraseñas, tokens, sesiones ni valores de
   datos. No registrar payloads o passphrases en logs.
 
@@ -194,9 +209,13 @@ usa para formar HTML, SQL, rutas de archivo o comandos.
    guardar el passphrase por separado.
 3. Se solicita dos veces el passphrase. No se permite exportar sin cifrado en
    la primera versión.
-4. El código obtiene `chrome.storage.local.get(null)` y forma una instantánea
-   inmutable en memoria. Se verifica que todos los valores se serializan como
-   JSON y que no se omitieron claves.
+4. El código obtiene el estado del perfil desde la API PostgreSQL autorizada,
+   mediante el adaptador de estado de la extensión, y forma una instantánea
+   inmutable en memoria. En la transición, el archivo ya exportado desde
+   `chrome.storage.local` sigue siendo válido como fuente de importación. Se
+   verifica que todos los valores se serializan como JSON y que no se
+   omitieron claves. El UUID técnico `dataProfileSelector`, que distingue el
+   perfil para DPAPI, no se incluye en el respaldo.
 5. Calcula metadatos y hashes, genera `exportId`, salt e IV criptográficamente
    aleatorios, deriva la clave y cifra el payload completo.
 6. Solo después de terminar cifrado/validación inicia la descarga con extensión
@@ -246,26 +265,31 @@ implementar un segundo parser de negocio o un endpoint SQL de importación.
 4. Valida el JSON interior, tipos, unicidad de claves, cantidades, hashes,
    checksum canónico, conteo de movimientos y límites admitidos. Rechaza claves
    duplicadas, valores JSON inválidos, versión desconocida o checksum distinto.
-5. El servidor central valida TLS, `server_id`, identidad del perfil y
-   workspace, permisos de importación y estado de migración. Un servicio
-   inaccesible o con otra identidad bloquea la operación; no hay fallback local.
-6. Antes de subir datos, presenta una vista previa sin secretos:
-   - etiqueta que el usuario asigna al archivo;
-   - fecha y versión de exportación;
-   - claves totales/desconocidas y movimientos por tipo/estado;
-   - perfil/workspace destino autenticados;
-   - entidades privadas frente a compartidas;
-   - conflictos de claves, destinos, bonos, contadores y movimientos heredados;
-   - permisos de Chrome que deberán solicitarse luego por separado.
-7. El usuario confirma el destino y el plan de consolidación compartida. Los
-   datos no se hacen visibles todavía.
-8. El cliente envía por TLS lotes limitados por bytes al staging autenticado.
-   Se transmite el JSON de origen y se cifra el staging del lado del servidor.
-   Nunca se escribe el passphrase ni el plaintext en logs.
-9. El servidor valida checksum/cantidades de nuevo, aplica las reglas de ámbito
-   y conflictos de [MIGRACION_POSTGRESQL.md](./MIGRACION_POSTGRESQL.md), y
-   presenta el resultado de validación.
-10. Un segundo acto explícito confirma el commit. El servicio confirma por
+5. Esta implementación confirma la identidad TLS y el workspace de la API,
+   y determina el perfil autenticado con la credencial enrolada. Cada
+   solicitud autenticada lleva una firma HMAC de dispositivo con nonce
+   anti-replay. Un servicio inaccesible o con otra identidad bloquea la
+   operación; no hay fallback local. La asociación del host nativo con el
+   perfil Chrome debe validarse en cada perfil real antes de usarlo.
+6. El cliente envía por TLS lotes limitados por bytes al staging autenticado;
+    el staging se cifra del lado del servidor. Antes del commit, presenta una
+    vista previa sin secretos:
+    - nombre del archivo seleccionado;
+    - fecha y versión de exportación;
+    - claves totales/desconocidas y movimientos por tipo de operación;
+    - perfil/workspace destino autenticados;
+    - conflictos de ajustes, secretos, movimientos y claves heredadas.
+    El usuario debe confirmar explícitamente la procedencia del ID de extensión
+    si no coincide con la actual.
+7. La API vuelve a validar checksum/cantidades, informa los conflictos y
+    presenta las opciones permitidas para el primer snapshot compartido.
+8. El usuario revisa el destino y el plan de consolidación compartida; puede
+    descartar el staging o elegir explícitamente confirmar. Nunca se escribe el
+    passphrase ni el plaintext en logs.
+9. El servidor aplica las reglas de ámbito y conflictos de
+    [MIGRACION_POSTGRESQL.md](./MIGRACION_POSTGRESQL.md), y confirma el commit
+    de forma transaccional.
+10. El servicio confirma por
     `exportId`/hash para que repetir la solicitud no duplique datos. Si el mismo
     `exportId` aparece con otro checksum, rechaza la operación.
 11. Solo tras commit se muestra éxito. El archivo permanece intacto y el usuario

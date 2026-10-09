@@ -1,0 +1,5 @@
+# Local profile exports can contain sensitive operational data.
+/bridgewpp-*.json
+/import-profiles/
+/data-api/node_modules/
+/data-api/.env

@@ -21,6 +21,24 @@ const BACKUP_MAX_PAYLOAD_BYTES = 24 * 1024 * 1024;
 const BACKUP_SALT_BYTES = 16;
 const BACKUP_IV_BYTES = 12;
 const BACKUP_MIN_PASSPHRASE_LENGTH = 16;
+const IMPORT_BATCH_TARGET_BYTES = 48 * 1024;
+const DATA_NATIVE_HOST = "com.bridgewpp.data";
+let dataProfileSelectorPromise = null;
+const importForm = document.querySelector("#importForm");
+const importFileInput = document.querySelector("#importFile");
+const importPassphraseInput = document.querySelector("#importPassphrase");
+const importDeviceNameInput = document.querySelector("#dataDeviceName");
+const enrollmentCodeInput = document.querySelector("#dataEnrollmentCode");
+const importApiOriginInput = document.querySelector("#dataApiOrigin");
+const confirmDifferentExtensionInput = document.querySelector("#confirmDifferentExtension");
+const importPreviewElement = document.querySelector("#importPreview");
+const importStatusElement = document.querySelector("#importStatus");
+const sharedDecisionLabel = document.querySelector("#sharedDecisionLabel");
+const sharedDecisionSelect = document.querySelector("#sharedDataDecision");
+const previewImportButton = document.querySelector("#previewImport");
+const commitImportButton = document.querySelector("#commitImport");
+const discardImportButton = document.querySelector("#discardImport");
+let pendingImport = null;
 const remoteDestinationFields = [1, 2, 3].map((index) => ({
   id: `remote-${index}`,
   name: document.querySelector(`#remoteName${index}`),
@@ -80,7 +98,7 @@ function makeBackupFilename(label) {
 }
 
 async function createEncryptedProfileBackup(passphrase) {
-  const snapshot = await chrome.storage.local.get(null);
+  const snapshot = await stateStorage.get(null);
   const keys = Object.keys(snapshot).sort();
   if (keys.length > 100_000) {
     throw new Error("El perfil supera el límite de cantidad de claves permitido.");
@@ -184,6 +202,595 @@ async function createEncryptedProfileBackup(passphrase) {
     byteLength: archiveBytes.byteLength
   };
 }
+
+function decodeArchiveBase64(value, expectedBytes, field) {
+  if (typeof value !== "string" || !value.length || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new Error(`El campo ${field} del respaldo no es Base64 válido.`);
+  }
+  let binary;
+  try {
+    binary = atob(value);
+  } catch {
+    throw new Error(`El campo ${field} del respaldo no es Base64 válido.`);
+  }
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  if (bytesToBase64(bytes) !== value || expectedBytes !== undefined && bytes.byteLength !== expectedBytes) {
+    throw new Error(`El tamaño del campo ${field} del respaldo no es válido.`);
+  }
+  return bytes;
+}
+
+async function decryptAndValidateProfileArchive(file, passphrase) {
+  if (!file || file.size === 0 || file.size > BACKUP_MAX_BYTES) {
+    throw new Error("Seleccioná un archivo de respaldo no vacío de hasta 32 MiB.");
+  }
+  let archive;
+  try {
+    archive = JSON.parse(await file.text());
+  } catch {
+    throw new Error("El archivo seleccionado no contiene JSON válido.");
+  }
+  const encryption = archive?.encryption;
+  if (archive?.format !== BACKUP_FORMAT || archive.formatVersion !== BACKUP_FORMAT_VERSION ||
+    encryption?.algorithm !== "AES-256-GCM" || encryption?.kdf !== "PBKDF2-SHA-256" ||
+    encryption?.iterations !== BACKUP_KDF_ITERATIONS ||
+    typeof archive.ciphertext !== "string") {
+    throw new Error("El formato o los parámetros de cifrado del respaldo no son compatibles.");
+  }
+
+  const salt = decodeArchiveBase64(encryption.salt, BACKUP_SALT_BYTES, "salt");
+  const iv = decodeArchiveBase64(encryption.iv, BACKUP_IV_BYTES, "iv");
+  const ciphertext = decodeArchiveBase64(archive.ciphertext, undefined, "ciphertext");
+  if (ciphertext.byteLength < 16 || ciphertext.byteLength > BACKUP_MAX_PAYLOAD_BYTES + 16) {
+    throw new Error("El contenido cifrado del respaldo tiene un tamaño no válido.");
+  }
+
+  const header = {
+    format: BACKUP_FORMAT,
+    formatVersion: BACKUP_FORMAT_VERSION,
+    encryption: {
+      algorithm: "AES-256-GCM",
+      kdf: "PBKDF2-SHA-256",
+      iterations: BACKUP_KDF_ITERATIONS,
+      salt: encryption.salt,
+      iv: encryption.iv
+    }
+  };
+  const encoder = new TextEncoder();
+  const passwordKey = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(passphrase),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+  const aesKey = await crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: BACKUP_KDF_ITERATIONS, hash: "SHA-256" },
+    passwordKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"]
+  );
+  let plaintext;
+  try {
+    plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv, additionalData: encoder.encode(canonicalJson(header)), tagLength: 128 },
+      aesKey,
+      ciphertext
+    );
+  } catch {
+    throw new Error("No se pudo autenticar el respaldo. Verificá la frase de contraseña y que el archivo no esté dañado.");
+  }
+  if (plaintext.byteLength > BACKUP_MAX_PAYLOAD_BYTES) {
+    throw new Error("El contenido descifrado supera el máximo de 24 MiB.");
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plaintext));
+  } catch {
+    throw new Error("El contenido descifrado no es un payload JSON válido.");
+  }
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (payload?.format !== BACKUP_PAYLOAD_FORMAT ||
+    payload.formatVersion !== BACKUP_FORMAT_VERSION ||
+    !uuidPattern.test(payload.exportId || "") ||
+    typeof payload.exportedAt !== "string" || !Number.isFinite(Date.parse(payload.exportedAt)) ||
+    !/^[a-p]{32}$/.test(payload.source?.extensionId || "") ||
+    payload.source.storageArea !== "chrome.storage.local" ||
+    !Number.isSafeInteger(payload.integrity?.keyCount) || payload.integrity.keyCount < 0 ||
+    !Number.isSafeInteger(payload.integrity?.movementCount) || payload.integrity.movementCount < 0 ||
+    !/^[0-9a-f]{64}$/.test(payload.integrity?.canonicalSha256 || "") ||
+    !Array.isArray(payload.entries) || payload.entries.length !== payload.integrity.keyCount ||
+    payload.entries.length > 100_000) {
+    throw new Error("La estructura o los metadatos del respaldo no son válidos.");
+  }
+
+  let previousKey = null;
+  let movementCount = 0;
+  for (const entry of payload.entries) {
+    if (!entry || typeof entry.key !== "string" || entry.key.length === 0 ||
+      entry.key.length > 2048 || !/^[0-9a-f]{64}$/.test(entry.valueSha256 || "") ||
+      previousKey !== null && entry.key <= previousKey) {
+      throw new Error("El respaldo contiene claves inválidas, duplicadas o fuera de orden.");
+    }
+    previousKey = entry.key;
+    const valueHash = await sha256Hex(encoder.encode(canonicalJson(entry.value)));
+    if (valueHash !== entry.valueSha256) {
+      throw new Error(`No coincide la integridad de la clave "${entry.key}".`);
+    }
+    if (entry.key.startsWith("agentMovement:")) movementCount++;
+  }
+  if (movementCount !== payload.integrity.movementCount) {
+    throw new Error("La cantidad de movimientos del respaldo no coincide.");
+  }
+  const canonicalPayload = canonicalJson({
+    format: BACKUP_PAYLOAD_FORMAT,
+    formatVersion: BACKUP_FORMAT_VERSION,
+    entries: payload.entries.map(({ key, value }) => ({ key, value }))
+  });
+  const actualHash = await sha256Hex(encoder.encode(canonicalPayload));
+  if (actualHash !== payload.integrity.canonicalSha256) {
+    throw new Error("El checksum global del respaldo no coincide.");
+  }
+  return {
+    exportId: payload.exportId,
+    exportedAt: payload.exportedAt,
+    formatVersion: payload.formatVersion,
+    extensionId: payload.source.extensionId,
+    keyCount: payload.entries.length,
+    movementCount,
+    canonicalSha256: actualHash,
+    entries: payload.entries
+  };
+}
+
+function isPrivateDataApiHost(hostname) {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const parts = host.split(".").map(Number);
+  if (parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+    return parts[0] === 10 || parts[0] === 127 ||
+      parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31 ||
+      parts[0] === 192 && parts[1] === 168 ||
+      parts[0] === 169 && parts[1] === 254 ||
+      parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
+  }
+  return host === "localhost" || /\.(local|lan|internal)$/.test(host) ||
+    host === "::1" || /^f[cd][0-9a-f]{2}:/i.test(host) || /^fe[89ab][0-9a-f]:/i.test(host);
+}
+
+function getDataApiOrigin(value) {
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("La dirección HTTPS de la API no es válida.");
+  }
+  if (url.protocol !== "https:" || !isPrivateDataApiHost(url.hostname) ||
+    !url.port || url.pathname !== "/" || url.search || url.hash || url.username || url.password) {
+    throw new Error("La API debe usar HTTPS, un puerto explícito y una dirección privada de la LAN.");
+  }
+  return url.origin;
+}
+
+function getDataApiPermissionPattern(origin) {
+  const url = new URL(origin);
+  return `${url.protocol}//${url.hostname}/*`;
+}
+
+async function getDataProfileSelector() {
+  if (!dataProfileSelectorPromise) {
+    dataProfileSelectorPromise = chrome.runtime.sendMessage({
+      type: "DATA_PROFILE_SELECTOR_GET"
+    }).then((result) => {
+      if (!result?.ok ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+          .test(result.profileSelector || "")) {
+        throw new Error(result?.error || "No se pudo obtener la identidad persistente de este perfil Chrome.");
+      }
+      return result.profileSelector.toLowerCase();
+    });
+  }
+  try {
+    return await dataProfileSelectorPromise;
+  } finally {
+    dataProfileSelectorPromise = null;
+  }
+}
+
+async function sendNativeHost(message) {
+  let result;
+  try {
+    const profileSelector = await getDataProfileSelector();
+    result = await chrome.runtime.sendNativeMessage(DATA_NATIVE_HOST, {
+      ...message,
+      profileSelector
+    });
+  } catch (error) {
+    throw new Error(`No está instalado o accesible el host nativo con protección DPAPI. Ejecutá native-host\\install.ps1 para esta extensión. ${error.message}`);
+  }
+  if (!result?.ok) throw new Error(result?.error || "El host nativo no pudo completar la operación.");
+  return result;
+}
+
+async function requestDataApi(origin, route, { method = "GET", body, credential } = {}) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 120_000);
+  try {
+    const headers = {
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+      ...(credential ? { authorization: `Bearer ${credential}` } : {})
+    };
+    if (credential) {
+      const nativeProfile = await sendNativeHost({ command: "get" });
+      if (!nativeProfile.deviceId) {
+        throw new Error("El perfil no tiene una identidad de dispositivo persistida en el host nativo.");
+      }
+      const proof = await sendNativeHost({ command: "sign", method, requestPath: route });
+      headers["x-bridge-device-id"] = proof.deviceId;
+      headers["x-bridge-device-time"] = String(proof.timestamp);
+      headers["x-bridge-device-nonce"] = proof.nonce;
+      headers["x-bridge-device-signature"] = proof.signature;
+    }
+    const response = await fetch(`${origin}${route}`, {
+      method,
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    });
+    const responseText = await response.text();
+    let result = null;
+    if (responseText) {
+      try {
+        result = JSON.parse(responseText);
+      } catch {
+        throw new Error("La API PostgreSQL devolvió una respuesta que no es JSON válido.");
+      }
+    }
+    if (!response.ok) {
+      const error = new Error(result?.error || `La API PostgreSQL respondió HTTP ${response.status}.`);
+      error.status = response.status;
+      error.code = result?.code;
+      throw error;
+    }
+    return result;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("La API local excedió el tiempo de espera.");
+    if (error instanceof TypeError || error.name === "TypeError") {
+      throw new Error("No se pudo conectar con la API HTTPS. Comprobá que esté activa, que el certificado sea confiable y que Chrome tenga permiso para conectarse.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function ensureDataApiCredential(origin, serverInfo) {
+  const stored = await sendNativeHost({ command: "get" });
+  const credential = stored.credential;
+  if (typeof credential === "string" && credential) {
+    try {
+      if (stored.apiOrigin !== origin) {
+        throw new Error("La credencial de este perfil está vinculada a otro origen de API. Verificá la dirección antes de reenrolar.");
+      }
+      const identity = await requestDataApi(origin, "/v1/identity", { credential });
+      if (identity.serverId !== serverInfo.serverId ||
+        identity.workspaceId !== serverInfo.workspaceId) {
+        throw new Error("La credencial está enrolada en otro servidor o workspace. No se inició la importación.");
+      }
+      return { credential, identity };
+    } catch (error) {
+      if (error.status !== 401 || !enrollmentCodeInput.value.trim()) throw error;
+    }
+  }
+
+  const code = enrollmentCodeInput.value.trim();
+  const deviceName = importDeviceNameInput.value.trim();
+  if (!code || !deviceName || deviceName.length > 120) {
+    throw new Error("Para enrolar este perfil, ingresá un nombre de dispositivo y un código temporal válido.");
+  }
+  const installationId = stored.installationId;
+  if (typeof stored.deviceProofKey !== "string" ||
+    !/^[A-Za-z0-9+/]{43}=$/.test(stored.deviceProofKey)) {
+    throw new Error("El host nativo no devolvió una clave privada de dispositivo válida.");
+  }
+  const enrollment = await requestDataApi(origin, "/v1/enroll", {
+    method: "POST",
+    body: {
+      code,
+      deviceName,
+      installationId,
+      extensionId: chrome.runtime.id,
+      deviceProofKey: stored.deviceProofKey
+    }
+  });
+  if (typeof enrollment?.credential !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(enrollment.credential) ||
+    enrollment.identity?.workspaceId !== serverInfo.workspaceId) {
+    throw new Error("La API no devolvió una identidad de perfil válida.");
+  }
+  await sendNativeHost({
+    command: "store",
+    apiOrigin: origin,
+    credential: enrollment.credential,
+    deviceId: enrollment.identity.deviceId
+  });
+  const identity = await requestDataApi(origin, "/v1/identity", {
+    credential: enrollment.credential
+  });
+  if (identity.serverId !== serverInfo.serverId || identity.workspaceId !== serverInfo.workspaceId) {
+    throw new Error("La identidad emitida no corresponde al servidor elegido.");
+  }
+  enrollmentCodeInput.value = "";
+  return { credential: enrollment.credential, identity };
+}
+
+function makeImportBatches(entries) {
+  const batches = [];
+  let batch = [];
+  for (const entry of entries) {
+    const candidate = [...batch, entry];
+    const byteLength = new TextEncoder().encode(JSON.stringify({ entries: candidate })).byteLength;
+    if ((byteLength > IMPORT_BATCH_TARGET_BYTES || candidate.length > 500) && batch.length) {
+      batches.push(batch);
+      batch = [entry];
+    } else {
+      batch = candidate;
+    }
+    const singleEntrySize = new TextEncoder().encode(JSON.stringify({ entries: batch })).byteLength;
+    if (batch.length === 1 && singleEntrySize > BACKUP_MAX_PAYLOAD_BYTES + 64 * 1024) {
+      throw new Error(`La clave "${entry.key}" supera el máximo aceptado por el servicio.`);
+    }
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
+function renderImportPreview(preview) {
+  importPreviewElement.replaceChildren();
+  const report = preview.report;
+  const target = report.target || preview.identity || {};
+  const conflicts = report.conflicts;
+  const heading = document.createElement("strong");
+  heading.textContent = preview.status === "committed"
+    ? "Este respaldo ya fue importado."
+    : "Vista previa validada; todavía no se importó ningún dato.";
+  importPreviewElement.append(heading);
+  const details = [
+    `Archivo: ${preview.fileName || "sin nombre"}; formato v${preview.archive.formatVersion}; exportado ${new Date(preview.archive.exportedAt).toLocaleString()}`,
+    `Servidor: ${target.serverId || "no disponible"}`,
+    `Workspace: ${target.workspaceId || "no disponible"}`,
+    `Perfil: ${target.profileId || "no disponible"}`,
+    `Claves: ${report.keyCount ?? preview.archive.keyCount}; movimientos: ${report.movementCount ?? preview.archive.movementCount}; tipos: ${Object.entries(report.operationCounts || {}).map(([operation, count]) => `${operation} ${count}`).join(", ") || "sin movimientos"}; claves desconocidas: ${report.unknownKeyCount ?? report.preservedUnknownKeys ?? "no disponible"}`,
+    conflicts
+      ? `Conflictos: ajustes ${conflicts.profileSettings}, secretos ${conflicts.profileSecrets}, movimientos ${conflicts.movements}, claves heredadas ${conflicts.legacyKeys}`
+      : "Conflictos: no disponible para una migración que ya estaba confirmada."
+  ];
+  for (const detail of details) {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = detail;
+    importPreviewElement.append(paragraph);
+  }
+  importPreviewElement.hidden = false;
+
+  const decisions = Array.isArray(report.sharedData?.choices) ? report.sharedData.choices : [];
+  sharedDecisionSelect.replaceChildren();
+  if (decisions.includes("initialize_shared")) {
+    const option = document.createElement("option");
+    option.value = "initialize_shared";
+    option.textContent = "Inicializar datos compartidos con este perfil (solo si se eligió como fuente canónica)";
+    sharedDecisionSelect.append(option);
+  }
+  if (decisions.includes("private_and_movements_only")) {
+    const option = document.createElement("option");
+    option.value = "private_and_movements_only";
+    option.textContent = "Importar solo datos privados y movimientos; mantener datos compartidos actuales";
+    sharedDecisionSelect.append(option);
+  }
+  const needsDecision = decisions.length > 0;
+  sharedDecisionLabel.hidden = !needsDecision;
+  sharedDecisionSelect.hidden = !needsDecision;
+  commitImportButton.hidden = preview.status === "committed" || !needsDecision;
+  commitImportButton.disabled = preview.status === "committed" || !needsDecision;
+  discardImportButton.hidden = preview.status === "committed";
+  discardImportButton.disabled = preview.status === "committed";
+  if (!needsDecision && preview.status !== "committed") {
+    const warning = document.createElement("p");
+    warning.textContent = "Este workspace aún no tiene datos compartidos canónicos. Un administrador debe enrolar y confirmar primero el perfil elegido como fuente.";
+    importPreviewElement.append(warning);
+  }
+}
+
+async function loadOrStageImport(origin, credential, archive) {
+  const migrationId = archive.exportId;
+  const statusRoute = `/v1/migrations/${migrationId}`;
+  let status;
+  try {
+    status = await requestDataApi(origin, statusRoute, { credential });
+  } catch (error) {
+    if (error.status !== 404) throw error;
+  }
+  if (status?.status === "committed" || status?.status === "validated") {
+    return { status: status.status, report: status.report };
+  }
+  if (!status) {
+    const start = await requestDataApi(origin, statusRoute, {
+      method: "POST",
+      credential,
+      body: {
+        migrationId,
+        extensionId: archive.extensionId,
+        keyCount: archive.keyCount,
+        movementCount: archive.movementCount,
+        canonicalSha256: archive.canonicalSha256,
+        confirmDifferentExtension: confirmDifferentExtensionInput.checked
+      }
+    });
+    if (start.status === "committed" || start.status === "validated") {
+      const result = await requestDataApi(origin, statusRoute, { credential });
+      return { status: result.status, report: result.report };
+    }
+  }
+
+  const batches = makeImportBatches(archive.entries);
+  for (let index = 0; index < batches.length; index++) {
+    importStatusElement.textContent = `Enviando lote ${index + 1} de ${batches.length} al staging cifrado...`;
+    await requestDataApi(origin, `${statusRoute}/entries`, {
+      method: "POST",
+      credential,
+      body: { entries: batches[index] }
+    });
+  }
+  const validation = await requestDataApi(origin, `${statusRoute}/validate`, {
+    method: "POST",
+    credential,
+    body: {}
+  });
+  if (validation.status !== "validated" || !validation.report) {
+    throw new Error("La API no pudo validar el respaldo completo.");
+  }
+  return { status: validation.status, report: validation.report };
+}
+
+importForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  pendingImport = null;
+  importPreviewElement.hidden = true;
+  sharedDecisionLabel.hidden = true;
+  sharedDecisionSelect.hidden = true;
+  commitImportButton.hidden = true;
+  commitImportButton.disabled = true;
+  discardImportButton.hidden = true;
+  importStatusElement.textContent = "";
+  importPassphraseInput.setCustomValidity("");
+  if (!importForm.reportValidity()) return;
+  const file = importFileInput.files?.[0];
+  const passphrase = importPassphraseInput.value;
+  importPassphraseInput.value = "";
+  enrollmentCodeInput.value = enrollmentCodeInput.value.trim();
+  if (passphrase.length < BACKUP_MIN_PASSPHRASE_LENGTH || passphrase.length > 1024) {
+    importStatusElement.textContent = "La frase debe tener entre 16 y 1024 caracteres.";
+    return;
+  }
+  if (typeof crypto === "undefined" || !crypto.subtle || typeof crypto.randomUUID !== "function") {
+    importStatusElement.textContent = "Este navegador no dispone de las funciones criptográficas necesarias.";
+    return;
+  }
+
+  previewImportButton.disabled = true;
+  try {
+    const origin = getDataApiOrigin(importApiOriginInput.value);
+    const permitted = await chrome.permissions.request({
+      origins: [getDataApiPermissionPattern(origin)]
+    });
+    if (!permitted) throw new Error("No se concedió permiso para conectarse a esta API HTTPS.");
+    const archive = await decryptAndValidateProfileArchive(file, passphrase);
+    if (archive.extensionId !== chrome.runtime.id && !confirmDifferentExtensionInput.checked) {
+      throw new Error("El respaldo proviene de otro ID de extensión. Revisalo y marcá la confirmación explícita si corresponde.");
+    }
+    importStatusElement.textContent = "Comprobando identidad del servidor PostgreSQL...";
+    const health = await requestDataApi(origin, "/health");
+    if (health?.status !== "healthy" || health.apiVersion !== 1 || health.schemaVersion !== 4) {
+      throw new Error("La API no confirmó una versión compatible y el esquema de estado PostgreSQL.");
+    }
+    const serverInfo = await requestDataApi(origin, "/v1/server-info");
+    if (serverInfo?.tls !== true || serverInfo.apiVersion !== 1 || serverInfo.schemaVersion !== 4 ||
+      !/^[0-9a-f-]{36}$/i.test(serverInfo.serverId || "") ||
+      !/^[0-9a-f-]{36}$/i.test(serverInfo.workspaceId || "")) {
+      throw new Error("La identidad, versión o canal seguro de la API no coincide con lo esperado.");
+    }
+    const { credential, identity } = await ensureDataApiCredential(origin, serverInfo);
+    importStatusElement.textContent = "Enviando la instantánea validada al staging cifrado...";
+    const preview = await loadOrStageImport(origin, credential, archive);
+    pendingImport = {
+      origin,
+      credential,
+      identity,
+      archive,
+      fileName: file.name,
+      ...preview
+    };
+    renderImportPreview(pendingImport);
+    importStatusElement.textContent = preview.status === "committed"
+      ? "Esta instantánea ya se había importado; no se aplicaron cambios nuevos."
+      : "Vista previa lista. Revisá el destino y los conflictos antes de confirmar.";
+  } catch (error) {
+    importStatusElement.textContent = `No se pudo preparar la importación: ${error.message}`;
+  } finally {
+    importPassphraseInput.value = "";
+    previewImportButton.disabled = false;
+  }
+});
+
+commitImportButton.addEventListener("click", async () => {
+  if (!pendingImport || pendingImport.status !== "validated") return;
+  if (!sharedDecisionSelect.value) {
+    importStatusElement.textContent = "Elegí explícitamente cómo tratar los datos compartidos.";
+    return;
+  }
+  const decision = sharedDecisionSelect.value;
+  const confirmed = window.confirm(
+    `Se importarán ${pendingImport.archive.keyCount} claves y ${pendingImport.archive.movementCount} movimientos en el perfil mostrado. Esta acción no se puede borrar desde esta pantalla. ¿Confirmás continuar?`
+  );
+  if (!confirmed) return;
+
+  commitImportButton.disabled = true;
+  previewImportButton.disabled = true;
+  importStatusElement.textContent = "Confirmando la importación transaccional en PostgreSQL...";
+  try {
+    const result = await requestDataApi(
+      pendingImport.origin,
+      `/v1/migrations/${pendingImport.archive.exportId}/commit`,
+      {
+        method: "POST",
+        credential: pendingImport.credential,
+        body: { confirm: true, sharedDataDecision: decision }
+      }
+    );
+    pendingImport.status = result.status;
+    pendingImport.commitReport = result.report;
+    renderImportPreview(pendingImport);
+    importStatusElement.textContent = "Importación confirmada. Este perfil ya lee y escribe su estado en PostgreSQL. Conservá el respaldo original y recargá WhatsApp Web.";
+  } catch (error) {
+    importStatusElement.textContent = `No se pudo confirmar la importación: ${error.message}. Si se perdió la respuesta, volvé a validar el mismo archivo para consultar su estado antes de reintentar.`;
+    commitImportButton.disabled = false;
+  } finally {
+    previewImportButton.disabled = false;
+  }
+});
+
+discardImportButton.addEventListener("click", async () => {
+  if (!pendingImport || pendingImport.status !== "validated") return;
+  const confirmed = window.confirm(
+    "Se eliminará el staging no confirmado de esta importación. No se borrarán los datos de origen ni otras migraciones. ¿Descartar?"
+  );
+  if (!confirmed) return;
+  discardImportButton.disabled = true;
+  commitImportButton.disabled = true;
+  importStatusElement.textContent = "Eliminando staging no confirmado...";
+  try {
+    await requestDataApi(
+      pendingImport.origin,
+      `/v1/migrations/${pendingImport.archive.exportId}`,
+      { method: "DELETE", credential: pendingImport.credential }
+    );
+    pendingImport = null;
+    importPreviewElement.hidden = true;
+    sharedDecisionLabel.hidden = true;
+    sharedDecisionSelect.hidden = true;
+    commitImportButton.hidden = true;
+    discardImportButton.hidden = true;
+    importStatusElement.textContent = "Staging descartado. No se modificaron los datos importados ni el perfil de origen.";
+  } catch (error) {
+    importStatusElement.textContent = `No se pudo descartar el staging: ${error.message}`;
+    discardImportButton.disabled = false;
+    commitImportButton.disabled = false;
+  }
+});
 
 backupForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -389,13 +996,13 @@ document.querySelector("#settings").addEventListener("submit", async (event) => 
       status.textContent = "No se concedió permiso de conexión a uno o más destinos.";
       return;
     }
-    const previous = await chrome.storage.local.get("remoteCreateDestinations");
+    const previous = await stateStorage.get("remoteCreateDestinations");
     const previousOrigins = (Array.isArray(previous.remoteCreateDestinations)
       ? previous.remoteCreateDestinations
       : [])
       .filter((destination) => typeof destination?.url === "string")
       .map((destination) => getRemotePermissionPattern(destination.url));
-    await chrome.storage.local.set({
+    await stateStorage.set({
       bridgeRole: role,
       bridgeToken: role === "standalone" ? "" : token,
       ganamosUserId,
@@ -412,7 +1019,7 @@ document.querySelector("#settings").addEventListener("submit", async (event) => 
   }
 });
 
-chrome.storage.local.get([
+stateStorage.get([
   "bridgeRole",
   "bridgeToken",
   "ganamosUserId",

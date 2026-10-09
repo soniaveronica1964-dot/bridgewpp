@@ -5,6 +5,7 @@
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
+  const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 30_000;
   const TOAST_HOST_ID = "ganamos-toast-host";
   const AGENT_MOVEMENT_PREFIX = "agentMovement:";
   const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "weekly", "monthly", "total"];
@@ -37,6 +38,9 @@
   let contactFlowCounterSaveQueue = Promise.resolve();
   let contactFlowCountersLoaded = false;
   let contactFlowMessageObserverStarted = false;
+  let contactFlowCounterRefreshStarted = false;
+  let contactFlowCounterRefreshInProgress = false;
+  let contactFlowCountersVersion = 0;
   const contactFlowChatNumbers = new WeakMap();
   const processedIncomingMessages = new WeakSet();
   const processedOutgoingMessages = new WeakSet();
@@ -44,7 +48,7 @@
   const agentBalanceToastErrors = {};
   const withdrawalChecksInProgress = new WeakSet();
 
-  chrome.storage.local.get(["ganamosSuffix", "multiPanelSuffix"])
+  stateStorage.get(["ganamosSuffix", "multiPanelSuffix"])
     .then(({ ganamosSuffix, multiPanelSuffix }) => {
       if (/^[a-z]$/i.test(ganamosSuffix || "") && /^[a-z]$/i.test(multiPanelSuffix || "") &&
         ganamosSuffix.toLowerCase() !== multiPanelSuffix.toLowerCase()) {
@@ -57,8 +61,9 @@
     })
     .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar los sufijos de plataformas.", error));
 
-  chrome.storage.onChanged.addListener((changes, areaName) => {
+  stateStorage.onChanged.addListener((changes, areaName) => {
     if (areaName === "local" && changes[CONTACT_FLOW_COUNTERS_KEY]) {
+      contactFlowCountersVersion++;
       contactFlowCounters = normalizeContactFlowCounters(
         changes[CONTACT_FLOW_COUNTERS_KEY].newValue
       );
@@ -105,7 +110,7 @@
     }
   });
 
-  chrome.storage.local.get("remoteCreateDestinations")
+  stateStorage.get("remoteCreateDestinations")
     .then(({ remoteCreateDestinations: storedDestinations }) => {
       remoteCreateDestinations = Array.isArray(storedDestinations) ? storedDestinations : [];
       remoteCreateDestinationsLoaded = true;
@@ -128,7 +133,7 @@
       console.error("[Ganamos balance extension] No se pudieron cargar las PCs de destino.", error);
     });
 
-  chrome.storage.local.get(CONTACT_FLOW_COUNTERS_KEY)
+  stateStorage.get(CONTACT_FLOW_COUNTERS_KEY)
     .then((stored) => {
       contactFlowCounters = normalizeContactFlowCounters(stored[CONTACT_FLOW_COUNTERS_KEY]);
       contactFlowCountersLoaded = true;
@@ -469,7 +474,7 @@
   }
 
   async function readActiveBonusConfig() {
-    const stored = await chrome.storage.local.get(ACTIVE_BONUS_CONFIG_KEY);
+    const stored = await stateStorage.get(ACTIVE_BONUS_CONFIG_KEY);
     const config = stored[ACTIVE_BONUS_CONFIG_KEY];
     if (config == null) return null;
     const validated = validateActiveBonusConfig(config);
@@ -932,6 +937,7 @@
   function startContactFlowMessageObserver() {
     if (!contactFlowCountersLoaded || contactFlowMessageObserverStarted) return;
     contactFlowMessageObserverStarted = true;
+    startContactFlowCounterRefresh();
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
@@ -972,6 +978,37 @@
     });
   }
 
+  function startContactFlowCounterRefresh() {
+    if (contactFlowCounterRefreshStarted) return;
+    contactFlowCounterRefreshStarted = true;
+    globalThis.setInterval(() => void refreshContactFlowCounters(), CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS);
+  }
+
+  async function refreshContactFlowCounters() {
+    if (contactFlowCounterRefreshInProgress || !contactFlowCountersLoaded) return;
+    contactFlowCounterRefreshInProgress = true;
+    try {
+      const versionBeforeRead = contactFlowCountersVersion;
+      await contactFlowCounterSaveQueue;
+      if (contactFlowCountersVersion !== versionBeforeRead) return;
+      const stored = await stateStorage.get(CONTACT_FLOW_COUNTERS_KEY);
+      if (contactFlowCountersVersion !== versionBeforeRead) return;
+      const refreshed = normalizeContactFlowCounters(stored[CONTACT_FLOW_COUNTERS_KEY]);
+      if (JSON.stringify(refreshed) === JSON.stringify(contactFlowCounters)) return;
+      contactFlowCounters = refreshed;
+      contactFlowCountersVersion++;
+      for (const updateRow of contactFlowCounterRows.values()) updateRow();
+      contactFlowPanelConfigRefresh?.();
+    } catch (error) {
+      console.error(
+        "[Ganamos balance extension] No se pudieron refrescar los contadores compartidos.",
+        error
+      );
+    } finally {
+      contactFlowCounterRefreshInProgress = false;
+    }
+  }
+
   function createContactFlowCountersSnapshot(counters) {
     return {
       arrived: counters.arrived,
@@ -985,9 +1022,10 @@
   }
 
   function saveContactFlowCounters() {
+    contactFlowCountersVersion++;
     const snapshot = createContactFlowCountersSnapshot(contactFlowCounters);
     contactFlowCounterSaveQueue = contactFlowCounterSaveQueue
-      .then(() => chrome.storage.local.set({ [CONTACT_FLOW_COUNTERS_KEY]: snapshot }))
+      .then(() => stateStorage.set({ [CONTACT_FLOW_COUNTERS_KEY]: snapshot }))
       .catch((error) => console.error(
         "[Ganamos balance extension] No se pudieron guardar los contadores de llegados y derivados.",
         error
@@ -1267,7 +1305,8 @@
           panels
         };
         await contactFlowCounterSaveQueue;
-        await chrome.storage.local.set({
+        contactFlowCountersVersion++;
+        await stateStorage.set({
           [CONTACT_FLOW_COUNTERS_KEY]: createContactFlowCountersSnapshot(importedCounters)
         });
         contactFlowCounters = normalizeContactFlowCounters(importedCounters);
@@ -2102,7 +2141,7 @@
 
       save.disabled = true;
       try {
-        await chrome.storage.local.set({ [ACTIVE_BONUS_CONFIG_KEY]: config });
+        await stateStorage.set({ [ACTIVE_BONUS_CONFIG_KEY]: config });
         updateActiveBonusButton(host, config);
         root.replaceChildren();
       } catch (saveError) {
@@ -2306,7 +2345,7 @@
 
   async function getConfiguredRemoteBalanceDestinations(host) {
     const { remoteCreateDestinations: destinations } =
-      await chrome.storage.local.get("remoteCreateDestinations");
+      await stateStorage.get("remoteCreateDestinations");
     remoteCreateDestinations = Array.isArray(destinations)
       ? destinations.filter((destination) =>
         typeof destination?.id === "string" && typeof destination.name === "string")
@@ -2364,7 +2403,7 @@
     list.replaceChildren();
 
     try {
-      const stored = await chrome.storage.local.get(null);
+      const stored = await stateStorage.get(null);
       if (contactKey !== agentBalanceContactKey || view !== agentBalanceView) return;
       const movements = Object.entries(stored)
         .filter(([key, record]) =>
@@ -2469,7 +2508,7 @@
       ...(verification ? { verification } : {})
     };
     const recordKey = `${AGENT_MOVEMENT_PREFIX}${record.timestamp}:${crypto.randomUUID()}`;
-    await chrome.storage.local.set({ [recordKey]: record });
+    await stateStorage.set({ [recordKey]: record });
     if (operation === "withdrawal") {
       const host = document.getElementById(HOST_ID);
       if (host && host.dataset.accounts === contactKey) {
@@ -2479,7 +2518,7 @@
   }
 
   async function findRecentUserWithdrawal(contactKey) {
-    const stored = await chrome.storage.local.get(null);
+    const stored = await stateStorage.get(null);
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
     return Object.entries(stored)
       .filter(([key, movement]) =>
@@ -2536,7 +2575,7 @@
     if (!label) return;
     label.hidden = true;
     try {
-      const stored = await chrome.storage.local.get(null);
+      const stored = await stateStorage.get(null);
       if (host.dataset.accounts !== contactKey) return;
       const lastWithdrawal = Object.entries(stored)
         .filter(([key, movement]) =>
@@ -2937,7 +2976,7 @@
       loading.textContent = "Cargando movimientos...";
       list.append(loading);
       try {
-        const stored = await chrome.storage.local.get(null);
+        const stored = await stateStorage.get(null);
         if (host.dataset.accounts !== contactKey || !root.contains(modal)) return;
         storedMovements = Object.entries(stored)
           .filter(([key, record]) =>
@@ -3030,7 +3069,7 @@
       const view = getNextAgentBalanceView(agentBalanceView);
       setAgentBalanceView(host, view);
       try {
-        await chrome.storage.local.set({
+        await stateStorage.set({
           agentBalanceView: view,
           agentBalancesMinimized: view === "minimized"
         });
@@ -3082,7 +3121,7 @@
     card.append(toggle, rows, movementView, errorView);
     shadow.append(stylesheet, card);
     document.documentElement.append(host);
-    chrome.storage.local.get(["agentBalanceView", "agentBalancesMinimized"])
+    stateStorage.get(["agentBalanceView", "agentBalancesMinimized"])
       .then(({ agentBalanceView: storedView, agentBalancesMinimized }) => {
         const view = AGENT_BALANCE_VIEWS.includes(storedView)
           ? storedView
@@ -4667,7 +4706,7 @@
     };
 
     try {
-      const stored = await chrome.storage.local.get("remoteCreateDestinations");
+      const stored = await stateStorage.get("remoteCreateDestinations");
       const destinations = Array.isArray(stored.remoteCreateDestinations)
         ? stored.remoteCreateDestinations.filter((destination) =>
           typeof destination?.id === "string" && typeof destination.name === "string")

@@ -63,6 +63,10 @@ Se considerará completa únicamente cuando:
   `bridge-tray.log` pertenecen al bridge y a su aplicación de bandeja. Están
   bajo `%LOCALAPPDATA%\GanamosWhatsAppBridge`, fuera de `chrome.storage.local`.
   No se deben mover automáticamente como efecto lateral de esta migración.
+- `dataProfileSelector` es una excepción técnica: un UUID aleatorio no secreto
+  que permite al host nativo seleccionar el registro DPAPI de este perfil.
+  Permanece en el almacenamiento local de Chrome, pero no contiene estado de la
+  aplicación y no forma parte del respaldo/exportación del perfil.
 - El estado transitorio de long polling que el bridge mantiene en memoria no se
   migra. La configuración funcional `activeBonusConfig`, en cambio, pasa a ser
   compartida/persistente en PostgreSQL conforme a la tabla de ámbitos.
@@ -84,7 +88,7 @@ El inventario se deriva de los accesos actuales a `chrome.storage.local` en
 | `ganamosSuffix` | Texto de una letra. | Sufijo de alias para Ganamos. |
 | `multiPanelSuffix` | Texto de una letra. | Sufijo de alias para MultiPanel. Debe ser distinto al de Ganamos. |
 | `userCreationPassword` | Texto. | Contraseña automática para creación/restauración de usuarios. Es secreto. |
-| `remoteCreateDestinations` | Arreglo de hasta tres destinos. | Cada elemento puede contener `id`, `name`, `url`, `token`, `ganamosSuffix` y `multiPanelSuffix`. Incluye datos de red y secretos. |
+| `remoteCreateDestinations` | Arreglo de hasta tres destinos. | Configuración privada del perfil Chrome; cada elemento puede contener `id`, `name`, `url`, `token`, `ganamosSuffix` y `multiPanelSuffix`. Incluye datos de red y secretos. |
 | `multiPanelSession` | Texto de sesión. | Caché de la sesión que obtiene el service worker desde la pestaña MultiPanel y que puede renovarse al consultar reportes. Es secreto. |
 | `activeBonusConfig` | Objeto o ausencia de clave. | Tipo, estado, porcentajes, plataforma, umbrales y, en el modo misterioso, resultados/pesos. Puede recibirse desde el perfil principal. |
 | `contactFlowCounters` | Objeto compuesto. | Contadores, paneles, palabras clave, PCs destino y listas de números ya contabilizados. |
@@ -99,13 +103,13 @@ deban ser visibles para todos. La nueva API debe aplicar un ámbito explícito:
 
 | Dato | Ámbito recomendado | Regla |
 |---|---|---|
-| Destinos `remoteCreateDestinations` | Espacio de trabajo compartido | Se administran una vez y se ven desde los perfiles enrolados. Cada perfil Chrome solicita por separado los permisos de host de Chrome. |
+| Destinos `remoteCreateDestinations` | Perfil Chrome | Cada perfil administra su propia lista; las pestañas de WhatsApp de ese perfil usan esa lista y los demás perfiles no la heredan. Cada perfil Chrome solicita por separado los permisos de host de Chrome. |
 | Movimientos `agentMovement:*` | Espacio de trabajo compartido | Se consultan desde las PC autorizadas; se conserva el perfil/instalación que originó cada movimiento para auditoría e idempotencia. |
 | Contadores y paneles `contactFlowCounters` | Espacio de trabajo compartido | Incrementos/deduplicación deben ser atómicos en el servidor para impedir doble conteo entre PC. |
 | Bono activo | Espacio de trabajo compartido | La revisión/publicación existente se conserva; una actualización remota no se vuelve a publicar como local. |
 | `bridgeRole`, `bridgeToken`, ID de agente, sufijos y vista del panel | Perfil Chrome | No se propagan automáticamente a otros perfiles. |
 | `userCreationPassword`, `multiPanelSession` | Perfil Chrome autorizado | Secretos aislados por perfil; no se devuelven en lecturas generales ni se comparten por defecto. |
-| Token de cada destino remoto | Espacio de trabajo compartido, secreto | Solo clientes enrolados con permiso para ejecutar esa operación pueden usarlo; cifrado en el servidor. |
+| Token de cada destino remoto | Perfil Chrome, secreto | Solo lo reciben las pestañas del perfil propietario mediante la API autenticada; se cifra en el servidor. |
 | Permisos Chrome y `lux-support-user.session` del sitio | Fuera de la base compartida | Permanecen en Chrome/el sitio y cada PC/perfil mantiene su propio estado. |
 
 Esta tabla es la política predeterminada de esta especificación. Cualquier dato
@@ -113,6 +117,12 @@ que se mueva del ámbito perfil al compartido es un cambio visible de
 comportamiento y debe aprobarse, probarse con datos reales y documentarse. No se
 deben copiar contraseñas o sesiones personales al ámbito compartido solo para
 que “todo sincronice”.
+
+La migración de esquema que introduce el ámbito por perfil reasigna la
+configuración de destinos que antes estaba en el workspace al perfil que realizó
+su última modificación registrada (o al administrador del workspace si no hay
+un evento de cambio disponible). Los demás perfiles quedan sin esa lista y
+pueden configurar la suya desde sus propias opciones.
 
 ### Topología operativa prevista
 
@@ -210,6 +220,90 @@ como JSON original y reportarse en el resultado de la importación. No debe
 descartarse silenciosamente.
 
 ## Arquitectura objetivo
+
+### Estado de implementación del backend de migración
+
+El repositorio está preparando un servicio independiente en `data-api/`. El
+esquema y el migrador versionado están definidos; la API HTTPS tiene rutas de
+salud/identidad, enrolamiento de un solo uso y recepción de lotes cifrados en
+reposo para staging. La validación vuelve a comprobar hashes, cantidades y
+checksum canónico, y genera una vista previa de conflictos con conteos, sin
+devolver valores. Un endpoint autenticado permite consultar el estado y
+recuperar el informe de una migración ante una respuesta perdida. El commit
+importa ajustes y secretos privados, movimientos y claves heredadas de forma
+transaccional e idempotente; la inicialización de datos compartidos requiere
+una decisión explícita de un administrador del workspace.
+
+La capa de estado de ejecución (`GET/POST /v1/state`) está conectada al service
+worker y a las opciones/scripts de contenido mediante mensajes de extensión.
+Se eliminaron los accesos funcionales a `chrome.storage.local`; las
+lecturas/escrituras usan PostgreSQL, aplican revisiones optimistas a cambios
+compartidos y notifican cambios entre pestañas/perfiles. La única excepción es
+`dataProfileSelector`: un UUID aleatorio no secreto guardado en el
+almacenamiento local de Chrome para seleccionar el registro DPAPI del perfil,
+porque Chrome no expone al host nativo una identidad fiable del perfil activo.
+Ese UUID no se exporta como dato funcional ni contiene credenciales.
+La sincronización periódica consulta una bitácora incremental, no descarga todo
+el historial en cada sondeo. Los destinos, contadores y bono también actualizan
+sus tablas relacionales en la misma transacción. Las credenciales del API se
+guardan por perfil de Chrome en un host nativo Windows protegido con DPAPI.
+
+La configuración todavía requiere operaciones explícitas de despliegue:
+
+- en cada PC Windows, abrir `chrome://extensions`, copiar el ID de la
+  extensión, ejecutar `powershell -ExecutionPolicy Bypass -File
+  .\native-host\install.ps1 -ExtensionId <ID>` desde la carpeta del proyecto,
+  reiniciar Chrome y confiar en el certificado HTTPS del servidor;
+- configurar la API en la PC que aloja PostgreSQL con
+  `DATA_API_HOST=<IP-privada-del-servidor>`, `DATA_API_PORT=3443`,
+  `DATA_TLS_CERT_FILE`, `DATA_TLS_KEY_FILE`, `DATA_ALLOWED_EXTENSION_IDS` y
+  `DATA_WORKSPACE_ID`. La conexión de API a PostgreSQL debe permanecer en
+  `127.0.0.1`; no abrir `5432` en el firewall;
+- en Opciones, indicar `https://<IP-privada-o-nombre-LAN>:3443`, dar permiso
+  explícito a Chrome y enrolar/importar cada respaldo individualmente;
+- no abrir PostgreSQL a la LAN. La API es el único cliente de PostgreSQL.
+  La cuenta de base, el cifrado, backups, firewall, revocación, rotación y
+  recuperación siguen requiriendo instalación/configuración operativa;
+- la extensión crea y conserva un UUID selector por perfil en
+  `chrome.storage.local`; el host nativo usa ese selector para recuperar las
+  credenciales y la llave HMAC cifradas con DPAPI. No deduce el perfil a partir
+  de argumentos del proceso Chrome;
+- el token individual identifica en PostgreSQL el perfil y dispositivo del
+  enrolamiento y solo persiste cifrado con DPAPI. Las solicitudes autenticadas
+  llevan una firma HMAC por dispositivo, con nonce de un solo uso y ventana
+  temporal limitada. La prueba de clave se cifra en PostgreSQL con
+  `DATA_ENCRYPTION_KEY`. La separación de perfiles depende del UUID local; al
+  probar un perfil Chrome nuevo debe generarse un UUID distinto y este nunca
+  debe copiarse manualmente entre perfiles;
+- las operaciones con servicios externos mantienen sus efectos actuales: la
+  API persiste estado e historial, pero no reintenta acciones Ganamos/
+  MultiPanel ni aporta una cola durable de operaciones financieras.
+
+La UI de Opciones descifra y valida el respaldo, enrola el perfil, confirma la
+importación y conserva la credencial en DPAPI. El respaldo original no se
+modifica. El servicio permite descartar staging no confirmado y mantiene los
+commits idempotentes; las pruebas de integración usan una base temporal. El
+permiso `storage` permanece únicamente para guardar/leer `dataProfileSelector`;
+la extensión no guarda allí ajustes, sesiones, movimientos ni credenciales.
+Los archivos de respaldo siguen declarando `chrome.storage.local` como
+formato/origen heredado para mantener compatibilidad con las exportaciones ya
+creadas.
+
+La suite incluye pruebas del descifrado/verificación de archivos y una prueba
+de integración HTTPS contra un clúster PostgreSQL temporal: verifica
+importación privada, inicialización explícita de datos compartidos, vista
+previa de conflictos sin revelar secretos, recepción de valores grandes,
+rechazo de firmas inválidas y nonces repetidos, rechazo de duplicados, descarte
+de staging y consistencia transaccional. La
+integración PostgreSQL es opcional en el uso ordinario y se habilita con
+variables `TEST_*`; un certificado autofirmado solo se usa dentro de esa
+prueba.
+
+El puerto `5432` debe permanecer accesible solo localmente. El puerto TLS de la
+API debe permitirse en el firewall únicamente para la LAN y la IP privada
+concreta del servidor. Para despliegue permanente, la API debe ejecutarse como
+servicio con un rol PostgreSQL de privilegios mínimos, secretos protegidos y
+procedimientos probados de backup/restauración y revocación.
 
 ### Componentes
 
@@ -546,9 +640,10 @@ completa antes de continuar.
 
 Las opciones complejas pueden exponerse como objetos al cliente, pero sus
 escrituras deben sustituir el valor completo de forma atómica y versionada.
-`activeBonusConfig` se guarda como ajuste del workspace. Los destinos se
-normalizan en `remote_destinations`; no mantener una copia editable adicional
-del arreglo en `workspace_settings`.
+`activeBonusConfig` se guarda como ajuste del workspace. Los destinos remotos se
+guardan por perfil en `extension_state_values` cifrado y se normalizan en
+`remote_destinations` con `workspace_id` y `profile_id`; no mantener una copia
+editable adicional del arreglo en `workspace_settings`.
 
 La contraseña, tokens, sesión MultiPanel y tokens de destinos son secretos. Se
 deben separar en una tabla de secretos, o cifrar antes de almacenarlos, sin
@@ -569,19 +664,17 @@ secretos privados se cifran con una clave protegida por el sistema operativo del
 servidor o un gestor de secretos; DPAPI `CurrentUser` de cada PC no sirve para
 que otro equipo descifre el valor. La clave no se guarda en la misma base ni en
 el repositorio. La API solo descifra en memoria al atender una operación
-autorizada. Los secretos compartidos (por ejemplo, el token de destinos) se
-cifran y tienen ACL separada por workspace/operación. Deben cubrirse
+autorizada. Los secretos de destinos se cifran por perfil. Deben cubrirse
 `bridgeToken`, `userCreationPassword`, `multiPanelSession` y el token de cada
 destino. La credencial de cliente que autentica la API es independiente de
 `bridgeToken`; no se recupera de una configuración de negocio ni se devuelve en
 respuestas generales.
 
-Los tokens compartidos de destinos no se incluyen en `remote_destinations`
-serializado ni en `legacy_json` en claro. El campo `token_ciphertext` contiene
-solo el ciphertext; cualquier JSON de preservación de esa tabla omite el token.
-Si el cliente requiere el token para una operación remota, se devuelve por una
-operación específica, autorizada y auditada sobre TLS, nunca en `destinations.get`
-ni en reportes de diagnóstico.
+Los tokens de destinos no se incluyen en `remote_destinations` serializado ni
+en `legacy_json` en claro. El campo `token_ciphertext` contiene solo el
+ciphertext; cualquier JSON de preservación de esa tabla omite el token. La API
+solo devuelve la configuración descifrada al perfil propietario, por la lectura
+autenticada de su estado.
 
 Los ajustes privados quedan en `app_settings`, incluidos `bridgeRole`,
 `ganamosUserId`, los sufijos, `agentBalanceView` y `agentBalancesMinimized`.
@@ -596,6 +689,7 @@ Si se normalizan los destinos, la tabla puede ser:
 ```sql
 CREATE TABLE remote_destinations (
   workspace_id        UUID NOT NULL REFERENCES workspaces(workspace_id),
+  profile_id          UUID NOT NULL,
   destination_id      TEXT NOT NULL,
   ordinal             INTEGER NOT NULL,
   name                TEXT NOT NULL,
@@ -605,8 +699,10 @@ CREATE TABLE remote_destinations (
   multipanel_suffix   TEXT NOT NULL,
   legacy_json         TEXT NOT NULL,
   revision            BIGINT NOT NULL DEFAULT 1,
-  PRIMARY KEY (workspace_id, destination_id),
-  UNIQUE (workspace_id, ordinal)
+  PRIMARY KEY (workspace_id, profile_id, destination_id),
+  UNIQUE (workspace_id, profile_id, ordinal),
+  FOREIGN KEY (profile_id, workspace_id)
+    REFERENCES extension_profiles(profile_id, workspace_id)
 );
 ```
 
@@ -904,17 +1000,13 @@ resultado confirmado: requiere estado `uncertain` y conciliación explícita.
 
 ### Tamaño y transporte de importación
 
-La API limita el cuerpo JSON general (por ejemplo, a 128 KiB). Una exportación
-completa puede superar ese tamaño, sobre todo por historiales o listas de
-números; no se debe subir el límite general sin motivo ni mandar todos los
-datos en una única solicitud.
-
-La migración se envía por lotes limitados por bytes, con un límite práctico de
-64 KiB por solicitud para quedar por debajo del límite actual. El serializador
-debe comprobar los bytes UTF-8 reales, no solo contar objetos. Si un valor
-individual excede el máximo de lote, debe dividirse en fragmentos identificados
-por clave/índice o procesarse mediante el formato de staging específico; no
-truncarlo.
+La UI envía lotes cuyo objetivo es 48 KiB, midiendo bytes UTF-8 reales y
+manteniendo como máximo 500 entradas. Un valor individual mayor se envía solo,
+sin truncarlo; la API impone un máximo de 24 MiB más la envoltura JSON, acorde
+con el límite del payload cifrado. El tamaño se comprueba tanto antes de
+descifrar como antes de aceptar cada solicitud. Las importaciones grandes
+pueden tardar y se pueden reintentar con el mismo `exportId`, porque recibir
+dos veces una clave con el mismo hash es idempotente.
 
 ## Equivalencia de comportamiento
 
@@ -1191,20 +1283,26 @@ cual sería una migración fallida.
   antes de repetir manualmente, igual que los mensajes actuales para
   timeout/incertidumbre.
 
-## Cambios necesarios en el código
+## Especificación de componentes y brechas operativas
+
+Las siguientes subsecciones conservan los requisitos de diseño y las
+comprobaciones de aceptación. No significan que el servicio ya esté instalado
+como servicio de Windows, que todos los perfiles hayan sido enrolados ni que
+el despliegue LAN se encuentre operativo. La sección «Estado actual» describe
+lo implementado en el código.
 
 ### [manifest.json](./manifest.json)
 
-- Mantener el permiso de almacenamiento durante la fase de transición si es
-  necesario para importar datos.
+- Mantener `storage` únicamente para `dataProfileSelector`, el UUID no secreto
+  que el host nativo necesita para distinguir perfiles Chrome.
 - Mantener permisos actuales de loopback para el bridge y los permisos
   opcionales del listener remoto.
 - Añadir como permiso opcional el origen HTTPS exacto de la API de datos
   configurada, o incluirlo en el manifiesto administrado. Solicitarlo durante
   enrolamiento por perfil Chrome; no pedir comodines de toda la LAN.
 - No añadir permisos de archivos ni conexión directa a PostgreSQL al navegador.
-- Retirar `storage` del manifiesto solo después de que no quede ningún acceso a
-  `chrome.storage` y de que la importación/rollback ya no dependan de él.
+- No usar `chrome.storage` para estado funcional; no retirar el permiso mientras
+  exista el selector local por perfil.
 
 ### [background.js](./background.js)
 
@@ -1236,7 +1334,7 @@ cual sería una migración fallida.
 
 ### [content/whatsapp.js](./content/whatsapp.js)
 
-- Migrar lecturas/escrituras de ajustes, destinos compartidos, contadores,
+- Migrar lecturas/escrituras de ajustes, destinos por perfil, contadores,
   movimientos compartidos y vista privada del panel.
 - Sustituir los listeners de `chrome.storage.onChanged` por eventos de
   actualización de la API central entregados al service worker.
@@ -1387,8 +1485,9 @@ siguiente:
 - pruebas de comportamiento anterior/nuevo pasan en escenarios reales;
 - existe respaldo recuperable de cada fuente;
 - rollback documentado y probado;
-- no quedan usos de `chrome.storage.local`, incluyendo listeners de cambios y
-  accesos dinámicos con `get(null)`;
+- no quedan usos funcionales de `chrome.storage.local`, listeners de cambios
+  ni lecturas dinámicas con `get(null)`; la única clave local permitida es el
+  UUID no secreto `dataProfileSelector`;
 - cada perfil/instalación está enrolado al workspace correcto y su
   `server_id`/certificado fue validado;
 - la API/PostgreSQL se despliega y restaura de acuerdo con el procedimiento
@@ -1396,9 +1495,10 @@ siguiente:
 
 ## Decisiones que no se deben tomar implícitamente
 
-1. **Ámbitos:** destinos, bono, contadores e historial son compartidos dentro
-   del workspace designado; preferencias/sesiones indicadas son privadas por
-   perfil. No crear workspaces ni compartir datos por detección de LAN sola.
+1. **Ámbitos:** bono, contadores e historial son compartidos dentro del
+   workspace designado; destinos de creación remota y preferencias/sesiones
+   indicadas son privados por perfil. No crear workspaces ni compartir datos
+   por detección de LAN sola.
 2. **Eliminación de datos Chrome antiguos:** es un paso posterior separado, no
    parte de la primera importación.
 3. **Migración de `credentials.json`:** queda fuera; no mezclar credenciales de

@@ -121,7 +121,7 @@
     }
   }
 
-  chrome.storage.local.get(["bridgeRole", "bridgeToken"])
+  stateStorage.get(["bridgeRole", "bridgeToken"])
     .then(({ bridgeRole, bridgeToken }) => {
       if (bridgeRole === "primary" && typeof bridgeToken === "string" && bridgeToken) {
         void runPrimaryBridge();

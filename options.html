@@ -21,12 +21,16 @@
       legend { padding: 0 6px; font-weight: 600; }
       #status { min-height: 1.5em; margin-top: 12px; }
       #backupStatus { min-height: 1.5em; margin-top: 12px; }
+      #importStatus { min-height: 1.5em; margin-top: 12px; }
+      #importPreview { padding: 12px; border: 1px solid #dadce0; border-radius: 8px; }
+      #importPreview[hidden] { display: none; }
       button { margin-top: 12px; cursor: pointer; }
     </style>
   </head>
   <body>
     <h1>Configuración de la extensión</h1>
     <p>Elegí cómo se conectará este perfil de Chrome a las plataformas.</p>
+    <p class="hint">Solo se guarda en el almacenamiento local de Chrome un UUID aleatorio para distinguir este perfil y seleccionar sus credenciales protegidas con DPAPI. La configuración, las sesiones y los movimientos se guardan en PostgreSQL.</p>
     <form id="settings">
       <label for="role">Modo de este perfil</label>
       <select id="role" name="role">
@@ -48,8 +52,8 @@
       <label for="userCreationPassword">Contraseña automática para nuevos usuarios</label>
       <input id="userCreationPassword" name="userCreationPassword" type="password" autocomplete="new-password">
       <p class="hint">El perfil que ejecuta el alta usa esta contraseña para Ganamos y MultiPanel, también para solicitudes de perfiles secundarios.</p>
-      <h2>Destinos para crear usuarios desde otra PC (opcional)</h2>
-      <p class="hint">En cada PC destino, habilitá “Permitir altas remotas” en el menú del bridge. Configurá aquí su dirección privada, el remoteCreateToken de credentials.json y los sufijos de esa PC. Permití el puerto 32146 en el firewall solo para redes privadas.</p>
+      <h2>Destinos de creación remota de este perfil Chrome (opcional)</h2>
+      <p class="hint">Esta lista es privada de este perfil Chrome; otros perfiles no la heredan. En cada PC destino, habilitá “Permitir altas remotas” en el menú del bridge. Configurá aquí su dirección privada, el remoteCreateToken de credentials.json y los sufijos de esa PC. Permití el puerto 32146 en el firewall solo para redes privadas.</p>
       <fieldset>
         <legend>Destino 1</legend>
         <label for="remoteName1">Nombre visible</label>
@@ -120,6 +124,63 @@
         <p id="backupStatus" role="status" aria-live="polite"></p>
       </form>
     </section>
+    <section aria-labelledby="importHeading">
+      <h2 id="importHeading">Importar respaldo y conectar este perfil a PostgreSQL</h2>
+      <p class="hint">
+        La extensión se conecta a la API HTTPS de la PC que aloja PostgreSQL;
+        todos los perfiles y computadoras usan esa misma dirección privada de la
+        LAN. Chrome debe confiar en el certificado TLS. Nunca abras el puerto
+        SQL: solo la API debe ser accesible desde la red.
+      </p>
+      <p class="hint">
+        La vista previa requiere cargar primero los datos al staging cifrado
+        temporal. Esto no cambia los datos funcionales; si no vas a confirmar,
+        usá “Descartar” para eliminar ese staging.
+      </p>
+      <p class="hint">
+        Instalá primero el host nativo de Windows de esta extensión. Guarda las
+        credenciales por perfil Chrome cifradas con DPAPI; los datos funcionales
+        se leen y escriben en PostgreSQL.
+      </p>
+      <form id="importForm">
+        <label for="dataApiOrigin">Origen HTTPS de la API PostgreSQL en la LAN</label>
+        <input id="dataApiOrigin" type="url" value="https://127.0.0.1:3443"
+          autocomplete="url" required>
+        <label for="importFile">Archivo de respaldo cifrado</label>
+        <input id="importFile" type="file" accept="application/json,.json" required>
+        <label for="importPassphrase">Frase de contraseña del respaldo</label>
+        <input id="importPassphrase" type="password" autocomplete="current-password"
+          minlength="16" maxlength="1024" required>
+        <label for="dataDeviceName">Nombre de esta PC/perfil para el enrolamiento</label>
+        <input id="dataDeviceName" type="text" maxlength="120" autocomplete="off">
+        <label for="dataEnrollmentCode">Código temporal de enrolamiento</label>
+        <input id="dataEnrollmentCode" type="password" autocomplete="off"
+          spellcheck="false">
+        <p class="hint">
+          El código lo genera el administrador para este perfil. Se usa una vez
+          y no se guarda;           La credencial revocable emitida por el servidor se almacena cifrada
+          con DPAPI en Windows, separada por perfil Chrome.
+        </p>
+        <label>
+          <input id="confirmDifferentExtension" type="checkbox" style="width:auto">
+          Confirmo importar aunque el respaldo provenga de otro ID de extensión
+        </label>
+        <button id="previewImport" type="submit">Descifrar, validar y preparar vista previa</button>
+        <div id="importPreview" hidden></div>
+        <label id="sharedDecisionLabel" for="sharedDataDecision" hidden>
+          Decisión explícita para datos compartidos
+        </label>
+        <select id="sharedDataDecision" hidden></select>
+        <button id="commitImport" type="button" hidden disabled>
+          Confirmar importación a PostgreSQL
+        </button>
+        <button id="discardImport" type="button" hidden>
+          Descartar importación sin confirmar
+        </button>
+        <p id="importStatus" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+    <script src="state-storage.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

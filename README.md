@@ -64,7 +64,9 @@ Las opciones se abren desde `chrome://extensions` → detalles de la extensión 
 
 ## Cambios de la API
 
-Los endpoints y payloads se centralizan en `background.js`. Los estilos del panel y sus popups están en `styles/whatsapp.css`. El `user_id` de Ganamos se configura en `chrome.storage.local`. La sesión MultiPanel se sincroniza desde la pestaña abierta del panel principal; la respuesta de `getReport` también puede renovarla. En modo secundario, todas las solicitudes de Ganamos y MultiPanel se ejecutan en el perfil principal.
+Los endpoints y payloads se centralizan en `background.js`. Los estilos del panel y sus popups están en `styles/whatsapp.css`. La configuración, la sesión MultiPanel y el historial se guardan mediante la API PostgreSQL del workspace; las credenciales revocables de esa API se protegen con DPAPI en el host nativo de Windows. La sesión MultiPanel se sincroniza desde la pestaña abierta del panel principal; la respuesta de `getReport` también puede renovarla. En modo secundario, todas las solicitudes de Ganamos y MultiPanel se ejecutan en el perfil principal.
+
+Los contadores compartidos de llegados y derivados se vuelven a leer desde PostgreSQL cada 30 segundos en cada pestaña de WhatsApp abierta, y la interfaz se actualiza si otra pestaña o PC los modificó. Esta lectura periódica no vuelve a escribir un snapshot sin cambios, para evitar sobrescribir actualizaciones simultáneas.
 
 ## Alcance y errores
 

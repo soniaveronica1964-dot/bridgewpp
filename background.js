@@ -4,6 +4,300 @@ const MULTIPANEL_WEB_ORIGIN = "https://bo.casinoenvivo.club";
 const DEFAULT_AGENT_USER_ID = "38175478";
 const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 const PLATFORM_REQUEST_TIMEOUT_MS = 45_000;
+const DATA_HOST_NAME = "com.bridgewpp.data";
+const DATA_PROFILE_SELECTOR_KEY = "dataProfileSelector";
+const SHARED_STATE_KEYS = new Set([
+  "contactFlowCounters",
+  "activeBonusConfig"
+]);
+const stateChangedListeners = new Set();
+let cachedStateRevision = null;
+let cachedChangeRevision = null;
+let statePollInProgress = null;
+let lastStatePollAt = 0;
+let extensionStateCache = {};
+let dataProfileSelectorPromise = null;
+const extensionStateOnChanged = {
+  addListener(listener) {
+    stateChangedListeners.add(listener);
+  },
+  removeListener(listener) {
+    stateChangedListeners.delete(listener);
+  }
+};
+
+async function getDataApiCredentials() {
+  const profileSelector = await getDataProfileSelector();
+  let result;
+  try {
+    result = await chrome.runtime.sendNativeMessage(DATA_HOST_NAME, {
+      command: "get",
+      profileSelector
+    });
+  } catch (error) {
+    throw new Error(`No está disponible el host nativo de credenciales. Ejecutá native-host\\install.ps1 para esta extensión. ${error.message}`);
+  }
+  if (!result?.ok || typeof result.apiOrigin !== "string" ||
+    typeof result.credential !== "string" || !result.credential ||
+    typeof result.deviceId !== "string" || !result.deviceId) {
+    throw new Error("Este perfil Chrome no está conectado a PostgreSQL. Importá su respaldo y enrolá el perfil desde Opciones.");
+  }
+  const origin = new URL(result.apiOrigin);
+  if (origin.protocol !== "https:" || origin.origin !== result.apiOrigin) {
+    throw new Error("La dirección guardada de la API PostgreSQL no es HTTPS válida.");
+  }
+  return {
+    origin: origin.origin,
+    credential: result.credential,
+    deviceId: result.deviceId,
+    profileSelector
+  };
+}
+
+async function getDataProfileSelector() {
+  if (!dataProfileSelectorPromise) {
+    dataProfileSelectorPromise = (async () => {
+      const stored = await chrome.storage.local.get(DATA_PROFILE_SELECTOR_KEY);
+      if (typeof stored[DATA_PROFILE_SELECTOR_KEY] === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+          .test(stored[DATA_PROFILE_SELECTOR_KEY])) {
+        return stored[DATA_PROFILE_SELECTOR_KEY].toLowerCase();
+      }
+      const selector = crypto.randomUUID();
+      await chrome.storage.local.set({ [DATA_PROFILE_SELECTOR_KEY]: selector });
+      return selector;
+    })();
+  }
+  try {
+    return await dataProfileSelectorPromise;
+  } finally {
+    dataProfileSelectorPromise = null;
+  }
+}
+
+async function requestDataApi(route, { method = "GET", body } = {}) {
+  const { origin, credential, deviceId, profileSelector } = await getDataApiCredentials();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const proof = await chrome.runtime.sendNativeMessage(DATA_HOST_NAME, {
+      command: "sign",
+      profileSelector,
+      method,
+      requestPath: route
+    });
+    if (!proof?.ok || proof.deviceId !== deviceId ||
+      !Number.isSafeInteger(proof.timestamp) ||
+      typeof proof.nonce !== "string" || typeof proof.signature !== "string") {
+      throw new Error("El host nativo no pudo firmar la solicitud al servidor de datos.");
+    }
+    const response = await fetch(`${origin}${route}`, {
+      method,
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "x-bridge-device-id": proof.deviceId,
+        "x-bridge-device-time": String(proof.timestamp),
+        "x-bridge-device-nonce": proof.nonce,
+        "x-bridge-device-signature": proof.signature,
+        ...(body === undefined ? {} : { "content-type": "application/json" })
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    });
+    const text = await response.text();
+    let result;
+    try {
+      result = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error("La API PostgreSQL devolvió una respuesta JSON inválida.");
+    }
+    if (!response.ok) {
+      const message = result?.error || `La API PostgreSQL respondió HTTP ${response.status}.`;
+      if (response.status === 401) {
+        throw new Error(`${message} Reenrolá este perfil desde Opciones.`);
+      }
+      const error = new Error(message);
+      error.code = result?.code;
+      error.status = response.status;
+      throw error;
+    }
+    return result;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("La API PostgreSQL excedió el tiempo de espera.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function dispatchStateChange(changes) {
+  for (const listener of stateChangedListeners) {
+    try {
+      listener(changes, "local");
+    } catch (error) {
+      console.error("[Ganamos balance extension] Falló un listener de estado PostgreSQL.", error);
+    }
+  }
+  const message = {
+    type: "STATE_CHANGED",
+    changes,
+    revision: cachedStateRevision
+  };
+  void chrome.runtime.sendMessage(message).catch(() => {});
+  void chrome.tabs.query({ url: ["https://web.whatsapp.com/*", "https://bo.casinoenvivo.club/*"] })
+    .then((tabs) => Promise.allSettled(tabs
+      .filter((tab) => typeof tab.id === "number")
+      .map((tab) => chrome.tabs.sendMessage(tab.id, message))));
+}
+
+async function getExtensionState(keys = null) {
+  const selectedKeys = typeof keys === "string" ? [keys] : keys;
+  const query = selectedKeys === null || selectedKeys === undefined
+    ? ""
+    : `?keys=${encodeURIComponent(JSON.stringify(selectedKeys))}`;
+  const response = await requestDataApi(`/v1/state${query}`);
+  if (!response.values || typeof response.values !== "object" ||
+    !Number.isSafeInteger(response.revision) ||
+    !Number.isSafeInteger(response.changeRevision)) {
+    throw new Error("La API PostgreSQL devolvió un estado incompleto.");
+  }
+  cachedStateRevision = response.revision;
+  cachedChangeRevision = response.changeRevision;
+  if (selectedKeys === null || selectedKeys === undefined) {
+    extensionStateCache = { ...response.values };
+  } else {
+    for (const key of selectedKeys) {
+      if (!Object.hasOwn(response.values, key)) delete extensionStateCache[key];
+    }
+    Object.assign(extensionStateCache, response.values);
+  }
+  return response.values;
+}
+
+async function writeExtensionState(changes, removes = [], expectedRevision) {
+  if (!changes || typeof changes !== "object" || Array.isArray(changes) ||
+    !Array.isArray(removes)) {
+    throw new Error("El cambio de estado solicitado no es válido.");
+  }
+  const keys = [...Object.keys(changes), ...removes];
+  if (keys.some((key) => typeof key !== "string" || !key) ||
+    new Set(keys).size !== keys.length) {
+    throw new Error("El cambio contiene claves inválidas o repetidas.");
+  }
+  const sharedWrite = keys.some((key) => SHARED_STATE_KEYS.has(key));
+  if (sharedWrite && expectedRevision === undefined) {
+    await getExtensionState(keys.filter((key) => SHARED_STATE_KEYS.has(key)));
+  }
+  const previous = Object.fromEntries(keys.map((key) => [key, extensionStateCache[key]]));
+  const body = { changes, removes };
+  if (sharedWrite) {
+    body.expectedRevision = expectedRevision ?? cachedStateRevision;
+  }
+  const response = await requestDataApi("/v1/state", { method: "POST", body });
+  if (!Number.isSafeInteger(response.revision) || !Number.isSafeInteger(response.changeRevision)) {
+    throw new Error("La API PostgreSQL no confirmó la revisión del cambio.");
+  }
+  cachedStateRevision = response.revision;
+  cachedChangeRevision = response.changeRevision;
+  Object.assign(extensionStateCache, changes);
+  for (const key of removes) delete extensionStateCache[key];
+  const event = {};
+  for (const key of keys) {
+    event[key] = {
+      ...(Object.hasOwn(previous, key) && previous[key] !== undefined
+        ? { oldValue: previous[key] }
+        : {}),
+      ...(Object.hasOwn(changes, key) ? { newValue: changes[key] } : {})
+    };
+  }
+  dispatchStateChange(event);
+  return { revision: response.revision, changeRevision: response.changeRevision };
+}
+
+function setExtensionState(changes, expectedRevision) {
+  return writeExtensionState(changes, [], expectedRevision);
+}
+
+function removeExtensionState(keys, expectedRevision) {
+  return writeExtensionState({}, Array.isArray(keys) ? keys : [keys], expectedRevision);
+}
+
+async function pollExtensionState() {
+  const now = Date.now();
+  if (statePollInProgress) return statePollInProgress;
+  if (now - lastStatePollAt < 3000) return { ok: true, unchanged: true };
+  lastStatePollAt = now;
+  statePollInProgress = (async () => {
+    if (cachedChangeRevision === null) {
+      const previous = extensionStateCache;
+      const current = await getExtensionState(null);
+      const changes = {};
+      for (const key of new Set([...Object.keys(previous), ...Object.keys(current)])) {
+        const hadValue = Object.hasOwn(previous, key);
+        const hasValue = Object.hasOwn(current, key);
+        if (hadValue === hasValue && JSON.stringify(previous[key]) === JSON.stringify(current[key])) continue;
+        changes[key] = {
+          ...(hadValue ? { oldValue: previous[key] } : {}),
+          ...(hasValue ? { newValue: current[key] } : {})
+        };
+      }
+      if (Object.keys(changes).length) dispatchStateChange(changes);
+      return { ok: true, changed: Object.keys(changes).length > 0 };
+    }
+    const result = await requestDataApi(`/v1/state/changes?after=${cachedChangeRevision}`);
+    if (!Number.isSafeInteger(result.revision) || !Number.isSafeInteger(result.stateRevision)) {
+      throw new Error("La respuesta de sincronización de PostgreSQL no contiene revisiones válidas.");
+    }
+    if (result.revision === cachedChangeRevision) return { ok: true, unchanged: true };
+    if (result.resyncRequired) {
+      const previous = extensionStateCache;
+      const current = await getExtensionState(null);
+      const changes = {};
+      for (const key of new Set([...Object.keys(previous), ...Object.keys(current)])) {
+        const hadValue = Object.hasOwn(previous, key);
+        const hasValue = Object.hasOwn(current, key);
+        if (hadValue === hasValue && JSON.stringify(previous[key]) === JSON.stringify(current[key])) continue;
+        changes[key] = {
+          ...(hadValue ? { oldValue: previous[key] } : {}),
+          ...(hasValue ? { newValue: current[key] } : {})
+        };
+      }
+      if (Object.keys(changes).length) dispatchStateChange(changes);
+      return { ok: true, changed: Object.keys(changes).length > 0, resynced: true };
+    }
+
+    const previous = extensionStateCache;
+    const current = { ...previous };
+    for (const key of result.keys) {
+      if (Object.hasOwn(result.values, key)) current[key] = result.values[key];
+      else delete current[key];
+    }
+    extensionStateCache = current;
+    cachedStateRevision = result.stateRevision;
+    cachedChangeRevision = result.revision;
+    const changes = {};
+    for (const key of result.keys) {
+      const hadValue = Object.hasOwn(previous, key);
+      const hasValue = Object.hasOwn(current, key);
+      if (hadValue === hasValue && JSON.stringify(previous[key]) === JSON.stringify(current[key])) continue;
+      changes[key] = {
+        ...(hadValue ? { oldValue: previous[key] } : {}),
+        ...(hasValue ? { newValue: current[key] } : {})
+      };
+    }
+    if (Object.keys(changes).length) dispatchStateChange(changes);
+    return { ok: true, changed: Object.keys(changes).length > 0 };
+  })();
+  try {
+    return await statePollInProgress;
+  } finally {
+    statePollInProgress = null;
+  }
+}
 const MULTIPANEL_WEBSITES = [
   "megafaraon.pw", "esmeralda.uno", "esmeralda.digital", "fortubet.pw", "ganaencasa.pw",
   "ganaencasa.ws", "ganaencasa.one", "grancasinozeus.pw", "granposeidon.pw", "jokervip.pw",
@@ -32,7 +326,7 @@ function normalizeUsernameSuffix(username, suffix) {
 }
 
 async function getPlatformSuffixes() {
-  const stored = await chrome.storage.local.get(["ganamosSuffix", "multiPanelSuffix"]);
+  const stored = await getExtensionState(["ganamosSuffix", "multiPanelSuffix"]);
   const ganamos = typeof stored.ganamosSuffix === "string" ? stored.ganamosSuffix.toLowerCase() : "f";
   const multipanel = typeof stored.multiPanelSuffix === "string" ? stored.multiPanelSuffix.toLowerCase() : "y";
   if (!/^[a-z]$/.test(ganamos) || !/^[a-z]$/.test(multipanel) || ganamos === multipanel) {
@@ -42,7 +336,7 @@ async function getPlatformSuffixes() {
 }
 
 async function getAgentUserId(requestData) {
-  const stored = await chrome.storage.local.get("ganamosUserId");
+  const stored = await getExtensionState("ganamosUserId");
   const userId = String(requestData?.user_id ?? stored.ganamosUserId ?? DEFAULT_AGENT_USER_ID);
   if (!/^\d+$/.test(userId)) {
     throw new Error("El user_id configurado para Ganamos no es válido.");
@@ -236,7 +530,7 @@ async function createGanamosUser(data) {
   if (!isValidUsername(data?.username, ganamosSuffix)) {
     throw new Error("El nombre de usuario generado no tiene el sufijo configurado para Ganamos.");
   }
-  const { userCreationPassword } = await chrome.storage.local.get("userCreationPassword");
+  const { userCreationPassword } = await getExtensionState("userCreationPassword");
   if (typeof userCreationPassword !== "string" || !userCreationPassword.trim()) {
     throw new Error("Configurá la contraseña automática en las opciones de la extensión del perfil principal.");
   }
@@ -331,7 +625,7 @@ async function createMultiPanelUser(data) {
   if (!isValidMultiPanelUsername(data?.username, suffix)) {
     throw new Error("El nombre de usuario generado no tiene el sufijo configurado para MultiPanel.");
   }
-  const { userCreationPassword } = await chrome.storage.local.get("userCreationPassword");
+  const { userCreationPassword } = await getExtensionState("userCreationPassword");
   if (typeof userCreationPassword !== "string" || !userCreationPassword.trim()) {
     throw new Error("Configurá la contraseña automática en las opciones de la extensión del perfil que ejecuta las solicitudes.");
   }
@@ -389,7 +683,7 @@ async function createMultiPanelUser(data) {
 }
 
 async function getMultiPanelSession() {
-  const stored = await chrome.storage.local.get("multiPanelSession");
+  const stored = await getExtensionState("multiPanelSession");
   const session = stored.multiPanelSession;
   if (isValidMultiPanelSession(session)) return session.trim();
   return getMultiPanelSessionFromOpenTab();
@@ -412,7 +706,7 @@ async function getMultiPanelSessionFromOpenTab() {
     }
     if (response?.ok && isValidMultiPanelSession(response.session)) {
       const session = response.session.trim();
-      await chrome.storage.local.set({ multiPanelSession: session });
+      await setExtensionState({ multiPanelSession: session });
       return session;
     }
     if (response?.error) lastError = new Error(response.error);
@@ -449,7 +743,7 @@ async function findMultiPanelUser(username) {
   const refreshedSession = report?.data?.def?.session;
   if (typeof refreshedSession === "string" && refreshedSession.trim() && refreshedSession !== session) {
     session = refreshedSession.trim();
-    await chrome.storage.local.set({ multiPanelSession: session });
+    await setExtensionState({ multiPanelSession: session });
   }
 
   const user = matches[0];
@@ -494,7 +788,7 @@ async function findMultiPanelUsersByDigits(digits) {
     const refreshedSession = report?.data?.def?.session;
     if (typeof refreshedSession === "string" && refreshedSession.trim() && refreshedSession !== session) {
       session = refreshedSession.trim();
-      await chrome.storage.local.set({ multiPanelSession: session });
+      await setExtensionState({ multiPanelSession: session });
     }
     if (pageRecords.length < pageSize || newRecords === 0) break;
   }
@@ -827,7 +1121,7 @@ async function resetUserPassword(data) {
     : data?.platform === "multipanel" && isValidMultiPanelUsername(data.nombre, multipanel);
   if (!validUsername) throw new Error("El usuario no tiene el sufijo configurado para la plataforma seleccionada.");
 
-  const { userCreationPassword } = await chrome.storage.local.get("userCreationPassword");
+  const { userCreationPassword } = await getExtensionState("userCreationPassword");
   if (typeof userCreationPassword !== "string" || !userCreationPassword.trim()) {
     throw new Error("Configurá la contraseña automática en las opciones del perfil que ejecuta las solicitudes.");
   }
@@ -897,9 +1191,16 @@ function isWhatsAppSender(sender) {
   return sender.frameId === 0 && getSenderOrigin(sender) === WHATSAPP_ORIGIN;
 }
 
+function isStateStorageSender(sender) {
+  if (sender.id !== chrome.runtime.id || sender.frameId !== 0) return false;
+  const origin = getSenderOrigin(sender);
+  if (origin === WHATSAPP_ORIGIN || origin === MULTIPANEL_WEB_ORIGIN) return true;
+  return sender.url === chrome.runtime.getURL("options.html");
+}
+
 async function getBridgeSettings() {
   const { bridgeRole = "standalone", bridgeToken = "" } =
-    await chrome.storage.local.get(["bridgeRole", "bridgeToken"]);
+    await getExtensionState(["bridgeRole", "bridgeToken"]);
   return { role: bridgeRole, token: bridgeToken };
 }
 
@@ -944,7 +1245,7 @@ async function publishActiveBonusConfig() {
   if (role !== "primary" || !token) {
     throw new Error("Este perfil no está configurado como principal.");
   }
-  const stored = await chrome.storage.local.get("activeBonusConfig");
+  const stored = await getExtensionState("activeBonusConfig");
   const config = stored.activeBonusConfig ?? null;
   if (!isValidActiveBonusConfig(config)) {
     throw new Error("La configuración del bono activo no es válida y no se puede sincronizar.");
@@ -975,9 +1276,9 @@ async function syncActiveBonusConfig(revision) {
     throw new Error("El puente devolvió una configuración de bono activo no válida.");
   }
   if (update.config === null) {
-    await chrome.storage.local.remove("activeBonusConfig");
+    await removeExtensionState("activeBonusConfig");
   } else {
-    await chrome.storage.local.set({ activeBonusConfig: update.config });
+    await setExtensionState({ activeBonusConfig: update.config });
   }
   return update;
 }
@@ -1066,7 +1367,7 @@ function getRemoteCreateOrigin(value) {
 }
 
 async function sendRemoteOperation(destinationId, message, timeoutMs = 95_000) {
-  const stored = await chrome.storage.local.get("remoteCreateDestinations");
+  const stored = await getExtensionState("remoteCreateDestinations");
   const destination = (Array.isArray(stored.remoteCreateDestinations)
     ? stored.remoteCreateDestinations
     : []).find((item) => item?.id === destinationId);
@@ -1280,6 +1581,46 @@ async function runInConfiguredProfile(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "DATA_PROFILE_SELECTOR_GET") {
+    if (sender.id !== chrome.runtime.id || sender.frameId !== 0 ||
+      sender.url !== chrome.runtime.getURL("options.html")) {
+      sendResponse({ ok: false, error: "Origen no autorizado para consultar la identidad local del perfil." });
+      return;
+    }
+    getDataProfileSelector()
+      .then((profileSelector) => sendResponse({ ok: true, profileSelector }))
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo persistir la identidad local del perfil."
+      }));
+    return true;
+  }
+
+  if (["STATE_GET", "STATE_SET", "STATE_REMOVE", "STATE_POLL"].includes(message?.type)) {
+    if (!isStateStorageSender(sender)) {
+      sendResponse({ ok: false, error: "El origen no está autorizado para acceder al estado PostgreSQL." });
+      return;
+    }
+    const operation = message.type === "STATE_GET"
+      ? getExtensionState(message.keys ?? null).then((values) => ({
+          ok: true,
+          values,
+          revision: cachedStateRevision
+        }))
+      : message.type === "STATE_SET"
+      ? writeExtensionState(message.changes, [], message.expectedRevision)
+        .then(({ revision, changeRevision }) => ({ ok: true, revision, changeRevision }))
+      : message.type === "STATE_REMOVE"
+        ? writeExtensionState({}, message.removes, message.expectedRevision)
+          .then(({ revision, changeRevision }) => ({ ok: true, revision, changeRevision }))
+          : pollExtensionState();
+    operation.then(sendResponse).catch((error) => sendResponse({
+      ok: false,
+      error: error.message || "Falló la operación de estado PostgreSQL."
+    }));
+    return true;
+  }
+
   if (message?.type === "MULTIPANEL_SESSION_UPDATE") {
     if (sender.frameId !== 0 || getSenderOrigin(sender) !== MULTIPANEL_WEB_ORIGIN ||
       !isValidMultiPanelSession(message.session)) {
@@ -1289,7 +1630,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getBridgeSettings()
       .then(({ role }) => {
         if (role === "secondary") throw new Error("La sesión de MultiPanel solo se sincroniza en el perfil principal.");
-        return chrome.storage.local.set({ multiPanelSession: message.session.trim() });
+        return setExtensionState({ multiPanelSession: message.session.trim() });
       })
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo guardar la sesión de MultiPanel." }));
@@ -1405,7 +1746,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-chrome.storage.onChanged.addListener((changes, areaName) => {
+extensionStateOnChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || !changes.activeBonusConfig) return;
   void getBridgeSettings()
     .then(({ role }) => {
