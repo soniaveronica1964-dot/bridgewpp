@@ -20,6 +20,7 @@
       fieldset { margin: 18px 0; padding: 0 14px 14px; border: 1px solid #dadce0; border-radius: 8px; }
       legend { padding: 0 6px; font-weight: 600; }
       #status { min-height: 1.5em; margin-top: 12px; }
+      #backupStatus { min-height: 1.5em; margin-top: 12px; }
       button { margin-top: 12px; cursor: pointer; }
     </style>
   </head>
@@ -91,6 +92,34 @@
       <button type="submit">Guardar configuración</button>
       <p id="status" role="status" aria-live="polite"></p>
     </form>
+    <section aria-labelledby="backupHeading">
+      <h2 id="backupHeading">Respaldo de este perfil Chrome</h2>
+      <p class="hint">
+        Exporta toda la información de este perfil, incluidos movimientos
+        asociados a contactos, contadores, configuraciones y secretos. El archivo
+        se cifra con una frase de contraseña. Los demás perfiles de Chrome no se
+        incluyen.
+      </p>
+      <form id="backupForm">
+        <label for="backupLabel">Etiqueta del archivo (opcional)</label>
+        <input id="backupLabel" type="text" maxlength="40" autocomplete="off"
+          placeholder="por ejemplo perfil-principal">
+        <p class="hint">La etiqueta queda visible en el nombre del archivo; no incluyas contraseñas ni datos personales.</p>
+        <label for="backupPassphrase">Frase de contraseña del respaldo</label>
+        <input id="backupPassphrase" type="password" autocomplete="new-password"
+          minlength="16" maxlength="1024" required>
+        <label for="backupPassphraseConfirm">Repetí la frase de contraseña</label>
+        <input id="backupPassphraseConfirm" type="password" autocomplete="new-password"
+          minlength="16" maxlength="1024" required>
+        <p class="hint">
+          Usá al menos 16 caracteres y guardá la frase por separado. Si la perdés,
+          no se podrá recuperar el contenido del archivo. Se admiten payloads de
+          hasta 24 MiB, archivos finales de hasta 32 MiB y 100 000 claves.
+        </p>
+        <button id="exportBackup" type="submit">Exportar perfil cifrado</button>
+        <p id="backupStatus" role="status" aria-live="polite"></p>
+      </form>
+    </section>
     <script src="options.js"></script>
   </body>
 </html>

@@ -6,6 +6,21 @@ const multiPanelSuffixInput = document.querySelector("#multiPanelSuffix");
 const userCreationPasswordInput = document.querySelector("#userCreationPassword");
 const hint = document.querySelector("#hint");
 const status = document.querySelector("#status");
+const backupForm = document.querySelector("#backupForm");
+const backupLabelInput = document.querySelector("#backupLabel");
+const backupPassphraseInput = document.querySelector("#backupPassphrase");
+const backupPassphraseConfirmInput = document.querySelector("#backupPassphraseConfirm");
+const backupButton = document.querySelector("#exportBackup");
+const backupStatus = document.querySelector("#backupStatus");
+const BACKUP_FORMAT = "bridgewpp-profile-archive";
+const BACKUP_PAYLOAD_FORMAT = "bridgewpp-profile-payload";
+const BACKUP_FORMAT_VERSION = 1;
+const BACKUP_KDF_ITERATIONS = 600_000;
+const BACKUP_MAX_BYTES = 32 * 1024 * 1024;
+const BACKUP_MAX_PAYLOAD_BYTES = 24 * 1024 * 1024;
+const BACKUP_SALT_BYTES = 16;
+const BACKUP_IV_BYTES = 12;
+const BACKUP_MIN_PASSPHRASE_LENGTH = 16;
 const remoteDestinationFields = [1, 2, 3].map((index) => ({
   id: `remote-${index}`,
   name: document.querySelector(`#remoteName${index}`),
@@ -14,6 +29,220 @@ const remoteDestinationFields = [1, 2, 3].map((index) => ({
   ganamosSuffix: document.querySelector(`#remoteGanamosSuffix${index}`),
   multiPanelSuffix: document.querySelector(`#remoteMultiPanelSuffix${index}`)
 }));
+
+function canonicalJson(value, depth = 0) {
+  if (depth > 64) throw new Error("Los datos tienen una estructura demasiado profunda.");
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Se encontró un número que no se puede exportar.");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item, depth + 1)).join(",")}]`;
+  }
+  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new Error("Se encontró un valor que no se puede representar en JSON.");
+  }
+  const entries = Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key], depth + 1)}`);
+  return `{${entries.join(",")}}`;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function makeBackupFilename(label) {
+  const date = new Date().toISOString().slice(0, 10);
+  const safeLabel = label.normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40)
+    .replace(/-+$/g, "");
+  return `bridgewpp${safeLabel ? `-${safeLabel}` : ""}-perfil-${date}.json`;
+}
+
+async function createEncryptedProfileBackup(passphrase) {
+  const snapshot = await chrome.storage.local.get(null);
+  const keys = Object.keys(snapshot).sort();
+  if (keys.length > 100_000) {
+    throw new Error("El perfil supera el límite de cantidad de claves permitido.");
+  }
+
+  const entries = keys.map((key) => ({ key, value: snapshot[key] }));
+  const encoder = new TextEncoder();
+  const entryJson = canonicalJson(entries);
+  const canonicalPayload = `{"entries":${entryJson},"format":${JSON.stringify(BACKUP_PAYLOAD_FORMAT)},"formatVersion":${BACKUP_FORMAT_VERSION}}`;
+  const canonicalPayloadBytes = encoder.encode(canonicalPayload);
+  if (canonicalPayloadBytes.byteLength > BACKUP_MAX_PAYLOAD_BYTES) {
+    throw new Error("El respaldo supera el tamaño máximo de 24 MiB. No se generó un archivo parcial.");
+  }
+
+  const valueHashes = [];
+  const hashBatchSize = 100;
+  for (let offset = 0; offset < entries.length; offset += hashBatchSize) {
+    const batch = entries.slice(offset, offset + hashBatchSize);
+    valueHashes.push(...await Promise.all(batch.map(({ value }) =>
+      sha256Hex(encoder.encode(canonicalJson(value)))
+    )));
+  }
+  const integrity = {
+    keyCount: entries.length,
+    movementCount: keys.filter((key) => key.startsWith("agentMovement:")).length,
+    canonicalSha256: await sha256Hex(canonicalPayloadBytes)
+  };
+  const payload = {
+    format: BACKUP_PAYLOAD_FORMAT,
+    formatVersion: BACKUP_FORMAT_VERSION,
+    exportId: crypto.randomUUID(),
+    exportedAt: new Date().toISOString(),
+    source: {
+      extensionId: chrome.runtime.id,
+      storageArea: "chrome.storage.local"
+    },
+    integrity,
+    entries: entries.map(({ key, value }, index) => ({
+      key,
+      value,
+      valueSha256: valueHashes[index]
+    }))
+  };
+  const plaintext = encoder.encode(canonicalJson(payload));
+  if (plaintext.byteLength > BACKUP_MAX_PAYLOAD_BYTES) {
+    throw new Error("El respaldo supera el tamaño máximo de 24 MiB. No se generó un archivo parcial.");
+  }
+
+  const salt = crypto.getRandomValues(new Uint8Array(BACKUP_SALT_BYTES));
+  const iv = crypto.getRandomValues(new Uint8Array(BACKUP_IV_BYTES));
+  const encryption = {
+    algorithm: "AES-256-GCM",
+    kdf: "PBKDF2-SHA-256",
+    iterations: BACKUP_KDF_ITERATIONS,
+    salt: bytesToBase64(salt),
+    iv: bytesToBase64(iv)
+  };
+  const header = {
+    format: BACKUP_FORMAT,
+    formatVersion: BACKUP_FORMAT_VERSION,
+    encryption
+  };
+  const headerBytes = encoder.encode(canonicalJson(header));
+  const passphraseKey = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(passphrase),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+  const aesKey = await crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt,
+      iterations: BACKUP_KDF_ITERATIONS,
+      hash: "SHA-256"
+    },
+    passphraseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt"]
+  );
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: headerBytes, tagLength: 128 },
+    aesKey,
+    plaintext
+  );
+  const archive = JSON.stringify({
+    ...header,
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext))
+  });
+  const archiveBytes = encoder.encode(archive);
+  if (archiveBytes.byteLength > BACKUP_MAX_BYTES) {
+    throw new Error("El archivo cifrado supera el límite de 32 MiB. No se generó un archivo parcial.");
+  }
+
+  return {
+    blob: new Blob([archiveBytes], { type: "application/json;charset=utf-8" }),
+    keyCount: keys.length,
+    movementCount: integrity.movementCount,
+    byteLength: archiveBytes.byteLength
+  };
+}
+
+backupForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!backupForm.reportValidity()) return;
+
+  const passphrase = backupPassphraseInput.value;
+  const confirmation = backupPassphraseConfirmInput.value;
+  backupPassphraseInput.value = "";
+  backupPassphraseConfirmInput.value = "";
+  if (passphrase.length < BACKUP_MIN_PASSPHRASE_LENGTH) {
+    backupStatus.textContent = "La frase de contraseña debe tener al menos 16 caracteres.";
+    return;
+  }
+  if (passphrase !== confirmation) {
+    backupStatus.textContent = "Las frases de contraseña no coinciden.";
+    return;
+  }
+  if (typeof crypto === "undefined" || !crypto.subtle || typeof crypto.randomUUID !== "function") {
+    backupStatus.textContent = "Este navegador no dispone de las funciones criptográficas necesarias para exportar.";
+    return;
+  }
+  if (passphrase.length > 1024) {
+    backupStatus.textContent = "La frase de contraseña supera el máximo de 1024 caracteres.";
+    return;
+  }
+
+  const backupLabel = backupLabelInput.value;
+  backupButton.disabled = true;
+  backupStatus.textContent = "Preparando y cifrando el respaldo. No cierres esta página.";
+  let blobUrl;
+  try {
+    const backup = await createEncryptedProfileBackup(passphrase);
+    const sizeMiB = (backup.byteLength / (1024 * 1024)).toFixed(2);
+    const confirmed = window.confirm(
+      `El archivo incluirá ${backup.keyCount} claves de este perfil y ${backup.movementCount} movimientos, además de datos sensibles cifrados. ¿Continuar con la descarga?`
+    );
+    if (!confirmed) {
+      backupStatus.textContent = "Exportación cancelada. No se modificaron los datos del perfil.";
+      return;
+    }
+
+    blobUrl = URL.createObjectURL(backup.blob);
+    const downloadLink = document.createElement("a");
+    downloadLink.href = blobUrl;
+    downloadLink.download = makeBackupFilename(backupLabel);
+    downloadLink.hidden = true;
+    document.body.append(downloadLink);
+    downloadLink.click();
+    downloadLink.remove();
+    backupStatus.textContent = `Descarga iniciada: ${backup.keyCount} claves, ${backup.movementCount} movimientos, ${sizeMiB} MiB. Verificá que el archivo se haya guardado.`;
+  } catch (error) {
+    backupStatus.textContent = `No se pudo generar el respaldo: ${error.message}`;
+  } finally {
+    backupPassphraseInput.value = "";
+    backupPassphraseConfirmInput.value = "";
+    backupButton.disabled = false;
+    if (blobUrl) window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+  }
+});
 
 function normalizeRemoteOrigin(value) {
   let url;

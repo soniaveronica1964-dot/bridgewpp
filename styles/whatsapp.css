@@ -258,6 +258,17 @@
   margin-top: 14px;
 }
 
+.contact-flow-panel-transfer-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.contact-flow-panel-transfer-actions button {
+  flex: 1;
+  min-height: 36px;
+}
+
 .contact-flow-panel-add-modal {
   z-index: 1;
 }
@@ -294,6 +305,11 @@
 
 .contact-flow-panel-form-actions button {
   min-width: 0;
+}
+
+.contact-flow-panel-status {
+  margin: 8px 0 0;
+  color: #b8c2c0;
 }
 
 .contact-flow-panel-error {

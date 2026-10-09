@@ -972,16 +972,20 @@
     });
   }
 
-  function saveContactFlowCounters() {
-    const snapshot = {
-      arrived: contactFlowCounters.arrived,
-      derived: { ...contactFlowCounters.derived },
-      countedNumbers: [...contactFlowCounters.countedNumbers],
-      panels: contactFlowCounters.panels.map((panel) => ({
+  function createContactFlowCountersSnapshot(counters) {
+    return {
+      arrived: counters.arrived,
+      derived: { ...counters.derived },
+      countedNumbers: [...counters.countedNumbers],
+      panels: counters.panels.map((panel) => ({
         ...panel,
         countedNumbers: [...panel.countedNumbers]
       }))
     };
+  }
+
+  function saveContactFlowCounters() {
+    const snapshot = createContactFlowCountersSnapshot(contactFlowCounters);
     contactFlowCounterSaveQueue = contactFlowCounterSaveQueue
       .then(() => chrome.storage.local.set({ [CONTACT_FLOW_COUNTERS_KEY]: snapshot }))
       .catch((error) => console.error(
@@ -1154,12 +1158,129 @@
     dialog.setAttribute("aria-labelledby", heading.id);
     const description = document.createElement("p");
     description.className = "contact-flow-panel-description";
-    description.textContent = "";
+    description.textContent = "Importar JSON reemplaza los paneles actuales y conserva los totales de los contadores.";
     const addButton = document.createElement("button");
     addButton.type = "button";
     addButton.className = "contact-flow-panel-add-button";
     addButton.textContent = "Agregar Panel";
     addButton.disabled = destinations.length === 0;
+    const transferActions = document.createElement("div");
+    transferActions.className = "contact-flow-panel-transfer-actions";
+    const exportButton = document.createElement("button");
+    exportButton.type = "button";
+    exportButton.className = "secondary";
+    exportButton.textContent = "Exportar JSON";
+    const importButton = document.createElement("button");
+    importButton.type = "button";
+    importButton.className = "secondary";
+    importButton.textContent = "Importar JSON";
+    const importFileInput = document.createElement("input");
+    importFileInput.type = "file";
+    importFileInput.accept = ".json,application/json";
+    importFileInput.hidden = true;
+    const transferStatus = document.createElement("p");
+    transferStatus.className = "contact-flow-panel-status";
+    transferStatus.setAttribute("role", "status");
+    transferStatus.setAttribute("aria-live", "polite");
+    transferStatus.hidden = true;
+    transferActions.append(exportButton, importButton, importFileInput);
+    exportButton.addEventListener("click", () => {
+      transferStatus.hidden = true;
+      transferStatus.className = "contact-flow-panel-status";
+      try {
+        const panels = contactFlowCounters.panels.map((panel) => {
+          const destination = destinations.find(({ id }) => id === panel.destinationId);
+          if (!destination) {
+            throw new Error(`No se encontró la PC asociada al panel "${panel.title}".`);
+          }
+          return {
+            title: panel.title,
+            keyword: panel.keyword,
+            destination: destination.name
+          };
+        });
+        const content = JSON.stringify({
+          format: "bridgewpp-contact-flow-panels",
+          version: 1,
+          panels
+        }, null, 2);
+        const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+        const download = document.createElement("a");
+        download.href = url;
+        download.download = `bridgewpp-paneles-${new Date().toISOString().slice(0, 10)}.json`;
+        download.hidden = true;
+        document.body.append(download);
+        download.click();
+        download.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        transferStatus.textContent = "Configuración de paneles exportada.";
+        transferStatus.hidden = false;
+      } catch (error) {
+        transferStatus.textContent = `No se pudo exportar la configuración: ${error.message}`;
+        transferStatus.className = "contact-flow-panel-status contact-flow-panel-error";
+        transferStatus.hidden = false;
+      }
+    });
+    importButton.addEventListener("click", () => {
+      transferStatus.hidden = true;
+      importFileInput.value = "";
+      importFileInput.click();
+    });
+    importFileInput.addEventListener("change", async () => {
+      const file = importFileInput.files?.[0];
+      if (!file) return;
+      transferStatus.hidden = true;
+      transferStatus.className = "contact-flow-panel-status";
+      try {
+        const imported = JSON.parse(await file.text());
+        if (!imported || typeof imported !== "object" || Array.isArray(imported) ||
+          imported.format !== "bridgewpp-contact-flow-panels" || imported.version !== 1 ||
+          !Array.isArray(imported.panels)) {
+          throw new Error("El archivo no tiene un formato de paneles compatible.");
+        }
+        const destinationsByName = new Map(destinations.map((destination) => [
+          destination.name.trim().toLocaleLowerCase(),
+          destination
+        ]));
+        const panels = imported.panels.map((panel, index) => {
+          if (!panel || typeof panel !== "object" || Array.isArray(panel) ||
+            typeof panel.title !== "string" || !panel.title.trim() || panel.title.trim().length > 80 ||
+            typeof panel.keyword !== "string" || !panel.keyword.trim() || panel.keyword.trim().length > 120 ||
+            typeof panel.destination !== "string" || !panel.destination.trim()) {
+            throw new Error(`El panel ${index + 1} tiene datos incompletos o inválidos.`);
+          }
+          const destination = destinationsByName.get(panel.destination.trim().toLocaleLowerCase());
+          if (!destination) {
+            throw new Error(`No hay una PC configurada con el nombre "${panel.destination}".`);
+          }
+          return {
+            id: crypto.randomUUID(),
+            title: panel.title.trim(),
+            keyword: panel.keyword.trim(),
+            destinationId: destination.id,
+            count: 0,
+            countedNumbers: []
+          };
+        });
+        const importedCounters = {
+          ...contactFlowCounters,
+          panels
+        };
+        await contactFlowCounterSaveQueue;
+        await chrome.storage.local.set({
+          [CONTACT_FLOW_COUNTERS_KEY]: createContactFlowCountersSnapshot(importedCounters)
+        });
+        contactFlowCounters = normalizeContactFlowCounters(importedCounters);
+        for (const updateRow of contactFlowCounterRows.values()) updateRow();
+        contactFlowPanelConfigRefresh?.();
+        transferStatus.textContent = `Se importaron ${panels.length} paneles. Los paneles actuales fueron reemplazados.`;
+        transferStatus.hidden = false;
+      } catch (error) {
+        transferStatus.textContent = `No se pudo importar la configuración: ${error.message}`;
+        transferStatus.className = "contact-flow-panel-status contact-flow-panel-error";
+        transferStatus.hidden = false;
+      }
+    });
     const listHeading = document.createElement("h3");
     listHeading.className = "contact-flow-panel-list-heading";
     listHeading.textContent = "Paneles configurados";
@@ -1393,7 +1514,16 @@
       renderPanelList();
       closeAddDialog();
     });
-    dialog.append(heading, description, addButton, listHeading, panelList, closeButton);
+    dialog.append(
+      heading,
+      description,
+      addButton,
+      transferActions,
+      transferStatus,
+      listHeading,
+      panelList,
+      closeButton
+    );
     modal.append(dialog);
     modal.append(addModal);
     shadow.append(stylesheet, modal);
