@@ -88,7 +88,8 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
     { version: 2, name: "runtime_state" },
     { version: 3, name: "device_proof" },
     { version: 4, name: "profile_remote_destinations" },
-    { version: 5, name: "contact_flow_counted_at" }
+    { version: 5, name: "contact_flow_counted_at" },
+    { version: 6, name: "profile_active_bonus" }
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE agent_movements/);
   assert.match(migrations[0].sql, /value_ciphertext BYTEA NOT NULL/);
@@ -98,6 +99,9 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
   assert.match(migrations[3].sql, /PRIMARY KEY \(workspace_id, profile_id, destination_id\)/);
   assert.match(migrations[4].sql, /contact_flow_counted_numbers/);
   assert.match(migrations[4].sql, /counted_at_ms BIGINT NOT NULL/);
+  assert.match(migrations[5].sql, /storage_key = 'activeBonusConfig'/);
+  assert.match(migrations[5].sql, /setting_key = 'bridgeRole'/);
+  assert.match(migrations[5].sql, /scope_type = 'profile'/);
 });
 
 test("validates timestamped contact-flow numbers and keeps legacy number strings usable", () => {

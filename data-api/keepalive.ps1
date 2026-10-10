@@ -14,7 +14,7 @@ function Get-HealthResponse($healthUri) {
     $health = Invoke-RestMethod -Uri $healthUri -Method Get -TimeoutSec 5
     return @{
       Responded = $true
-      Healthy = $health.status -eq 'healthy' -and $health.schemaVersion -eq 5
+      Healthy = $health.status -eq 'healthy' -and $health.schemaVersion -eq 6
       Detail = "HTTP 200, schema $($health.schemaVersion)"
     }
   } catch {
@@ -116,4 +116,4 @@ if (-not $probe.Healthy -or -not $listener) {
   throw "Recovery was requested for '$taskName', but API health was not confirmed within 30 seconds. $($probe.Detail)"
 }
 
-Write-KeepaliveLog "RECOVERY_REQUESTED '$taskName'; API healthy on schema 5 (PID $($listener.OwningProcess))."
+Write-KeepaliveLog "RECOVERY_REQUESTED '$taskName'; API healthy on schema 6 (PID $($listener.OwningProcess))."

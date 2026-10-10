@@ -6,7 +6,7 @@ const { isDeepStrictEqual } = require("node:util");
 const { canonicalJson, decryptValue, encryptValue, sha256Hex, validatePayload } = require("./archive");
 
 const API_VERSION = 1;
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_STATE_REQUEST_BYTES = 24 * 1024 * 1024 + 64 * 1024;
@@ -220,7 +220,7 @@ async function buildConflictPreview(pool, identity, payload, encryptionKey) {
   const movementEntries = payload.entries.filter(({ key }) => key.startsWith("agentMovement:"));
   const legacyEntries = payload.entries.filter(({ key }) =>
     !PROFILE_SETTING_KEYS.has(key) && !PROFILE_SECRET_KEYS.has(key) &&
-    !WORKSPACE_SETTING_KEYS.has(key) && !SHARED_KEYS.has(key) &&
+    !SHARED_KEYS.has(key) &&
     !key.startsWith("agentMovement:")
   );
   const [settings, secrets, movements, legacy, shared] = await Promise.all([
@@ -314,6 +314,7 @@ const PROFILE_SETTING_KEYS = new Set([
   "ganamosUserId",
   "ganamosSuffix",
   "multiPanelSuffix",
+  "activeBonusConfig",
   "agentBalanceView",
   "agentBalancesMinimized"
 ]);
@@ -323,14 +324,9 @@ const PROFILE_SECRET_KEYS = new Set([
   "multiPanelSession",
   "remoteCreateDestinations"
 ]);
-const WORKSPACE_SETTING_KEYS = new Set(["activeBonusConfig"]);
-const SHARED_KEYS = new Set([
-  "contactFlowCounters",
-  "activeBonusConfig"
-]);
+const SHARED_KEYS = new Set(["contactFlowCounters"]);
 const PUBLIC_STATE_KEYS = new Set([
   ...PROFILE_SETTING_KEYS,
-  ...WORKSPACE_SETTING_KEYS,
   "contactFlowCounters",
   "agentBalanceView",
   "agentBalancesMinimized"
@@ -352,6 +348,9 @@ function isStateSecret(key, value) {
 }
 
 async function readExtensionState(pool, config, identity, keys) {
+  const workspaceKeys = keys === null
+    ? [...SHARED_KEYS]
+    : keys.filter((key) => SHARED_KEYS.has(key));
   const [profileValues, workspaceValues, movements] = await Promise.all([
     pool.query(`
       SELECT storage_key, value_json, value_ciphertext
@@ -359,12 +358,14 @@ async function readExtensionState(pool, config, identity, keys) {
       WHERE scope_type = 'profile' AND scope_id = $1
         AND ($2::text[] IS NULL OR storage_key = ANY($2::text[]))
     `, [identity.profile_id, keys]),
-    pool.query(`
-      SELECT storage_key, value_json, value_ciphertext
-      FROM extension_state_values
-      WHERE scope_type = 'workspace' AND scope_id = $1
-        AND ($2::text[] IS NULL OR storage_key = ANY($2::text[]))
-    `, [identity.workspace_id, keys]),
+    workspaceKeys.length
+      ? pool.query(`
+          SELECT storage_key, value_json, value_ciphertext
+          FROM extension_state_values
+          WHERE scope_type = 'workspace' AND scope_id = $1
+            AND storage_key = ANY($2::text[])
+        `, [identity.workspace_id, workspaceKeys])
+      : { rows: [] },
     keys === null || keys.some((key) => key.startsWith("agentMovement:"))
       ? pool.query(`
           SELECT legacy_storage_key, legacy_record_json
@@ -383,8 +384,8 @@ async function readExtensionState(pool, config, identity, keys) {
   }
   for (const row of movements.rows) values[row.legacy_storage_key] = row.legacy_record_json;
   if (keys === null || keys.some((key) => !PROFILE_SETTING_KEYS.has(key) &&
-    !PROFILE_SECRET_KEYS.has(key) && !WORKSPACE_SETTING_KEYS.has(key) &&
-    !SHARED_KEYS.has(key) && !key.startsWith("agentMovement:"))) {
+    !PROFILE_SECRET_KEYS.has(key) && !SHARED_KEYS.has(key) &&
+    !key.startsWith("agentMovement:"))) {
     const legacy = await pool.query(`
       SELECT storage_key, value_ciphertext FROM legacy_extension_values
       WHERE profile_id = $1
@@ -549,16 +550,6 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
         if (key === "remoteCreateDestinations") {
           await replaceRemoteDestinations(client, config, identity, value, timestamp);
         }
-      } else if (WORKSPACE_SETTING_KEYS.has(key)) {
-        await client.query(`
-          INSERT INTO workspace_settings (
-            workspace_id, setting_key, value_json, updated_at_ms, updated_by_profile_id
-          ) VALUES ($1, $2, $3::jsonb, $4, $5)
-          ON CONFLICT (workspace_id, setting_key) DO UPDATE SET
-            value_json = EXCLUDED.value_json, revision = workspace_settings.revision + 1,
-            updated_at_ms = EXCLUDED.updated_at_ms,
-            updated_by_profile_id = EXCLUDED.updated_by_profile_id
-        `, [identity.workspace_id, key, valueJson, timestamp, identity.profile_id]);
       } else if (key.startsWith("agentMovement:")) {
         const movement = value && typeof value === "object" && !Array.isArray(value) ? value : {};
         await client.query(`
@@ -692,11 +683,6 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
             [identity.workspace_id, identity.profile_id]
           );
         }
-      } else if (WORKSPACE_SETTING_KEYS.has(key)) {
-        await client.query(
-          "DELETE FROM workspace_settings WHERE workspace_id = $1 AND setting_key = $2",
-          [identity.workspace_id, key]
-        );
       } else if (key === "contactFlowCounters") {
         await client.query("DELETE FROM contact_flow_state WHERE workspace_id = $1", [identity.workspace_id]);
         await client.query(`
@@ -1186,51 +1172,43 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
         movementCount++;
       } else if (SHARED_KEYS.has(key)) {
         if (decision !== "initialize_shared") continue;
-        if (key === "activeBonusConfig") {
+        const counters = validateCounterSnapshot(value);
+        await client.query(`
+          INSERT INTO contact_flow_state (
+            workspace_id, arrived, legacy_unknown_json, updated_at_ms
+          ) VALUES ($1, $2, $3::jsonb, $4)
+        `, [identity.workspace_id, counters.arrived, jsonValue(counters.legacyUnknown), now]);
+        for (const [destinationId, count] of counters.derived) {
           await client.query(`
-            INSERT INTO workspace_settings (
-              workspace_id, setting_key, value_json, updated_at_ms, updated_by_profile_id
-            ) VALUES ($1, $2, $3::jsonb, $4, $5)
-          `, [identity.workspace_id, key, jsonValue(value), now, identity.profile_id]);
-        } else {
-          const counters = validateCounterSnapshot(value);
-          await client.query(`
-            INSERT INTO contact_flow_state (
-              workspace_id, arrived, legacy_unknown_json, updated_at_ms
-            ) VALUES ($1, $2, $3::jsonb, $4)
-          `, [identity.workspace_id, counters.arrived, jsonValue(counters.legacyUnknown), now]);
-          for (const [destinationId, count] of counters.derived) {
-            await client.query(`
-              INSERT INTO contact_flow_derived (workspace_id, destination_id, count)
-              VALUES ($1, $2, $3)
-            `, [identity.workspace_id, destinationId, count]);
-          }
-          for (const { number, countedAt } of counters.countedNumbers) {
-            await client.query(`
-              INSERT INTO contact_flow_counted_numbers (workspace_id, phone, counted_at_ms)
-              VALUES ($1, $2, $3)
-            `, [identity.workspace_id, number, countedAt]);
-          }
-          for (const panel of counters.panels) {
-            await client.query(`
-              INSERT INTO contact_flow_panels (
-                workspace_id, panel_id, ordinal, title, keyword, destination_id,
-                count, legacy_json
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-            `, [
-              identity.workspace_id, panel.id, panel.ordinal, panel.title,
-              panel.keyword, panel.destinationId, panel.count, jsonValue(panel.legacy)
-            ]);
-            for (const { number, countedAt } of panel.countedNumbers) {
-              await client.query(`
-                INSERT INTO contact_flow_panel_counted_numbers (
-                  workspace_id, panel_id, phone, counted_at_ms
-                ) VALUES ($1, $2, $3, $4)
-              `, [identity.workspace_id, panel.id, number, countedAt]);
-            }
-          }
-          await storeSecret("workspace", identity.workspace_id, "contactFlowCountersSource", value);
+            INSERT INTO contact_flow_derived (workspace_id, destination_id, count)
+            VALUES ($1, $2, $3)
+          `, [identity.workspace_id, destinationId, count]);
         }
+        for (const { number, countedAt } of counters.countedNumbers) {
+          await client.query(`
+            INSERT INTO contact_flow_counted_numbers (workspace_id, phone, counted_at_ms)
+            VALUES ($1, $2, $3)
+          `, [identity.workspace_id, number, countedAt]);
+        }
+        for (const panel of counters.panels) {
+          await client.query(`
+            INSERT INTO contact_flow_panels (
+              workspace_id, panel_id, ordinal, title, keyword, destination_id,
+              count, legacy_json
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+          `, [
+            identity.workspace_id, panel.id, panel.ordinal, panel.title,
+            panel.keyword, panel.destinationId, panel.count, jsonValue(panel.legacy)
+          ]);
+          for (const { number, countedAt } of panel.countedNumbers) {
+            await client.query(`
+              INSERT INTO contact_flow_panel_counted_numbers (
+                workspace_id, panel_id, phone, counted_at_ms
+              ) VALUES ($1, $2, $3, $4)
+            `, [identity.workspace_id, panel.id, number, countedAt]);
+          }
+        }
+        await storeSecret("workspace", identity.workspace_id, "contactFlowCountersSource", value);
       } else if (!key.startsWith("agentMovement:")) {
         const encrypted = encryptValue(canonicalJson(value), config.encryptionKey);
         const hash = sha256Hex(Buffer.from(canonicalJson(value), "utf8"));

@@ -182,17 +182,9 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       server.listen(port, "127.0.0.1", resolve);
     });
 
-    await pool.query("DELETE FROM schema_migrations WHERE version = 5");
     const outdatedHealth = await request(port, "GET", "/health", undefined, null, extensionId);
     assert.equal(outdatedHealth.status, 503);
     assert.equal(outdatedHealth.body.code, "schema_not_ready");
-    await pool.query(`
-      INSERT INTO schema_migrations (version, name, applied_at_ms)
-      VALUES (5, 'contact_flow_counted_at', $1)
-    `, [Date.now()]);
-    const health = await request(port, "GET", "/health", undefined, null, extensionId);
-    assert.equal(health.status, 200);
-    assert.equal(health.body.schemaVersion, 5);
     const serverInfo = await request(port, "GET", "/v1/server-info", undefined, null, extensionId);
     assert.equal(serverInfo.status, 200);
     assert.equal(serverInfo.body.workspaceId, initialized.workspaceId);
@@ -245,7 +237,29 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       main.identity.profileId,
       oldStateTimestamp
     ]);
+    await pool.query(`
+      INSERT INTO workspace_settings (
+        workspace_id, setting_key, value_json, updated_at_ms, updated_by_profile_id
+      ) VALUES ($1, 'activeBonusConfig', '{"type":"none","enabled":false}'::jsonb, $2, $3)
+    `, [initialized.workspaceId, oldStateTimestamp, main.identity.profileId]);
+    await pool.query(`
+      INSERT INTO app_settings (profile_id, setting_key, value_json, updated_at_ms)
+      VALUES ($1, 'bridgeRole', '"primary"'::jsonb, $2)
+    `, [main.identity.profileId, oldStateTimestamp]);
     await migrate(pool, migrations);
+    const health = await request(port, "GET", "/health", undefined, null, extensionId);
+    assert.equal(health.status, 200);
+    assert.equal(health.body.schemaVersion, 6);
+    const migratedBonus = await pool.query(`
+      SELECT value_json FROM app_settings
+      WHERE profile_id = $1 AND setting_key = 'activeBonusConfig'
+    `, [main.identity.profileId]);
+    assert.deepEqual(migratedBonus.rows[0].value_json, { type: "none", enabled: false });
+    const remainingWorkspaceBonus = await pool.query(`
+      SELECT count(*)::int AS count FROM workspace_settings
+      WHERE workspace_id = $1 AND setting_key = 'activeBonusConfig'
+    `, [initialized.workspaceId]);
+    assert.equal(remainingWorkspaceBonus.rows[0].count, 0);
     const migratedLegacyDestinations = await request(
       port,
       "GET",
@@ -455,8 +469,9 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(invalidMovementQuery.status, 400);
     assert.equal(invalidMovementQuery.body.code, "invalid_movement_query");
     const bonus = await pool.query(`
-      SELECT value_json FROM workspace_settings WHERE setting_key = 'activeBonusConfig'
-    `);
+      SELECT value_json FROM app_settings
+      WHERE profile_id = $1 AND setting_key = 'activeBonusConfig'
+    `, [main.identity.profileId]);
     assert.deepEqual(bonus.rows[0].value_json, { type: "none", enabled: false });
     const destination = await pool.query(`
       SELECT legacy_json, token_ciphertext FROM remote_destinations
@@ -684,8 +699,9 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     `);
     assert.equal(updatedCounters.rows[0].arrived, "8");
     const updatedBonus = await pool.query(`
-      SELECT value_json FROM workspace_settings WHERE setting_key = 'activeBonusConfig'
-    `);
+      SELECT value_json FROM app_settings
+      WHERE profile_id = $1 AND setting_key = 'activeBonusConfig'
+    `, [main.identity.profileId]);
     assert.deepEqual(updatedBonus.rows[0].value_json, { type: "simple", enabled: true, percent: 10 });
     const stateRemoval = await request(port, "POST", "/v1/state", {
       changes: {},
@@ -703,6 +719,31 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       pool, initialized.workspaceId, "Secondary Device", false
     );
     const secondary = await enroll(port, extensionId, secondaryCode, "Secondary Device");
+    const secondaryBonus = await request(
+      port,
+      "GET",
+      `/v1/state?keys=${encodeURIComponent(JSON.stringify(["activeBonusConfig"]))}`,
+      undefined,
+      secondary.credential,
+      extensionId
+    );
+    assert.equal(secondaryBonus.status, 200);
+    assert.equal(Object.hasOwn(secondaryBonus.body.values, "activeBonusConfig"), false);
+    const secondaryBonusWrite = await request(port, "POST", "/v1/state", {
+      changes: { activeBonusConfig: { type: "simple", enabled: true, percent: 25 } },
+      removes: []
+    }, secondary.credential, extensionId);
+    assert.equal(secondaryBonusWrite.status, 200, JSON.stringify(secondaryBonusWrite.body));
+    const mainBonusAfterSecondaryWrite = await request(
+      port,
+      "GET",
+      `/v1/state?keys=${encodeURIComponent(JSON.stringify(["activeBonusConfig"]))}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(mainBonusAfterSecondaryWrite.status, 200);
+    assert.equal(mainBonusAfterSecondaryWrite.body.values.activeBonusConfig.percent, 10);
     const secondaryDestinations = await request(
       port,
       "GET",

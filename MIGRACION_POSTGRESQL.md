@@ -68,8 +68,8 @@ Se considerará completa únicamente cuando:
   Permanece en el almacenamiento local de Chrome, pero no contiene estado de la
   aplicación y no forma parte del respaldo/exportación del perfil.
 - El estado transitorio de long polling que el bridge mantiene en memoria no se
-  migra. La configuración funcional `activeBonusConfig`, en cambio, pasa a ser
-  compartida/persistente en PostgreSQL conforme a la tabla de ámbitos.
+  migra. `activeBonusConfig` se persiste por perfil principal; el bridge local
+  sincroniza el valor solo con los secundarios emparejados a ese principal.
 - Balances, resultados de búsqueda, formularios, notificaciones y otros estados
   temporales que hoy solo viven en memoria no deben empezar a persistirse por
   accidente.
@@ -90,7 +90,7 @@ El inventario se deriva de los accesos actuales a `chrome.storage.local` en
 | `userCreationPassword` | Texto. | Contraseña automática para creación/restauración de usuarios. Es secreto. |
 | `remoteCreateDestinations` | Arreglo de hasta tres destinos. | Configuración privada del perfil Chrome; cada elemento puede contener `id`, `name`, `url`, `token`, `ganamosSuffix` y `multiPanelSuffix`. Incluye datos de red y secretos. |
 | `multiPanelSession` | Texto de sesión. | Caché de la sesión que obtiene el service worker desde la pestaña MultiPanel y que puede renovarse al consultar reportes. Es secreto. |
-| `activeBonusConfig` | Objeto o ausencia de clave. | Tipo, estado, porcentajes, plataforma, umbrales y, en el modo misterioso, resultados/pesos. Puede recibirse desde el perfil principal. |
+| `activeBonusConfig` | Objeto o ausencia de clave. | Tipo, estado, porcentajes, plataforma, umbrales y, en el modo misterioso, resultados/pesos. Se guarda por perfil y los secundarios lo reciben de su principal local. |
 | `contactFlowCounters` | Objeto compuesto. | Contadores, paneles, palabras clave, PCs destino y listas de números ya contabilizados. |
 | `agentBalanceView` | Texto de una vista. | Última vista del panel de balances/movimientos. |
 | `agentBalancesMinimized` | Booleano. | Compatibilidad adicional para la vista minimizada; se escribe junto con `agentBalanceView`. |
@@ -673,7 +673,7 @@ completa antes de continuar.
 
 Las opciones complejas pueden exponerse como objetos al cliente, pero sus
 escrituras deben sustituir el valor completo de forma atómica y versionada.
-`activeBonusConfig` se guarda como ajuste del workspace. Los destinos remotos se
+`activeBonusConfig` se guarda como ajuste del perfil. Los destinos remotos se
 guardan por perfil en `extension_state_values` cifrado y se normalizan en
 `remote_destinations` con `workspace_id` y `profile_id`; no mantener una copia
 editable adicional del arreglo en `workspace_settings`.
@@ -710,10 +710,9 @@ solo devuelve la configuración descifrada al perfil propietario, por la lectura
 autenticada de su estado.
 
 Los ajustes privados quedan en `app_settings`, incluidos `bridgeRole`,
-`ganamosUserId`, los sufijos, `agentBalanceView` y `agentBalancesMinimized`.
-`activeBonusConfig` reside en la configuración del workspace compartido. El
-valor de cada clave se guarda en JSON para distinguir correctamente texto,
-booleano, ausencia y otros tipos heredados.
+`ganamosUserId`, los sufijos, `activeBonusConfig`, `agentBalanceView` y
+`agentBalancesMinimized`. El valor de cada clave se guarda en JSON para
+distinguir correctamente texto, booleano, ausencia y otros tipos heredados.
 
 ### Destinos remotos
 
@@ -1081,22 +1080,23 @@ equivalentes a las actuales. No basta con que “los datos estén en tablas”.
 
 ### Bono activo y sincronización entre perfiles
 
-- `activeBonusConfig` pasa a tener una única versión canónica por workspace en
-  PostgreSQL, conservando la revisión y long polling/eventos existentes. Esto
-  amplía intencionalmente la sincronización desde perfiles de una PC a todos los
-  perfiles enrolados del workspace.
+- `activeBonusConfig` se guarda por perfil principal en PostgreSQL. El bridge
+  local de cada PC lo distribuye únicamente a los secundarios emparejados con
+  ese principal; compartir un workspace en la API no mezcla los bonos de PCs
+  distintas.
+- La migración de esquema copia el bono compartido previo a cada perfil
+  principal existente y elimina la copia de workspace. Como el esquema anterior
+  tenía un único valor por workspace, no es posible reconstruir valores
+  diferentes que hubieran usado distintos principales.
 - Se conservan los tipos y validaciones existentes: `none`, `simple`, `double`,
   `specific`, `special` y `mysterious`.
 - `null`/ausencia y una configuración de tipo `none` siguen representando los
   estados actuales; no equipararlos si el flujo actual los distingue.
 - Al guardar una configuración se confirma PostgreSQL antes de actualizar el botón
   y cerrar el diálogo.
-- Todos los perfiles del workspace actualizan el indicador tras recibir un
-  cambio confirmado. Cambios desde cualquier perfil autorizado se persisten en
-  el mismo namespace compartido y no se republican en bucle.
-- Las revisiones y la notificación de cambios se mantienen en el servicio
-  central; PostgreSQL es la fuente persistente y el servicio publica solo
-  después del commit.
+- Los secundarios actualizan el indicador tras recibir un cambio confirmado de
+  su principal por el bridge local. Las actualizaciones recibidas se guardan en
+  el perfil del secundario y no se republican como cambios del principal.
 
 ### Contadores de llegados y derivados
 
