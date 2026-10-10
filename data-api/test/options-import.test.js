@@ -241,9 +241,9 @@ test("options UI stages, previews, confirms, and resumes an import without expos
     let status = 200;
     let responseBody;
     if (parsed.pathname === "/health") {
-      responseBody = { status: "healthy", apiVersion: 1, schemaVersion: 4 };
+      responseBody = { status: "healthy", apiVersion: 1, schemaVersion: 5 };
     } else if (parsed.pathname === "/v1/server-info") {
-      responseBody = { serverId, workspaceId, tls: true, apiVersion: 1, schemaVersion: 4 };
+      responseBody = { serverId, workspaceId, tls: true, apiVersion: 1, schemaVersion: 5 };
     } else if (parsed.pathname === "/v1/enroll") {
       responseBody = {
         credential: token,

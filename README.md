@@ -31,6 +31,8 @@ El botón de regalo de la barra lateral permite configurar un bono automático p
 7. Después de cargar o recargar la extensión en `chrome://extensions`, recargá también la pestaña `https://bo.casinoenvivo.club/` con la sesión iniciada. La extensión sincroniza la sesión desde `Local Storage → lux-support-user`; si la API rechaza una sesión guardada, intenta leer la actual de esa pestaña y repite la consulta una vez.
 8. Abrí o recargá `https://web.whatsapp.com/` e iniciá sesión en WhatsApp y Ganamos. Las consultas de saldo se hacen desde el service worker.
 
+Para preparar una PC nueva de Publi que use PostgreSQL en la LAN y solicite altas a equipos remotos, seguí la [guía de puesta en marcha](./GUIA_NUEVA_PC_PUBLI.md).
+
 ## Compartir el perfil principal con otros perfiles de Chrome
 
 El puente local permite que un perfil principal, con Ganamos y MultiPanel abiertos, atienda las solicitudes de perfiles secundarios que solo usan WhatsApp. El puente transmite las solicitudes dentro de esta computadora; no recibe ni guarda sesiones de las plataformas. Se necesita Node.js 18 o posterior.

@@ -834,31 +834,31 @@
   font: inherit;
 }
 
-.active-bonus-dialog .amount-shortcuts {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+.active-bonus-dialog .amount-shortcuts--amount {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 4px;
 }
 
-.active-bonus-dialog .amount-shortcuts button {
-  min-height: 30px;
+.active-bonus-dialog .amount-shortcuts--amount button {
+  min-height: 26px;
   border-color: var(--bonus-border);
   color: var(--bonus-accent);
   background: #202d2d;
-  font-size: 14px;
+  font-size: 12px;
 }
 
-.active-bonus-dialog .amount-shortcuts button:hover:not(:disabled) {
+.active-bonus-dialog .amount-shortcuts--amount button:hover:not(:disabled) {
   border-color: var(--bonus-accent);
   background: var(--bonus-surface);
 }
 
-.active-bonus-dialog .amount-shortcuts button[aria-pressed="true"] {
+.active-bonus-dialog .amount-shortcuts--amount button[aria-pressed="true"] {
   border-color: var(--bonus-accent);
   color: #ffffff;
   background: var(--bonus-button);
 }
 
-.active-bonus-dialog .amount-shortcuts button[aria-pressed="true"]:hover:not(:disabled) {
+.active-bonus-dialog .amount-shortcuts--amount button[aria-pressed="true"]:hover:not(:disabled) {
   background: var(--bonus-button-hover);
 }
 
@@ -1458,6 +1458,19 @@
   margin-top: 7px;
 }
 
+.amount-shortcuts--with-active-bonus {
+  grid-template-columns: repeat(5, minmax(0, 1fr)) 1px minmax(0, 1fr);
+  gap: 7px;
+}
+
+.amount-shortcuts__separator {
+  background: #53615f;
+}
+
+.amount-shortcuts--amount {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
 .amount-shortcuts button {
   display: flex;
   align-items: center;
@@ -1471,6 +1484,11 @@
   font-size: 13px;
   line-height: 1;
   white-space: nowrap;
+}
+
+.amount-shortcuts--amount button {
+  min-height: 25px;
+  font-size: 12px;
 }
 
 .amount-shortcuts button:hover:not(:disabled) {
@@ -2194,6 +2212,25 @@ input {
 .dialog[data-operation="create-user"] .platform-selector button:not([aria-pressed="true"]),
 .dialog[data-operation="password-reset"] .platform-selector button:not([aria-pressed="true"]) {
   border-color: var(--create-border-soft);
+}
+
+.dialog[data-operation="password-reset"] .password-reset-user-selector {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dialog[data-operation="password-reset"] .password-reset-user-selector button {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.dialog[data-operation="password-reset"] .password-reset-user-selector button[data-platform="ganamos"] {
+  border-color: #7650a8;
+}
+
+.dialog[data-operation="password-reset"] .password-reset-user-selector button[data-platform="multipanel"] {
+  border-color: #3979b8;
 }
 
 input::placeholder {

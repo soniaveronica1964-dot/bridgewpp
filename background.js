@@ -1567,6 +1567,17 @@ async function sendRemoteCreateUserRequest(data) {
   });
 }
 
+async function sendRemotePasswordResetRequest(data) {
+  if (!["ganamos", "multipanel"].includes(data?.platform) ||
+    typeof data?.nombre !== "string") {
+    throw new Error("El usuario o la plataforma no son válidos para restaurar la contraseña.");
+  }
+  return sendRemoteOperation(data.destinationId, {
+    type: "PASSWORD_RESET_REQUEST",
+    data: { platform: data.platform, nombre: data.nombre }
+  });
+}
+
 async function getRemoteAgentBalance(data) {
   if (!["ganamos", "multipanel"].includes(data?.platform)) {
     throw new Error("Plataforma no válida para consultar el balance remoto.");
@@ -1835,6 +1846,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendRemoteCreateUserRequest(message.data)
       .then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo crear el usuario en la PC destino." }));
+    return true;
+  }
+
+  if (message?.type === "PASSWORD_RESET_REQUEST" &&
+    Object.hasOwn(message.data || {}, "destinationId")) {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud no válida o enviada desde una página no autorizada." });
+      return;
+    }
+    sendRemotePasswordResetRequest(message.data)
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo restaurar la contraseña en la PC destino." }));
     return true;
   }
 

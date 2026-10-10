@@ -11,8 +11,9 @@ $account = $identity.Name
 $supportDirectory = Join-Path $env:LOCALAPPDATA 'BridgeWppDataApi'
 $configPath = Join-Path $supportDirectory 'api-config.json'
 $launcherPath = Join-Path $supportDirectory 'Start-BridgeWppDataApi.ps1'
+$launcherSourcePath = Join-Path $PSScriptRoot 'Start-BridgeWppDataApi.ps1'
 $keepalivePath = Join-Path $PSScriptRoot 'keepalive.ps1'
-foreach ($requiredPath in @($configPath, $launcherPath, $keepalivePath)) {
+foreach ($requiredPath in @($configPath, $launcherSourcePath, $keepalivePath)) {
   if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
     throw "No se encontró el archivo requerido: $requiredPath"
   }
@@ -25,9 +26,11 @@ if (-not $config.ApiHost -or -not $config.ApiPort -or
 }
 $healthUri = "https://$($config.ApiHost):$($config.ApiPort)/health"
 $health = Invoke-RestMethod -Uri $healthUri -Method Get -TimeoutSec 8
-if ($health.status -ne 'healthy' -or $health.schemaVersion -ne 4) {
-  throw 'La API existente no está saludable con el esquema 4. No se reemplazaron las tareas.'
+if ($health.status -ne 'healthy' -or $health.schemaVersion -ne 5) {
+  throw 'La API existente no está saludable con el esquema 5. No se reemplazaron las tareas.'
 }
+
+Copy-Item -LiteralPath $launcherSourcePath -Destination $launcherPath -Force
 
 $powerShellPath = Join-Path $PSHOME 'powershell.exe'
 $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType S4U -RunLevel Limited
@@ -87,11 +90,11 @@ do {
   } catch {
     $health = $null
   }
-} while (($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 4) -and
+} while (($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 5) -and
   (Get-Date) -lt $deadline)
 
-if ($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 4) {
-  throw 'Las tareas se instalaron, pero la API no confirmó salud con el esquema 4.'
+if ($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 5) {
+  throw 'Las tareas se instalaron, pero la API no confirmó salud con el esquema 5.'
 }
 
 Write-Output 'Tareas instaladas: BridgeWpp Data API (inicio del sistema/logon) y BridgeWpp Data API Keepalive (comprobación cada minuto).'

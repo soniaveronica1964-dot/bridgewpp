@@ -423,6 +423,11 @@ function validateRemoteMessage(message) {
       typeof message.data?.username === "string" &&
       /^[a-z0-9]{2,64}$/i.test(message.data.username);
   }
+  if (message?.type === "PASSWORD_RESET_REQUEST") {
+    return ["ganamos", "multipanel"].includes(message.data?.platform) &&
+      typeof message.data?.nombre === "string" &&
+      /^[^\u0000-\u001f\u007f/]{2,128}$/.test(message.data.nombre);
+  }
   if (message?.type === "USER_SEARCH_REQUEST") {
     return /^\d{4}$/.test(message.data?.digits || "");
   }
@@ -510,21 +515,32 @@ async function handleRemoteCreateRequest(request, response) {
     return;
   }
 
-  const task = { id: body.id, expiresAt: Date.now() + REQUEST_TIMEOUT_MS, message: body.message.type === "CREATE_USER_REQUEST"
-    ? {
-        type: "CREATE_USER_REQUEST",
-        data: {
-          platform: body.message.data.platform,
-          username: body.message.data.username
-        }
+  let message;
+  if (body.message.type === "CREATE_USER_REQUEST") {
+    message = {
+      type: "CREATE_USER_REQUEST",
+      data: {
+        platform: body.message.data.platform,
+        username: body.message.data.username
       }
-    : body.message.type === "USER_SEARCH_REQUEST"
-      ? {
-          type: "USER_SEARCH_REQUEST",
-          data: { digits: body.message.data.digits }
-        }
-    : { type: body.message.type }
-  };
+    };
+  } else if (body.message.type === "PASSWORD_RESET_REQUEST") {
+    message = {
+      type: "PASSWORD_RESET_REQUEST",
+      data: {
+        platform: body.message.data.platform,
+        nombre: body.message.data.nombre
+      }
+    };
+  } else if (body.message.type === "USER_SEARCH_REQUEST") {
+    message = {
+      type: "USER_SEARCH_REQUEST",
+      data: { digits: body.message.data.digits }
+    };
+  } else {
+    message = { type: body.message.type };
+  }
+  const task = { id: body.id, expiresAt: Date.now() + REQUEST_TIMEOUT_MS, message };
   const result = await new Promise((resolve) => {
     const timeout = setTimeout(() => {
       pendingRequests.delete(body.id);

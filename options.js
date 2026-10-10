@@ -694,11 +694,11 @@ importForm.addEventListener("submit", async (event) => {
     }
     importStatusElement.textContent = "Comprobando identidad del servidor PostgreSQL...";
     const health = await requestDataApi(origin, "/health");
-    if (health?.status !== "healthy" || health.apiVersion !== 1 || health.schemaVersion !== 4) {
+    if (health?.status !== "healthy" || health.apiVersion !== 1 || health.schemaVersion !== 5) {
       throw new Error("La API no confirmó una versión compatible y el esquema de estado PostgreSQL.");
     }
     const serverInfo = await requestDataApi(origin, "/v1/server-info");
-    if (serverInfo?.tls !== true || serverInfo.apiVersion !== 1 || serverInfo.schemaVersion !== 4 ||
+    if (serverInfo?.tls !== true || serverInfo.apiVersion !== 1 || serverInfo.schemaVersion !== 5 ||
       !/^[0-9a-f-]{36}$/i.test(serverInfo.serverId || "") ||
       !/^[0-9a-f-]{36}$/i.test(serverInfo.workspaceId || "")) {
       throw new Error("La identidad, versión o canal seguro de la API no coincide con lo esperado.");

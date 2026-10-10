@@ -6,7 +6,8 @@ const { isDeepStrictEqual } = require("node:util");
 const { canonicalJson, decryptValue, encryptValue, sha256Hex, validatePayload } = require("./archive");
 
 const API_VERSION = 1;
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
+const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_STATE_REQUEST_BYTES = 24 * 1024 * 1024 + 64 * 1024;
 const MAX_STAGING_REQUEST_BYTES = 24 * 1024 * 1024 + 64 * 1024;
@@ -20,6 +21,26 @@ class ApiError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+function createDeviceAssertionNonceCleanup(pool) {
+  let lastCleanupAt = 0;
+  let cleanupPromise = null;
+  return async function cleanupExpiredNonces() {
+    const now = Date.now();
+    if (now - lastCleanupAt < 60_000) return;
+    if (!cleanupPromise) {
+      cleanupPromise = pool.query(
+        "DELETE FROM device_assertion_nonces WHERE expires_at_ms < $1",
+        [now]
+      ).then(() => {
+        lastCleanupAt = Date.now();
+      }).finally(() => {
+        cleanupPromise = null;
+      });
+    }
+    await cleanupPromise;
+  };
 }
 
 function requiredEnvironment(name) {
@@ -467,7 +488,31 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
     const revision = Number(currentRevision.rows[0]?.revision || 0);
     if (sharedWrite && expectedRevision !== undefined &&
       (!Number.isSafeInteger(expectedRevision) || expectedRevision !== revision)) {
-      throw new ApiError(409, "state_revision_conflict", "El estado compartido cambió; recargá y revisá antes de volver a guardar.");
+      const isStaleCounterSnapshot = Number.isSafeInteger(expectedRevision) &&
+        expectedRevision >= 0 && expectedRevision < revision &&
+        keys.length === 1 && keys[0] === "contactFlowCounters" && removes.length === 0;
+      if (!isStaleCounterSnapshot) {
+        throw new ApiError(409, "state_revision_conflict", "El estado compartido cambió; recargá y revisá antes de volver a guardar.");
+      }
+      const storedCounters = await client.query(`
+        SELECT value_json, value_ciphertext
+        FROM extension_state_values
+        WHERE scope_type = 'workspace' AND scope_id = $1
+          AND storage_key = 'contactFlowCounters'
+        FOR UPDATE
+      `, [identity.workspace_id]);
+      if (storedCounters.rows[0]) {
+        const currentValue = storedCounters.rows[0].value_ciphertext
+          ? JSON.parse(decryptValue(storedCounters.rows[0].value_ciphertext, config.encryptionKey))
+          : storedCounters.rows[0].value_json;
+        changes = {
+          ...changes,
+          contactFlowCounters: mergeContactFlowCounterSnapshots(
+            currentValue,
+            changes.contactFlowCounters
+          )
+        };
+      }
     }
     const timestamp = Date.now();
     for (const [key, value] of Object.entries(changes)) {
@@ -576,11 +621,11 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
             VALUES ($1, $2, $3)
           `, [identity.workspace_id, destinationId, count]);
         }
-        for (const phone of counters.countedNumbers) {
+        for (const { number, countedAt } of counters.countedNumbers) {
           await client.query(`
-            INSERT INTO contact_flow_counted_numbers (workspace_id, phone)
-            VALUES ($1, $2)
-          `, [identity.workspace_id, phone]);
+            INSERT INTO contact_flow_counted_numbers (workspace_id, phone, counted_at_ms)
+            VALUES ($1, $2, $3)
+          `, [identity.workspace_id, number, countedAt]);
         }
         for (const panel of counters.panels) {
           await client.query(`
@@ -598,11 +643,12 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
             panel.count,
             jsonValue(panel.legacy)
           ]);
-          for (const phone of panel.countedNumbers) {
+          for (const { number, countedAt } of panel.countedNumbers) {
             await client.query(`
-              INSERT INTO contact_flow_panel_counted_numbers (workspace_id, panel_id, phone)
-              VALUES ($1, $2, $3)
-            `, [identity.workspace_id, panel.id, phone]);
+              INSERT INTO contact_flow_panel_counted_numbers (
+                workspace_id, panel_id, phone, counted_at_ms
+              ) VALUES ($1, $2, $3, $4)
+            `, [identity.workspace_id, panel.id, number, countedAt]);
           }
         }
         await client.query(`
@@ -826,11 +872,18 @@ function validateCounterSnapshot(value) {
       if (Number.isSafeInteger(count) && count >= 0) derived.push([destinationId, count]);
     }
   }
+  const now = Date.now();
   const normalizeNumbers = (numbers) => {
     if (!Array.isArray(numbers)) return [];
-    return [...new Set(numbers.filter((number) =>
-      typeof number === "string" && /^\d{7,20}$/.test(number)
-    ))];
+    const normalized = new Map();
+    for (const entry of numbers) {
+      const number = typeof entry === "string" ? entry : entry?.number;
+      const countedAt = typeof entry === "string" ? now : entry?.countedAt;
+      if (typeof number !== "string" || !/^\d{7,20}$/.test(number) ||
+        !Number.isSafeInteger(countedAt) || countedAt <= 0) continue;
+      normalized.set(number, Math.max(normalized.get(number) || 0, countedAt));
+    }
+    return [...normalized].map(([number, countedAt]) => ({ number, countedAt }));
   };
   const panels = [];
   const panelIds = new Set();
@@ -871,6 +924,77 @@ function validateCounterSnapshot(value) {
     countedNumbers: normalizeNumbers(value.countedNumbers),
     panels,
     legacyUnknown
+  };
+}
+
+function mergeContactFlowCounterSnapshots(currentValue, incomingValue, now = Date.now()) {
+  const current = validateCounterSnapshot(currentValue);
+  const incoming = validateCounterSnapshot(incomingValue);
+  const activeNumbers = (numbers) => numbers.filter(({ countedAt }) =>
+    countedAt <= now && now - countedAt < CONTACT_FLOW_COUNTED_NUMBER_TTL_MS);
+  const mergeNumbers = (currentNumbers, incomingNumbers) => {
+    const merged = new Map(activeNumbers(currentNumbers).map((entry) => [entry.number, entry.countedAt]));
+    let added = 0;
+    for (const entry of activeNumbers(incomingNumbers)) {
+      if (!merged.has(entry.number)) added++;
+      merged.set(entry.number, Math.max(merged.get(entry.number) || 0, entry.countedAt));
+    }
+    return {
+      numbers: [...merged].map(([number, countedAt]) => ({ number, countedAt })),
+      added
+    };
+  };
+  const currentDerived = Object.fromEntries(current.derived);
+  const incomingDerived = Object.fromEntries(incoming.derived);
+  const mergedDerived = { ...currentDerived };
+  const currentPanels = new Map(current.panels.map((panel) => [panel.id, panel]));
+  const incomingPanels = new Map(incoming.panels.map((panel) => [panel.id, panel]));
+  const mergedPanels = [];
+
+  for (const [id, currentPanel] of currentPanels) {
+    const incomingPanel = incomingPanels.get(id);
+    const numbers = mergeNumbers(
+      currentPanel.countedNumbers,
+      incomingPanel?.countedNumbers || []
+    );
+    mergedPanels.push({
+      ...currentPanel,
+      count: Math.max(currentPanel.count + numbers.added, incomingPanel?.count || 0),
+      countedNumbers: numbers.numbers
+    });
+    if (incomingPanel && numbers.added) {
+      mergedDerived[currentPanel.destinationId] =
+        (mergedDerived[currentPanel.destinationId] || 0) + numbers.added;
+    }
+  }
+
+  for (const [id, incomingPanel] of incomingPanels) {
+    if (currentPanels.has(id)) continue;
+    const numbers = mergeNumbers([], incomingPanel.countedNumbers);
+    mergedPanels.push({
+      ...incomingPanel,
+      count: Math.max(incomingPanel.count, numbers.added),
+      countedNumbers: numbers.numbers
+    });
+  }
+  for (const [destinationId, count] of Object.entries(incomingDerived)) {
+    mergedDerived[destinationId] = Math.max(mergedDerived[destinationId] || 0, count);
+  }
+
+  const countedNumbers = mergeNumbers(current.countedNumbers, incoming.countedNumbers);
+  const arrived = Math.max(current.arrived + countedNumbers.added, incoming.arrived);
+  if (!Number.isSafeInteger(arrived) ||
+    Object.values(mergedDerived).some((count) => !Number.isSafeInteger(count)) ||
+    mergedPanels.some((panel) => !Number.isSafeInteger(panel.count))) {
+    throw new ApiError(409, "invalid_contact_flow", "La combinación de contadores supera el límite seguro.");
+  }
+  return {
+    arrived,
+    derived: mergedDerived,
+    countedNumbers: countedNumbers.numbers,
+    panels: mergedPanels,
+    ...current.legacyUnknown,
+    ...incoming.legacyUnknown
   };
 }
 
@@ -1081,11 +1205,11 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
               VALUES ($1, $2, $3)
             `, [identity.workspace_id, destinationId, count]);
           }
-          for (const phone of counters.countedNumbers) {
+          for (const { number, countedAt } of counters.countedNumbers) {
             await client.query(`
-              INSERT INTO contact_flow_counted_numbers (workspace_id, phone)
-              VALUES ($1, $2)
-            `, [identity.workspace_id, phone]);
+              INSERT INTO contact_flow_counted_numbers (workspace_id, phone, counted_at_ms)
+              VALUES ($1, $2, $3)
+            `, [identity.workspace_id, number, countedAt]);
           }
           for (const panel of counters.panels) {
             await client.query(`
@@ -1097,12 +1221,12 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
               identity.workspace_id, panel.id, panel.ordinal, panel.title,
               panel.keyword, panel.destinationId, panel.count, jsonValue(panel.legacy)
             ]);
-            for (const phone of panel.countedNumbers) {
+            for (const { number, countedAt } of panel.countedNumbers) {
               await client.query(`
                 INSERT INTO contact_flow_panel_counted_numbers (
-                  workspace_id, panel_id, phone
-                ) VALUES ($1, $2, $3)
-              `, [identity.workspace_id, panel.id, phone]);
+                  workspace_id, panel_id, phone, counted_at_ms
+                ) VALUES ($1, $2, $3, $4)
+              `, [identity.workspace_id, panel.id, number, countedAt]);
             }
           }
           await storeSecret("workspace", identity.workspace_id, "contactFlowCountersSource", value);
@@ -1187,6 +1311,7 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
 
 function createDataApiServer({ pool, config }) {
   const attemptsByAddress = new Map();
+  const cleanupExpiredDeviceAssertionNonces = createDeviceAssertionNonceCleanup(pool);
   const allowedOrigins = new Map(
     config.extensionIds.map((extensionId) => [`chrome-extension://${extensionId}`, extensionId])
   );
@@ -1254,7 +1379,7 @@ function createDataApiServer({ pool, config }) {
       if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
         throw new ApiError(401, "invalid_device_proof", "La firma del dispositivo no es válida.");
       }
-      await pool.query("DELETE FROM device_assertion_nonces WHERE expires_at_ms < $1", [Date.now()]);
+      await cleanupExpiredDeviceAssertionNonces();
       const nonceClaim = await pool.query(`
         INSERT INTO device_assertion_nonces (device_id, nonce, expires_at_ms)
         VALUES ($1, $2, $3)
@@ -1295,13 +1420,16 @@ function createDataApiServer({ pool, config }) {
         let schema;
         try {
           schema = await pool.query(
-            "SELECT version FROM schema_migrations WHERE version = 3"
+            `SELECT count(*)::int AS applied_count
+             FROM schema_migrations
+             WHERE version BETWEEN 1 AND $1`,
+            [SCHEMA_VERSION]
           );
         } catch (error) {
           console.error(`Health check de base no disponible: ${error.code || error.name || "unknown"}`);
           throw new ApiError(503, "database_not_ready", "La base o el esquema no están disponibles.");
         }
-        if (schema.rowCount !== 1) {
+        if (schema.rows[0]?.applied_count !== SCHEMA_VERSION) {
           throw new ApiError(503, "schema_not_ready", "El esquema de datos no está preparado.");
         }
         sendJson(response, 200, {
@@ -1832,8 +1960,16 @@ function createDataApiServer({ pool, config }) {
       const status = error instanceof ApiError ? error.status : 500;
       const code = error instanceof ApiError ? error.code : "internal_error";
       const message = error instanceof ApiError ? error.message : "Error interno del servicio de datos.";
-      if (!(error instanceof ApiError)) {
-        console.error(`Error API ${request.method} ${request.url}: ${error.code || error.name || "unknown"}`);
+      if (status >= 500) {
+        const requestPath = typeof route === "string"
+          ? route
+          : new URL(request.url, "https://localhost").pathname;
+        const details = error instanceof ApiError
+          ? code
+          : `${error.code || error.name || "unknown"}: ${error.message}`;
+        console.error(
+          `[${new Date().toISOString()}] Error API ${request.method} ${requestPath} HTTP ${status}: ${details}`
+        );
       }
       if (status === 413) response.shouldKeepAlive = false;
       sendJson(response, status, { ok: false, code, error: message }, origin, extensionId && `chrome-extension://${extensionId}`);
@@ -1860,7 +1996,10 @@ function main() {
   const config = getServerConfig();
   const pgConfig = require("./migrate").getDatabaseConfig("DATA_PG");
   const { Pool } = require("pg");
-  const pool = new Pool({ ...pgConfig, max: 10, connectionTimeoutMillis: 5000 });
+  const pool = new Pool({ ...pgConfig, max: 20, connectionTimeoutMillis: 15_000 });
+  pool.on("error", (error) => {
+    console.error(`Conexión inactiva de PostgreSQL descartada: ${error.code || error.name || "unknown"}`);
+  });
   const server = createDataApiServer({ pool, config });
   const port = Number(process.env.DATA_API_PORT || 3443);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -1873,17 +2012,26 @@ function main() {
   server.requestTimeout = 30_000;
   server.maxHeadersCount = 32;
   server.on("error", (error) => {
-    console.error(`No se pudo iniciar la API de datos: ${error.code || error.name}`);
+    console.error(
+      `[${new Date().toISOString()}] No se pudo iniciar la API de datos: ${error.code || error.name}`
+    );
     process.exit(1);
   });
   process.on("uncaughtExceptionMonitor", (error, origin) => {
-    console.error(`Excepción fatal de Node (${origin}): ${error.stack || error.message || error.name}`);
+    console.error(
+      `[${new Date().toISOString()}] Excepción fatal de Node pid=${process.pid} (${origin}): ` +
+      `${error.stack || error.message || error.name}`
+    );
   });
-  const shutdown = () => {
+  process.on("exit", (code) => {
+    console.error(`[${new Date().toISOString()}] Proceso API finalizado pid=${process.pid} exitCode=${code}`);
+  });
+  const shutdown = (signal) => {
+    console.log(`[${new Date().toISOString()}] Cierre solicitado a la API: ${signal}.`);
     server.close(() => pool.end().finally(() => process.exit(0)));
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 if (require.main === module) {
@@ -1898,7 +2046,9 @@ if (require.main === module) {
 module.exports = {
   commitMigration,
   createDataApiServer,
+  createDeviceAssertionNonceCleanup,
   getServerConfig,
+  mergeContactFlowCounterSnapshots,
   validateCounterSnapshot,
   validateDestinations
 };

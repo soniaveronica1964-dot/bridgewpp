@@ -182,8 +182,17 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       server.listen(port, "127.0.0.1", resolve);
     });
 
+    await pool.query("DELETE FROM schema_migrations WHERE version = 5");
+    const outdatedHealth = await request(port, "GET", "/health", undefined, null, extensionId);
+    assert.equal(outdatedHealth.status, 503);
+    assert.equal(outdatedHealth.body.code, "schema_not_ready");
+    await pool.query(`
+      INSERT INTO schema_migrations (version, name, applied_at_ms)
+      VALUES (5, 'contact_flow_counted_at', $1)
+    `, [Date.now()]);
     const health = await request(port, "GET", "/health", undefined, null, extensionId);
     assert.equal(health.status, 200);
+    assert.equal(health.body.schemaVersion, 5);
     const serverInfo = await request(port, "GET", "/v1/server-info", undefined, null, extensionId);
     assert.equal(serverInfo.status, 200);
     assert.equal(serverInfo.body.workspaceId, initialized.workspaceId);
@@ -456,8 +465,11 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(destination.rows[0].token_ciphertext.includes(Buffer.from("t".repeat(40))), false);
     const counters = await pool.query("SELECT arrived FROM contact_flow_state");
     assert.equal(counters.rows[0].arrived, "5");
-    const phone = await pool.query("SELECT phone FROM contact_flow_counted_numbers");
+    const phone = await pool.query(
+      "SELECT phone, counted_at_ms FROM contact_flow_counted_numbers"
+    );
     assert.equal(phone.rows[0].phone, "5491112345678");
+    assert.ok(Number(phone.rows[0].counted_at_ms) > 0);
     const secret = await pool.query(`
       SELECT ciphertext FROM app_secrets
       WHERE scope_type = 'profile' AND secret_key = 'bridgeToken'
@@ -534,14 +546,14 @@ test("HTTPS migration imports preserve private and shared data atomically", {
         contactFlowCounters: {
           arrived: 8,
           derived: { "remote-1": 4 },
-          countedNumbers: ["5491111111111"],
+          countedNumbers: [{ number: "5491111111111", countedAt: Date.now() - 1000 }],
           panels: [{
             id: "panel-2",
             title: "Updated",
             keyword: "actualizado",
             destinationId: "remote-1",
             count: 4,
-            countedNumbers: ["5491111111111"]
+            countedNumbers: [{ number: "5491111111111", countedAt: Date.now() - 1000 }]
           }]
         }
       },
@@ -569,6 +581,78 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     }, main.credential, extensionId);
     assert.equal(staleRuntimeWrite.status, 409);
     assert.equal(staleRuntimeWrite.body.code, "state_revision_conflict");
+    const counterBaseRevision = runtimeWrite.body.revision;
+    const firstCounterWrite = await request(port, "POST", "/v1/state", {
+      changes: {
+        contactFlowCounters: {
+          arrived: 9,
+          derived: { "remote-1": 5 },
+          countedNumbers: [
+            { number: "5491111111111", countedAt: Date.now() - 1000 },
+            { number: "5491222222222", countedAt: Date.now() - 500 }
+          ],
+          panels: [{
+            id: "panel-2",
+            title: "Updated",
+            keyword: "actualizado",
+            destinationId: "remote-1",
+            count: 5,
+            countedNumbers: [
+              { number: "5491111111111", countedAt: Date.now() - 1000 },
+              { number: "5491333333333", countedAt: Date.now() - 500 }
+            ]
+          }]
+        }
+      },
+      removes: [],
+      expectedRevision: counterBaseRevision
+    }, main.credential, extensionId);
+    assert.equal(firstCounterWrite.status, 200, JSON.stringify(firstCounterWrite.body));
+    const concurrentCounterWrite = await request(port, "POST", "/v1/state", {
+      changes: {
+        contactFlowCounters: {
+          arrived: 9,
+          derived: { "remote-1": 5 },
+          countedNumbers: [
+            { number: "5491111111111", countedAt: Date.now() - 1000 },
+            { number: "5491444444444", countedAt: Date.now() - 250 }
+          ],
+          panels: [{
+            id: "panel-2",
+            title: "Updated",
+            keyword: "actualizado",
+            destinationId: "remote-1",
+            count: 5,
+            countedNumbers: [
+              { number: "5491111111111", countedAt: Date.now() - 1000 },
+              { number: "5491555555555", countedAt: Date.now() - 250 }
+            ]
+          }]
+        }
+      },
+      removes: [],
+      expectedRevision: counterBaseRevision
+    }, main.credential, extensionId);
+    assert.equal(concurrentCounterWrite.status, 200, JSON.stringify(concurrentCounterWrite.body));
+    const mergedCounters = await request(
+      port,
+      "GET",
+      `/v1/state?keys=${encodeURIComponent(JSON.stringify(["contactFlowCounters"]))}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(mergedCounters.body.values.contactFlowCounters.arrived, 10);
+    assert.equal(mergedCounters.body.values.contactFlowCounters.derived["remote-1"], 6);
+    assert.equal(mergedCounters.body.values.contactFlowCounters.panels[0].count, 6);
+    assert.equal(mergedCounters.body.values.contactFlowCounters.countedNumbers.length, 3);
+    const persistedCounterTimes = await pool.query(`
+      SELECT counted_at_ms FROM contact_flow_counted_numbers
+      WHERE phone IN ('5491111111111', '5491222222222', '5491444444444')
+    `);
+    assert.equal(persistedCounterTimes.rowCount, 3);
+    assert.ok(persistedCounterTimes.rows.every(({ counted_at_ms }) =>
+      Number(counted_at_ms) > 0));
     const runtimeSecret = await pool.query(`
       SELECT value_ciphertext FROM extension_state_values
       WHERE scope_type = 'profile' AND storage_key = 'userCreationPassword'

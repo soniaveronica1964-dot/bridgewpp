@@ -318,7 +318,17 @@ reinicia si recibió respuesta HTTP (por ejemplo, una indisponibilidad temporal
 de PostgreSQL), ni si el puerto sigue escuchando, y limita reinicios repetidos.
 Los fallos y recuperaciones del watchdog quedan en
 `%LOCALAPPDATA%\BridgeWppDataApi\keepalive.log`; la salida de la API, en
-`api.log`. El PostgreSQL sigue enlazado solo a loopback.
+`api.log`. El launcher registra el inicio y cierre de cada proceso Node, su
+código de salida y duración; la API registra fallos HTTP 500 sin incluir
+parámetros de consulta y excepciones fatales. Al actualizar las tareas, el
+instalador copia el launcher versionado desde `data-api/`. La API también
+agrupa las limpiezas de nonces vencidos para evitar una escritura por petición
+concurrente y registra errores de conexiones ociosas del pool PostgreSQL sin
+terminar el proceso. El pool del servicio admite 20 conexiones y espera hasta
+15 segundos para obtener una durante ráfagas de solicitudes. El launcher evita
+que stderr de Node se trate como error terminante de PowerShell, mantiene la
+captura en vivo y registra el código de salida real. El PostgreSQL sigue
+enlazado solo a loopback.
 
 Para despliegue permanente, mantener un rol PostgreSQL de privilegios mínimos,
 secretos protegidos y procedimientos probados de backup/restauración y
@@ -530,6 +540,10 @@ CREATE TABLE schema_migrations (
 Las migraciones PostgreSQL se aplican en orden dentro de transacciones. No usar
 `CREATE TABLE IF NOT EXISTS` como sustituto de versionado: puede ocultar que una
 tabla existente tiene columnas o índices incompatibles.
+
+La migración 005 agrega `counted_at_ms` a las tablas de deduplicación de números
+de contadores compartidos. Las filas previas reciben la hora de aplicación de
+esa migración, ya que el esquema anterior no conservaba el momento del conteo.
 
 ### Identidad y estado de importación
 

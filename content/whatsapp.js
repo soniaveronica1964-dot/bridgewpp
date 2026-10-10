@@ -6,6 +6,7 @@
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
   const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 30_000;
+  const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 24 * 60 * 60 * 1000;
   const TOAST_HOST_ID = "ganamos-toast-host";
   const AGENT_MOVEMENT_PREFIX = "agentMovement:";
   const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "weekly", "monthly", "total"];
@@ -148,7 +149,11 @@
 
   stateStorage.get(CONTACT_FLOW_COUNTERS_KEY)
     .then((stored) => {
-      contactFlowCounters = normalizeContactFlowCounters(stored[CONTACT_FLOW_COUNTERS_KEY]);
+      const storedCounters = stored[CONTACT_FLOW_COUNTERS_KEY];
+      contactFlowCounters = normalizeContactFlowCounters(storedCounters);
+      if (JSON.stringify(contactFlowCounters) !== JSON.stringify(storedCounters ?? null)) {
+        saveContactFlowCounters();
+      }
       contactFlowCountersLoaded = true;
       for (const updateRow of contactFlowCounterRows.values()) updateRow();
       startContactFlowMessageObserver();
@@ -234,6 +239,10 @@
     if (!/^[+\d\s().-]+$/.test(text)) return null;
     const digits = text.replace(/\D/g, "");
     return digits.length >= 4 ? digits : null;
+  }
+
+  function getUnscheduledContactDigits(contactName) {
+    return contactName.replace(/[\u200e\u200f\u202a-\u202e]/g, "").match(/\d{4}/)?.[0] || null;
   }
 
   function positionHost(host, title) {
@@ -531,17 +540,25 @@
 
   function createAmountShortcuts(input) {
     const shortcuts = document.createElement("div");
-    shortcuts.className = "amount-shortcuts";
+    shortcuts.className = "amount-shortcuts amount-shortcuts--amount";
     shortcuts.setAttribute("role", "group");
     shortcuts.setAttribute("aria-label", "Sumar un monto rápido");
-    for (const shortcutAmount of [500, 1000, 2500, 5000, 10000]) {
+    const amounts = [
+      [500, "$500"],
+      [1000, "$1K"],
+      [2500, "$2.5K"],
+      [3000, "$3K"],
+      [5000, "$5K"],
+      [10000, "$10K"],
+      [20000, "$20K"]
+    ];
+    for (const [shortcutAmount, label] of amounts) {
       const button = document.createElement("button");
-      const label = `$${formatBalance(shortcutAmount)}`;
       button.type = "button";
       const buttonLabel = document.createElement("span");
       buttonLabel.textContent = label;
       button.append(buttonLabel);
-      button.setAttribute("aria-label", `Sumar ${label} al monto`);
+      button.setAttribute("aria-label", `Sumar $${formatBalance(shortcutAmount)} al monto`);
       button.addEventListener("click", () => {
         const currentAmount = numericInputValue(input) || 0;
         const nextAmount = (Math.round(currentAmount * 100) + shortcutAmount * 100) / 100;
@@ -554,18 +571,43 @@
     return shortcuts;
   }
 
-  function createPercentageShortcuts(input) {
+  function createPercentageShortcuts(input, getActiveBonusPercent = () => null) {
     const shortcuts = document.createElement("div");
     shortcuts.className = "amount-shortcuts";
     shortcuts.setAttribute("role", "group");
     shortcuts.setAttribute("aria-label", "Elegir porcentaje de bono");
+    const presetPercentages = [20, 30, 40, 50, 60];
+    const activeBonusButton = document.createElement("button");
+    activeBonusButton.type = "button";
+    activeBonusButton.dataset.activeBonus = "true";
+    const activeBonusLabel = document.createElement("span");
+    activeBonusButton.append(activeBonusLabel);
+    const activeBonusSeparator = document.createElement("span");
+    activeBonusSeparator.className = "amount-shortcuts__separator";
+    activeBonusSeparator.setAttribute("aria-hidden", "true");
     const updateSelection = () => {
       const selectedPercentage = numericInputValue(input);
+      const activeBonusPercent = getActiveBonusPercent();
+      const showActiveBonus = activeBonusPercent != null &&
+        !presetPercentages.includes(activeBonusPercent);
+      shortcuts.classList.toggle("amount-shortcuts--with-active-bonus", showActiveBonus);
+      if (showActiveBonus) {
+        const label = `${formatBalance(activeBonusPercent)}%`;
+        activeBonusButton.dataset.percentage = String(activeBonusPercent);
+        activeBonusLabel.textContent = label;
+        activeBonusButton.setAttribute("aria-label", `Usar ${label} del bono activo`);
+        if (!shortcuts.contains(activeBonusButton)) {
+          shortcuts.append(activeBonusSeparator, activeBonusButton);
+        }
+      } else {
+        activeBonusSeparator.remove();
+        activeBonusButton.remove();
+      }
       for (const button of shortcuts.querySelectorAll("button")) {
         button.setAttribute("aria-pressed", String(Number(button.dataset.percentage) === selectedPercentage));
       }
     };
-    for (const percentage of [20, 30, 40, 50, 60]) {
+    for (const percentage of presetPercentages) {
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.percentage = String(percentage);
@@ -581,6 +623,12 @@
       });
       shortcuts.append(button);
     }
+    activeBonusButton.addEventListener("click", () => {
+      const activeBonusPercent = Number(activeBonusButton.dataset.percentage);
+      input.value = numericInputValue(input) === activeBonusPercent ? "" : String(activeBonusPercent);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+    });
     input.addEventListener("input", updateSelection);
     return { element: shortcuts, updateSelection };
   }
@@ -621,13 +669,27 @@
   function normalizeContactFlowCounters(value) {
     const counters = { arrived: 0, derived: {}, countedNumbers: [], panels: [] };
     if (!value || typeof value !== "object") return counters;
+    const now = Date.now();
+    const normalizeCountedNumbers = (numbers) => {
+      if (!Array.isArray(numbers)) return [];
+      const normalizedByNumber = new Map();
+      for (const entry of numbers) {
+        const number = typeof entry === "string" ? entry : entry?.number;
+        const countedAt = typeof entry === "string" ? now : entry?.countedAt;
+        if (typeof number !== "string" || !/^\d{7,20}$/.test(number) ||
+          !Number.isSafeInteger(countedAt) || countedAt <= 0 ||
+          now - countedAt >= CONTACT_FLOW_COUNTED_NUMBER_TTL_MS) continue;
+        const previousCountedAt = normalizedByNumber.get(number);
+        if (previousCountedAt === undefined || countedAt > previousCountedAt) {
+          normalizedByNumber.set(number, countedAt);
+        }
+      }
+      return [...normalizedByNumber].map(([number, countedAt]) => ({ number, countedAt }));
+    };
     if (Number.isSafeInteger(value.arrived) && value.arrived >= 0) {
       counters.arrived = value.arrived;
     }
-    if (Array.isArray(value.countedNumbers)) {
-      counters.countedNumbers = [...new Set(value.countedNumbers.filter((number) =>
-        typeof number === "string" && /^\d{7,20}$/.test(number)))];
-    }
+    counters.countedNumbers = normalizeCountedNumbers(value.countedNumbers);
     if (Array.isArray(value.panels)) {
       const panelIds = new Set();
       counters.panels = value.panels.flatMap((panel) => {
@@ -645,10 +707,7 @@
           keyword: panel.keyword,
           destinationId: panel.destinationId,
           count: Number.isSafeInteger(panel.count) && panel.count >= 0 ? panel.count : 0,
-          countedNumbers: Array.isArray(panel.countedNumbers)
-            ? [...new Set(panel.countedNumbers.filter((number) =>
-              typeof number === "string" && /^\d{7,20}$/.test(number)))]
-            : []
+          countedNumbers: normalizeCountedNumbers(panel.countedNumbers)
         }];
       });
     }
@@ -660,6 +719,21 @@
       }
     }
     return counters;
+  }
+
+  function pruneExpiredContactFlowNumbers(now = Date.now()) {
+    let changed = false;
+    const prune = (numbers) => {
+      const active = numbers.filter(({ countedAt }) =>
+        now - countedAt < CONTACT_FLOW_COUNTED_NUMBER_TTL_MS);
+      if (active.length !== numbers.length) changed = true;
+      return active;
+    };
+    contactFlowCounters.countedNumbers = prune(contactFlowCounters.countedNumbers);
+    for (const panel of contactFlowCounters.panels) {
+      panel.countedNumbers = prune(panel.countedNumbers);
+    }
+    return changed;
   }
 
   function getContactFlowCounterValue(key) {
@@ -779,11 +853,12 @@
     const details = getIncomingMessageDetails(metadataElement);
     if (!details) return;
     if (details.chat) contactFlowChatNumbers.set(details.chat, details.number);
-    if (contactFlowCounters.countedNumbers.includes(details.number)) {
+    const now = Date.now();
+    if (pruneExpiredContactFlowNumbers(now)) saveContactFlowCounters();
+    if (contactFlowCounters.countedNumbers.some(({ number }) => number === details.number)) {
       processedIncomingMessages.add(metadataElement);
       return;
     }
-    const now = Date.now();
     if (now - details.timestamp > 15000 * 60_000) {
       processedIncomingMessages.add(metadataElement);
       return;
@@ -795,7 +870,7 @@
       return;
     }
     processedIncomingMessages.add(metadataElement);
-    contactFlowCounters.countedNumbers.push(details.number);
+    contactFlowCounters.countedNumbers.push({ number: details.number, countedAt: now });
     contactFlowCounters.arrived += 1;
     contactFlowCounterRows.get("arrived")?.();
     saveContactFlowCounters();
@@ -891,6 +966,7 @@
     const details = getOutgoingMessageDetails(metadataElement);
     if (!details) return;
     const now = Date.now();
+    if (pruneExpiredContactFlowNumbers(now)) saveContactFlowCounters();
     if (now - details.timestamp > 15000 * 60_000) {
       processedOutgoingMessages.add(metadataElement);
       return;
@@ -898,7 +974,7 @@
     if (details.timestamp > now + 30_000) return;
     const matchingPanels = contactFlowCounters.panels.filter((panel) =>
       details.text.includes(panel.keyword.normalize("NFKC").toLocaleLowerCase()) &&
-      !panel.countedNumbers.includes(details.number) &&
+      !panel.countedNumbers.some(({ number }) => number === details.number) &&
       remoteCreateDestinations.some((destination) =>
         destination?.id === panel.destinationId &&
         typeof destination.name === "string")
@@ -916,7 +992,7 @@
         );
         continue;
       }
-      panel.countedNumbers.push(details.number);
+      panel.countedNumbers.push({ number: details.number, countedAt: now });
       panel.count += 1;
       contactFlowCounters.derived[panel.destinationId] = derivedCount + 1;
       counted = true;
@@ -1009,9 +1085,9 @@
       const refreshed = normalizeContactFlowCounters(stored[CONTACT_FLOW_COUNTERS_KEY]);
       if (JSON.stringify(refreshed) === JSON.stringify(contactFlowCounters)) return;
       contactFlowCounters = refreshed;
-      contactFlowCountersVersion++;
       for (const updateRow of contactFlowCounterRows.values()) updateRow();
       contactFlowPanelConfigRefresh?.();
+      saveContactFlowCounters();
     } catch (error) {
       console.error(
         "[Ganamos balance extension] No se pudieron refrescar los contadores compartidos.",
@@ -1026,10 +1102,10 @@
     return {
       arrived: counters.arrived,
       derived: { ...counters.derived },
-      countedNumbers: [...counters.countedNumbers],
+      countedNumbers: counters.countedNumbers.map((entry) => ({ ...entry })),
       panels: counters.panels.map((panel) => ({
         ...panel,
-        countedNumbers: [...panel.countedNumbers]
+        countedNumbers: panel.countedNumbers.map((entry) => ({ ...entry }))
       }))
     };
   }
@@ -3386,14 +3462,11 @@
     passwordResetButton.title = "Restaurar contraseña";
     passwordResetButton.setAttribute("aria-label", "Restaurar contraseña");
     passwordResetButton.hidden = true;
-    const passwordIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    passwordIcon.setAttribute("viewBox", "0 0 24 24");
-    passwordIcon.setAttribute("aria-hidden", "true");
-    const passwordIconPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    passwordIconPath.setAttribute("d", "M7 10V7a5 5 0 0 1 10 0v3m-11 0h12a2 2 0 0 1 2 2v7H4v-7a2 2 0 0 1 2-2Zm5 4v3");
-    passwordIcon.append(passwordIconPath);
-    passwordResetButton.append(passwordIcon);
-    passwordResetButton.addEventListener("click", () => openPasswordResetDialog(host));
+    passwordResetButton.append(createPasswordResetIcon());
+    passwordResetButton.addEventListener("click", () => {
+      const candidates = host.passwordResetCandidates || [];
+      openPasswordResetDialog(host, candidates.length ? candidates : null);
+    });
     withdrawalGroup.append(withdrawalButton, untrackedWithdrawalButton);
     actions.append(withdrawalGroup);
     const createUserButton = document.createElement("button");
@@ -3931,8 +4004,6 @@
       bonusPercentLabel.append(createInputAffix(bonusPercentInput, "%", "suffix"));
       bonusFields.append(bonusLabel, bonusPercentLabel);
       dialog.append(bonusFields);
-      const bonusPercentageShortcuts = createPercentageShortcuts(bonusPercentInput);
-      dialog.append(bonusPercentageShortcuts.element);
 
       const numberValue = numericInputValue;
       const syncFixedFromPercent = () => {
@@ -3967,33 +4038,31 @@
       let manuallyChangedBonusPercent = false;
       let applyingAutomaticBonusPercent = false;
       let specialBonusThresholdExceeded = (numberValue(amountInput) || 0) >= 10_000;
-      const applyAutomaticBonusPercent = () => {
-        let percentage = null;
-        if (activeBonusConfig?.enabled) {
-          switch (activeBonusConfig.type) {
-            case "simple":
-              percentage = activeBonusConfig.percent;
-              break;
-            case "double":
-              percentage = activeBonusConfig[selectedPlatform];
-              break;
-            case "specific":
-              percentage = activeBonusConfig.platform === selectedPlatform
-                ? activeBonusConfig.percent
-                : null;
-              break;
-            case "special":
-              percentage = (numberValue(amountInput) || 0) >= 10_000
-                ? activeBonusConfig.overThreshold
-                : activeBonusConfig.underThreshold;
-              break;
-            case "mysterious":
-              percentage = mysteriousBonusPercent;
-              break;
-          }
+      const getActiveBonusPercent = () => {
+        if (skipAutomaticBonus || !activeBonusConfig?.enabled) return null;
+        switch (activeBonusConfig.type) {
+          case "simple":
+            return activeBonusConfig.percent;
+          case "double":
+            return activeBonusConfig[selectedPlatform];
+          case "specific":
+            return activeBonusConfig.platform === selectedPlatform
+              ? activeBonusConfig.percent
+              : null;
+          case "special":
+            return (numberValue(amountInput) || 0) >= 10_000
+              ? activeBonusConfig.overThreshold
+              : activeBonusConfig.underThreshold;
+          case "mysterious":
+            return mysteriousBonusPercent;
+          default:
+            return null;
         }
+      };
+      const applyAutomaticBonusPercent = () => {
         applyingAutomaticBonusPercent = true;
         try {
+          const percentage = getActiveBonusPercent();
           bonusPercentInput.value = percentage == null ? "" : String(percentage);
           bonusPercentInput.dispatchEvent(new Event("input", { bubbles: true }));
         } finally {
@@ -4021,6 +4090,11 @@
       amountInput.addEventListener("input", updateDepositSummary);
       bonusPercentInput.addEventListener("input", updateDepositSummary);
       bonusInput.addEventListener("input", updateDepositSummary);
+      const bonusPercentageShortcuts = createPercentageShortcuts(
+        bonusPercentInput,
+        getActiveBonusPercent
+      );
+      dialog.append(bonusPercentageShortcuts.element);
       if (!skipAutomaticBonus && activeBonusConfig?.enabled) applyAutomaticBonusPercent();
       updateDepositSummary();
     }
@@ -4527,19 +4601,38 @@
     });
   }
 
-  function openPasswordResetDialog(host) {
+  function createPasswordResetIcon() {
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M7 10V7a5 5 0 0 1 10 0v3m-11 0h12a2 2 0 0 1 2 2v7H4v-7a2 2 0 0 1 2-2Zm5 4v3");
+    icon.append(path);
+    return icon;
+  }
+
+  function openPasswordResetDialog(host, targetUsers = null) {
     const root = host.shadowRoot?.querySelector(".dialog-root");
     if (!root) return;
     const accountsKey = host.dataset.accounts;
+    const isCandidateSelection = Array.isArray(targetUsers) && targetUsers.length > 0;
     const availablePlatforms = [
       ["ganamos", host.dataset.username],
       ["multipanel", host.dataset.multipanelUsername]
     ].filter(([, username]) => Boolean(username));
-    if (!availablePlatforms.length) return;
+    if (isCandidateSelection &&
+      (host.dataset.username || host.dataset.multipanelUsername || !host.dataset.contactPhone ||
+        targetUsers.some(({ platform, username, destinationId }) =>
+          !["ganamos", "multipanel"].includes(platform) ||
+          typeof username !== "string" ||
+          (destinationId != null && typeof destinationId !== "string")))) return;
+    if (isCandidateSelection ? !targetUsers.length : !availablePlatforms.length) return;
 
-    let selectedPlatform = availablePlatforms.some(([platform]) => platform === host.dataset.defaultPlatform)
-      ? host.dataset.defaultPlatform
-      : availablePlatforms[0][0];
+    let selectedCandidate = isCandidateSelection ? targetUsers[0] : null;
+    let selectedPlatform = selectedCandidate?.platform ||
+      (availablePlatforms.some(([platform]) => platform === host.dataset.defaultPlatform)
+        ? host.dataset.defaultPlatform
+        : availablePlatforms[0][0]);
     const modal = document.createElement("div");
     modal.className = "modal";
     modal.addEventListener("keydown", (event) => {
@@ -4561,18 +4654,32 @@
     const title = document.createElement("h2");
     title.textContent = "Restaurar contraseña";
     const selector = document.createElement("div");
-    selector.className = "platform-selector";
-    for (const [platform] of availablePlatforms) {
+    selector.className = isCandidateSelection
+      ? "platform-selector password-reset-user-selector"
+      : "platform-selector";
+    const options = isCandidateSelection
+      ? targetUsers
+      : availablePlatforms.map(([platform, username]) => ({ platform, username }));
+    for (const candidate of options) {
       const button = document.createElement("button");
       button.type = "button";
-      button.dataset.platform = platform;
-      button.textContent = platform === "ganamos" ? "Ganamos" : "MultiPanel";
-      button.setAttribute("aria-pressed", String(platform === selectedPlatform));
+      button.dataset.platform = candidate.platform;
+      button.textContent = isCandidateSelection
+        ? `${candidate.username}${candidate.sourceName ? ` · ${candidate.sourceName}` : ""}`
+        : candidate.platform === "ganamos" ? "Ganamos" : "MultiPanel";
+      button.setAttribute("aria-pressed", String(isCandidateSelection
+        ? candidate === selectedCandidate
+        : candidate.platform === selectedPlatform));
       button.addEventListener("click", () => {
-        selectedPlatform = platform;
-        dialog.dataset.platform = platform;
+        if (isCandidateSelection) {
+          selectedCandidate = candidate;
+          selectedPlatform = candidate.platform;
+        } else {
+          selectedPlatform = candidate.platform;
+        }
+        dialog.dataset.platform = selectedPlatform;
         for (const option of selector.querySelectorAll("button")) {
-          option.setAttribute("aria-pressed", String(option.dataset.platform === selectedPlatform));
+          option.setAttribute("aria-pressed", String(option === button));
         }
       });
       selector.append(button);
@@ -4595,8 +4702,10 @@
     dialog.append(title, selector, actions);
     dialog.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const username = host.dataset[selectedPlatform === "ganamos" ? "username" : "multipanelUsername"];
-      if (!username || host.dataset.accounts !== accountsKey) {
+      const username = selectedCandidate?.username ||
+        host.dataset[selectedPlatform === "ganamos" ? "username" : "multipanelUsername"];
+      if (!username || host.dataset.accounts !== accountsKey ||
+        (isCandidateSelection && !host.passwordResetCandidates?.includes(selectedCandidate))) {
         root.replaceChildren();
         showToast(host, username || "Chat", "El contacto cambió; volvé a iniciar la restauración de contraseña.", "error");
         return;
@@ -4607,7 +4716,13 @@
       try {
         const response = await chrome.runtime.sendMessage({
           type: "PASSWORD_RESET_REQUEST",
-          data: { platform: selectedPlatform, nombre: username }
+          data: {
+            platform: selectedPlatform,
+            nombre: username,
+            ...(selectedCandidate?.destinationId
+              ? { destinationId: selectedCandidate.destinationId }
+              : {})
+          }
         });
         if (!response?.ok) throw new Error(response?.error || "La plataforma no confirmó la restauración de la contraseña.");
         showToast(host, username, "Contraseña restaurada correctamente.", "success");
@@ -4628,10 +4743,12 @@
     if (!section || !resultsContainer) return;
     section.hidden = true;
     resultsContainer.replaceChildren();
+    host.passwordResetCandidates = [];
+    host.shadowRoot.querySelector(".password-reset-button").hidden = true;
 
     const isCurrentContact = () =>
       document.getElementById(HOST_ID) === host && host.dataset.accounts === accountsKey;
-    const appendSearchResult = (name, result, requestError = null) => {
+    const appendSearchResult = (name, result, requestError = null, destinationId = null) => {
       if (requestError) {
         console.error(`[Ganamos balance extension] No se pudieron buscar usuarios en ${name}.`, requestError);
         showToast(host, name, String(requestError), "error", `user-search:${name}:${digits}`);
@@ -4654,8 +4771,15 @@
         }
         for (const username of names) {
           if (typeof username === "string" && username.includes(digits)) {
-            namesByPlatform.push({ username, platform });
+            namesByPlatform.push({ username, platform, destinationId, sourceName: name });
           }
+        }
+      }
+      if (!host.dataset.username && !host.dataset.multipanelUsername &&
+        host.dataset.contactPhone.length >= 4) {
+        host.passwordResetCandidates.push(...namesByPlatform);
+        if (namesByPlatform.length) {
+          host.shadowRoot.querySelector(".password-reset-button").hidden = false;
         }
       }
 
@@ -4730,7 +4854,7 @@
         }));
         if (!isCurrentContact()) return;
         for (const { destination, result, error } of results) {
-          appendSearchResult(destination.name, result, error);
+          appendSearchResult(destination.name, result, error, destination.id);
         }
       } else {
         const response = await chrome.runtime.sendMessage({
@@ -4774,7 +4898,12 @@
     const isNormalChat = isNormalChatOpen(title);
     const contactTitle = title?.textContent || "";
     const usernames = isNormalChat ? findPlatformUsernames(contactTitle) : null;
-    const phone = isNormalChat ? getPhoneFromContactTitle(title) : null;
+    const phone = isNormalChat
+      ? getPhoneFromContactTitle(title) ||
+        (!usernames?.ganamos && !usernames?.multipanel
+          ? getUnscheduledContactDigits(contactTitle)
+          : null)
+      : null;
     if (!usernames?.ganamos && !usernames?.multipanel && !phone) {
       const host = document.getElementById(HOST_ID);
       if (host) host.style.display = "none";
@@ -4801,6 +4930,7 @@
     host.dataset.defaultPlatform = usernames?.firstPlatform || (usernames?.ganamos ? "ganamos" : "multipanel");
     host.dataset.contactPhone = phone || "";
     const hasPlatformUsers = Boolean(usernames?.ganamos || usernames?.multipanel);
+    host.passwordResetCandidates = [];
     updateDepositBonusBypassVisibility(
       Boolean(activeBonusHost?.dataset.bonusType && activeBonusHost.dataset.bonusType !== "none")
     );
@@ -4816,6 +4946,7 @@
         ? "ganamos"
         : null;
     host.shadowRoot.querySelector('[data-action="deposit"]').hidden = !hasPlatformUsers;
+    host.shadowRoot.querySelector(".deposit-action-group").hidden = !hasPlatformUsers;
     host.shadowRoot.querySelector(".withdrawal-action-group").hidden = !hasPlatformUsers;
     host.shadowRoot.querySelector(".password-reset-button").hidden = !hasPlatformUsers;
     host.shadowRoot.querySelector(".status").hidden = !hasPlatformUsers;
