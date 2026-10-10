@@ -226,11 +226,34 @@
 
 .contact-flow-reset-actions {
   flex-wrap: wrap;
+  justify-content: space-between;
 }
 
-.contact-flow-reset-actions button {
-  flex: 1 1 110px;
+.contact-flow-reset-actions .contact-flow-reset-all {
+  flex: 0 0 auto;
   min-width: 0;
+  border-color: #a83232;
+  color: #ffffff;
+  background: #b42323;
+}
+
+.contact-flow-reset-actions .contact-flow-reset-all:hover:not(:disabled) {
+  background: #921c1c;
+}
+
+.contact-flow-reset-spacer {
+  flex: 1 1 24px;
+}
+
+.contact-flow-reset-secondary-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.contact-flow-reset-secondary-actions button {
+  flex: 0 1 auto;
+  min-width: 86px;
 }
 
 .contact-flow-panel-dialog {

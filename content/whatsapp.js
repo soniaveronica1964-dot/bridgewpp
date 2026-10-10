@@ -1704,6 +1704,24 @@
     dialog.setAttribute("aria-describedby", message.id);
     const actions = document.createElement("div");
     actions.className = "dialog-actions contact-flow-reset-actions";
+    const resetEverything = document.createElement("button");
+    resetEverything.type = "button";
+    resetEverything.className = "contact-flow-reset-all";
+    resetEverything.textContent = "Reiniciar todo";
+    resetEverything.title = "Pone los contadores en cero y borra los registros de números contados.";
+    resetEverything.addEventListener("click", () => {
+      if (!window.confirm("¿Reiniciar todo? También se borrarán los registros de números ya contabilizados.")) {
+        return;
+      }
+      resetContactFlowCounters(true);
+      dialogHost.remove();
+      resetButton.focus();
+    });
+    const actionSpacer = document.createElement("span");
+    actionSpacer.className = "contact-flow-reset-spacer";
+    actionSpacer.setAttribute("aria-hidden", "true");
+    const secondaryActions = document.createElement("div");
+    secondaryActions.className = "contact-flow-reset-secondary-actions";
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.className = "secondary";
@@ -1714,23 +1732,15 @@
     });
     const resetValues = document.createElement("button");
     resetValues.type = "button";
-    resetValues.textContent = "Reiniciar valores";
+    resetValues.textContent = "Reiniciar";
     resetValues.title = "Pone los contadores en cero y conserva los registros de números contados.";
     resetValues.addEventListener("click", () => {
       resetContactFlowCounters(false);
       dialogHost.remove();
       resetButton.focus();
     });
-    const resetEverything = document.createElement("button");
-    resetEverything.type = "button";
-    resetEverything.textContent = "Reiniciar todo";
-    resetEverything.title = "Pone los contadores en cero y borra los registros de números contados.";
-    resetEverything.addEventListener("click", () => {
-      resetContactFlowCounters(true);
-      dialogHost.remove();
-      resetButton.focus();
-    });
-    actions.append(cancel, resetValues, resetEverything);
+    secondaryActions.append(cancel, resetValues);
+    actions.append(resetEverything, actionSpacer, secondaryActions);
     dialog.append(heading, message, actions);
     modal.append(dialog);
     shadow.append(stylesheet, modal);
