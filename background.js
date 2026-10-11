@@ -234,7 +234,17 @@ async function writeExtensionState(changes, removes = [], expectedRevision) {
   }
   cachedStateRevision = response.revision;
   cachedChangeRevision = response.changeRevision;
-  Object.assign(extensionStateCache, changes);
+  let committedChanges = changes;
+  if (Object.hasOwn(changes, "contactFlowCounters")) {
+    const counters = Object.hasOwn(response, "contactFlowCounters")
+      ? response.contactFlowCounters
+      : (await getExtensionState("contactFlowCounters")).contactFlowCounters;
+    if (!counters || typeof counters !== "object" || Array.isArray(counters)) {
+      throw new Error("La API PostgreSQL no devolvió los contadores compartidos confirmados.");
+    }
+    committedChanges = { ...changes, contactFlowCounters: counters };
+  }
+  Object.assign(extensionStateCache, committedChanges);
   for (const key of removes) delete extensionStateCache[key];
   for (const key of keys) loadedProfileStateKeys.add(key);
   const event = {};
@@ -243,7 +253,7 @@ async function writeExtensionState(changes, removes = [], expectedRevision) {
       ...(Object.hasOwn(previous, key) && previous[key] !== undefined
         ? { oldValue: previous[key] }
         : {}),
-      ...(Object.hasOwn(changes, key) ? { newValue: changes[key] } : {})
+      ...(Object.hasOwn(committedChanges, key) ? { newValue: committedChanges[key] } : {})
     };
   }
   dispatchStateChange(event);

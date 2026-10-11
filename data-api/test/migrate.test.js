@@ -136,16 +136,17 @@ test("validates timestamped contact-flow numbers and keeps legacy number strings
 
 test("merges concurrent contact-flow snapshots without double-counting duplicate numbers", () => {
   const now = Date.now();
+  const countedAtTwoDaysAgo = now - 2 * 24 * 60 * 60 * 1000;
   const current = {
     arrived: 10,
     derived: { "remote-1": 4 },
-    countedNumbers: [{ number: "5491111111111", countedAt: now - 1000 }],
+    countedNumbers: [{ number: "5491111111111", countedAt: countedAtTwoDaysAgo }],
     panels: [{
       id: "panel-1",
       keyword: "sale",
       destinationId: "remote-1",
       count: 4,
-      countedNumbers: [{ number: "5491222222222", countedAt: now - 1000 }]
+      countedNumbers: [{ number: "5491222222222", countedAt: countedAtTwoDaysAgo }]
     }]
   };
   const first = {

@@ -6,7 +6,10 @@
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
   const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 30_000;
-  const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 24 * 60 * 60 * 1000;
+  const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 15_000 * 60_000;
+  const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
+  const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS =
+    CONTACT_FLOW_MESSAGE_MAX_AGE_MS + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS + 1;
   const TOAST_HOST_ID = "ganamos-toast-host";
   const AGENT_MOVEMENT_PREFIX = "agentMovement:";
   const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "weekly", "monthly", "total"];
@@ -859,11 +862,11 @@
       processedIncomingMessages.add(metadataElement);
       return;
     }
-    if (now - details.timestamp > 15000 * 60_000) {
+    if (now - details.timestamp > CONTACT_FLOW_MESSAGE_MAX_AGE_MS) {
       processedIncomingMessages.add(metadataElement);
       return;
     }
-    if (details.timestamp > now + 30_000) return;
+    if (details.timestamp > now + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS) return;
     if (contactFlowCounters.arrived >= Number.MAX_SAFE_INTEGER) {
       processedIncomingMessages.add(metadataElement);
       console.error("[Ganamos balance extension] No se contó un número nuevo: el contador llegó al límite seguro.");
@@ -967,11 +970,11 @@
     if (!details) return;
     const now = Date.now();
     if (pruneExpiredContactFlowNumbers(now)) saveContactFlowCounters();
-    if (now - details.timestamp > 15000 * 60_000) {
+    if (now - details.timestamp > CONTACT_FLOW_MESSAGE_MAX_AGE_MS) {
       processedOutgoingMessages.add(metadataElement);
       return;
     }
-    if (details.timestamp > now + 30_000) return;
+    if (details.timestamp > now + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS) return;
     const matchingPanels = contactFlowCounters.panels.filter((panel) =>
       details.text.includes(panel.keyword.normalize("NFKC").toLocaleLowerCase()) &&
       !panel.countedNumbers.some(({ number }) => number === details.number) &&

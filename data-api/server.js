@@ -7,7 +7,10 @@ const { canonicalJson, decryptValue, encryptValue, sha256Hex, validatePayload } 
 
 const API_VERSION = 1;
 const SCHEMA_VERSION = 6;
-const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 24 * 60 * 60 * 1000;
+const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 15_000 * 60_000;
+const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
+const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS =
+  CONTACT_FLOW_MESSAGE_MAX_AGE_MS + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS + 1;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_STATE_REQUEST_BYTES = 24 * 1024 * 1024 + 64 * 1024;
 const MAX_STAGING_REQUEST_BYTES = 24 * 1024 * 1024 + 64 * 1024;
@@ -715,7 +718,13 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
       timestamp
     ]);
     await client.query("COMMIT");
-    return { revision: nextRevision, changeRevision: Number(workspaceRevision.rows[0].revision) };
+    return {
+      revision: nextRevision,
+      changeRevision: Number(workspaceRevision.rows[0].revision),
+      ...(Object.hasOwn(changes, "contactFlowCounters")
+        ? { contactFlowCounters: changes.contactFlowCounters }
+        : {})
+    };
   } catch (error) {
     try {
       await client.query("ROLLBACK");
@@ -1725,7 +1734,7 @@ function createDataApiServer({ pool, config }) {
       if (route === "/v1/state" && request.method === "POST") {
         const identity = await authenticate(request);
         const body = requireObjectBody(await parseBody(request, MAX_STATE_REQUEST_BYTES));
-        const { revision, changeRevision } = await writeExtensionState(
+        const result = await writeExtensionState(
           pool,
           config,
           identity,
@@ -1735,8 +1744,7 @@ function createDataApiServer({ pool, config }) {
         );
         sendJson(response, 200, {
           ok: true,
-          revision,
-          changeRevision
+          ...result
         }, origin, extensionId && `chrome-extension://${extensionId}`);
         return;
       }

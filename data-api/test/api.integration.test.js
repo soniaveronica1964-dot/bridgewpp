@@ -649,6 +649,8 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       expectedRevision: counterBaseRevision
     }, main.credential, extensionId);
     assert.equal(concurrentCounterWrite.status, 200, JSON.stringify(concurrentCounterWrite.body));
+    assert.equal(concurrentCounterWrite.body.contactFlowCounters.arrived, 10);
+    assert.equal(concurrentCounterWrite.body.contactFlowCounters.countedNumbers.length, 3);
     const mergedCounters = await request(
       port,
       "GET",
