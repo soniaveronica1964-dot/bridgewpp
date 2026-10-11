@@ -4346,7 +4346,12 @@
     amountInput.focus();
   }
 
-  function openCreateUserDialog(host, forcedPlatform = null, migration = null) {
+  function openCreateUserDialog(
+    host,
+    forcedPlatform = null,
+    migration = null,
+    initialAliasBase = ""
+  ) {
     const root = host.shadowRoot?.querySelector(".dialog-root");
     const phone = host.dataset.contactPhone || "";
     const accountsKey = host.dataset.accounts;
@@ -4355,9 +4360,10 @@
       : host.dataset.username;
     if (!root || (!forcedPlatform && phone.length < 4) ||
       (forcedPlatform && (!["ganamos", "multipanel"].includes(forcedPlatform) ||
-        (!migration && !existingUsername))) ||
+        (!migration && !initialAliasBase && !existingUsername))) ||
       (migration && (migration.platform !== forcedPlatform ||
-        typeof migration.base !== "string" || !migration.base))) return;
+        typeof migration.base !== "string" || !migration.base)) ||
+      (initialAliasBase && typeof initialAliasBase !== "string")) return;
     root.replaceChildren();
 
     let selectedPlatform = forcedPlatform || "ganamos";
@@ -4435,6 +4441,8 @@
       nicknameInput.value = migration.base;
       nicknameInput.readOnly = true;
       nicknameLabel.firstChild.textContent = "Usuario antiguo";
+    } else if (initialAliasBase) {
+      nicknameInput.value = initialAliasBase;
     } else if (forcedPlatform && phone.length < 4) {
       const existingPlatform = forcedPlatform === "ganamos" ? "multipanel" : "ganamos";
       nicknameInput.value = existingUsername.replace(
@@ -4463,6 +4471,7 @@
       const nickname = generatedNickname();
       const suffix = getSelectedSuffix();
       if (migration) return `${migration.base}${suffix}`;
+      if (initialAliasBase) return nickname ? `${nickname}${suffix}` : "";
       const phoneSuffix = phone.length >= 4 ? phone.slice(-4) : "";
       return nickname ? `${nickname}${phoneSuffix}${suffix}` : "";
     };
@@ -5026,6 +5035,22 @@
         button.setAttribute("aria-label", button.title);
         button.addEventListener("click", () =>
           openCreateUserDialog(host, migration.platform, migration));
+        legacyMigrationButtons.append(button);
+      }
+      if (legacyMigrations.length === 1) {
+        const migration = legacyMigrations[0];
+        const platform = migration.platform === "ganamos" ? "multipanel" : "ganamos";
+        const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "create-user-button";
+        button.dataset.mode = "full";
+        button.dataset.platform = platform;
+        button.textContent = `Nuevo Usuario ${platformName}`;
+        button.title = `Crear un usuario ${platformName} para este contacto`;
+        button.setAttribute("aria-label", button.title);
+        button.addEventListener("click", () =>
+          openCreateUserDialog(host, platform, null, migration.base));
         legacyMigrationButtons.append(button);
       }
     }
