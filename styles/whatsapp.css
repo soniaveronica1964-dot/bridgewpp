@@ -1206,6 +1206,16 @@
   gap: 7px;
 }
 
+.legacy-migration-buttons {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 7px;
+}
+
+.legacy-migration-buttons[hidden] {
+  display: none !important;
+}
+
 .deposit-action-group {
   display: flex;
   min-width: 0;

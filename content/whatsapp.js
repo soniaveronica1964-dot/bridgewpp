@@ -3311,6 +3311,7 @@
 
   function findPlatformUsernames(contactName) {
     const usernames = { ganamos: null, multipanel: null };
+    const legacy = { ganamos: null, multipanel: null };
     let firstPlatform = null;
     const aliases = contactName.trim().split(/[\s/]+/)
       .map((part) => part.replace(/^[^\p{L}\p{N}._-]+/u, "").replace(/[./]+$/, ""))
@@ -3328,9 +3329,18 @@
       if (platform) {
         firstPlatform ||= platform;
         usernames[platform] ||= `${base}${normalizedSuffix}`;
+        continue;
+      }
+      const legacyPlatform = ["n", "t"].includes(normalizedSuffix)
+        ? "ganamos"
+        : ["z", "w", "p", "b"].includes(normalizedSuffix)
+          ? "multipanel"
+          : null;
+      if (legacyPlatform && !legacy[legacyPlatform]) {
+        legacy[legacyPlatform] = { base, username: `${base}${normalizedSuffix}` };
       }
     }
-    return { ...usernames, firstPlatform };
+    return { ...usernames, legacy, firstPlatform };
   }
 
   function getOrCreateHost() {
@@ -3489,9 +3499,17 @@
     createUserButton.title = "Crear usuario";
     createUserButton.setAttribute("aria-label", "Crear usuario");
     createUserButton.hidden = true;
-    createUserButton.addEventListener("click", () =>
-      openCreateUserDialog(host, host.dataset.createPlatform || null));
+    createUserButton.addEventListener("click", () => {
+      const platform = host.dataset.createPlatform || null;
+      const migration = host.legacyMigrations?.find(({ platform: itemPlatform }) =>
+        itemPlatform === platform) || null;
+      openCreateUserDialog(host, platform, migration);
+    });
     actions.append(createUserButton);
+    const legacyMigrationButtons = document.createElement("div");
+    legacyMigrationButtons.className = "legacy-migration-buttons";
+    legacyMigrationButtons.hidden = true;
+    actions.append(legacyMigrationButtons);
     const dialogRoot = document.createElement("div");
     dialogRoot.className = "dialog-root";
     const contactUserSearch = document.createElement("section");
@@ -4328,7 +4346,7 @@
     amountInput.focus();
   }
 
-  function openCreateUserDialog(host, forcedPlatform = null) {
+  function openCreateUserDialog(host, forcedPlatform = null, migration = null) {
     const root = host.shadowRoot?.querySelector(".dialog-root");
     const phone = host.dataset.contactPhone || "";
     const accountsKey = host.dataset.accounts;
@@ -4336,7 +4354,10 @@
       ? host.dataset.multipanelUsername
       : host.dataset.username;
     if (!root || (!forcedPlatform && phone.length < 4) ||
-      (forcedPlatform && (!existingUsername || !["ganamos", "multipanel"].includes(forcedPlatform)))) return;
+      (forcedPlatform && (!["ganamos", "multipanel"].includes(forcedPlatform) ||
+        (!migration && !existingUsername))) ||
+      (migration && (migration.platform !== forcedPlatform ||
+        typeof migration.base !== "string" || !migration.base))) return;
     root.replaceChildren();
 
     let selectedPlatform = forcedPlatform || "ganamos";
@@ -4357,7 +4378,9 @@
     dialog.setAttribute("aria-modal", "true");
 
     const title = document.createElement("h2");
-    title.textContent = forcedPlatform
+    title.textContent = migration
+      ? `Migrar usuario ${forcedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"}`
+      : forcedPlatform
       ? `Crear ${forcedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"}`
       : "Crear Usuario";
     dialog.append(title);
@@ -4383,7 +4406,7 @@
         button.disabled = !destination;
         button.setAttribute("aria-pressed", "false");
         button.setAttribute("aria-label", destination
-          ? `Crear en ${destination.name}`
+          ? `${migration ? "Migrar usuario en" : "Crear en"} ${destination.name}`
           : `PC ${index} no configurada`);
         button.addEventListener("click", () => {
           if (!destination) return;
@@ -4408,7 +4431,11 @@
     nicknameInput.maxLength = 24;
     nicknameInput.required = true;
     nicknameInput.autocomplete = "off";
-    if (forcedPlatform && phone.length < 4) {
+    if (migration) {
+      nicknameInput.value = migration.base;
+      nicknameInput.readOnly = true;
+      nicknameLabel.firstChild.textContent = "Usuario antiguo";
+    } else if (forcedPlatform && phone.length < 4) {
       const existingPlatform = forcedPlatform === "ganamos" ? "multipanel" : "ganamos";
       nicknameInput.value = existingUsername.replace(
         new RegExp(`${platformSuffixes[existingPlatform]}+$`, "i"),
@@ -4435,6 +4462,7 @@
       if (remoteCreateDestinations.length && !selectedDestinationId) return "";
       const nickname = generatedNickname();
       const suffix = getSelectedSuffix();
+      if (migration) return `${migration.base}${suffix}`;
       const phoneSuffix = phone.length >= 4 ? phone.slice(-4) : "";
       return nickname ? `${nickname}${phoneSuffix}${suffix}` : "";
     };
@@ -4494,7 +4522,7 @@
         dialog.querySelector(".destination-selector button:not(:disabled)")?.focus();
         return;
       }
-      if (!nickname) {
+      if (!migration && !nickname) {
         showToast(host, phone, "Ingresá un apodo con letras o números.", "error");
         nicknameInput.focus();
         return;
@@ -4507,7 +4535,7 @@
       }
 
       create.disabled = true;
-      showToast(host, username, "Creando usuario...", "warning", toastKey);
+      showToast(host, username, migration ? "Migrando usuario..." : "Creando usuario...", "warning", toastKey);
       root.replaceChildren();
       try {
         while (true) {
@@ -4536,14 +4564,17 @@
           if (!response?.ok) throw new Error(response?.error || "La plataforma no confirmó la creación.");
           const destinationName = destinations.find((item) => item.id === selectedDestinationId)?.name;
           showToast(host, username,
-            `Usuario creado${destinationName ? ` en ${destinationName}` : ""}${response.userId ? ` (ID ${response.userId})` : ""}.`,
+            `${migration ? "Usuario migrado" : "Usuario creado"}${destinationName ? ` en ${destinationName}` : ""}${response.userId ? ` (ID ${response.userId})` : ""}.`,
             "success", toastKey);
           try {
             await navigator.clipboard.writeText(username);
             showToast(host, username, "Usuario copiado al portapapeles.", "success", toastKey);
           } catch (error) {
             console.error("[Ganamos balance extension] No se pudo copiar el usuario al portapapeles.", error);
-            showToast(host, username, "El usuario se creó, pero no se pudo copiar al portapapeles.", "error", toastKey);
+            showToast(host, username,
+              `El usuario se ${migration ? "migró" : "creó"}, pero no se pudo copiar al portapapeles.`,
+              "error",
+              toastKey);
           }
           return;
         }
@@ -4917,7 +4948,10 @@
           ? getUnscheduledContactDigits(contactTitle)
           : null)
       : null;
-    if (!usernames?.ganamos && !usernames?.multipanel && !phone) {
+    const hasLegacyUsername = Boolean(
+      usernames?.legacy?.ganamos || usernames?.legacy?.multipanel
+    );
+    if (!usernames?.ganamos && !usernames?.multipanel && !hasLegacyUsername && !phone) {
       const host = document.getElementById(HOST_ID);
       if (host) host.style.display = "none";
       activeAccountsKey = null;
@@ -4964,14 +4998,41 @@
     host.shadowRoot.querySelector(".password-reset-button").hidden = !hasPlatformUsers;
     host.shadowRoot.querySelector(".status").hidden = !hasPlatformUsers;
     const createUserButton = host.shadowRoot.querySelector(".create-user-button");
-    createUserButton.hidden = !missingPlatform && (!phone || hasPlatformUsers);
+    const legacyMigrations = ["ganamos", "multipanel"]
+      .filter((platform) => !usernames?.[platform] && usernames?.legacy?.[platform])
+      .map((platform) => ({ platform, ...usernames.legacy[platform] }));
+    host.legacyMigrations = legacyMigrations;
+    const legacyMigrationButtons = host.shadowRoot.querySelector(".legacy-migration-buttons");
+    const showStandaloneMigrations = !hasPlatformUsers && legacyMigrations.length > 0;
+    legacyMigrationButtons.replaceChildren();
+    legacyMigrationButtons.hidden = !showStandaloneMigrations;
+    if (showStandaloneMigrations) {
+      for (const migration of legacyMigrations) {
+        const platformName = migration.platform === "ganamos" ? "Ganamos" : "MultiPanel";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "create-user-button";
+        button.dataset.mode = "full";
+        button.dataset.platform = migration.platform;
+        button.textContent = `Migrar Usuario ${platformName}`;
+        button.title = `Migrar ${migration.username} a ${platformName}`;
+        button.setAttribute("aria-label", button.title);
+        button.addEventListener("click", () =>
+          openCreateUserDialog(host, migration.platform, migration));
+        legacyMigrationButtons.append(button);
+      }
+    }
+    createUserButton.hidden = showStandaloneMigrations ||
+      (!missingPlatform && (!phone || hasPlatformUsers));
     const createFromScratch = !hasPlatformUsers && Boolean(phone);
     createUserButton.dataset.mode = createFromScratch ? "full" : "compact";
     createUserButton.dataset.platform = missingPlatform || "ganamos";
+    const missingPlatformMigration = legacyMigrations.find(({ platform }) =>
+      platform === missingPlatform);
     const createUserLabel = createFromScratch
       ? "Crear Usuario"
       : missingPlatform
-      ? `Crear ${missingPlatform === "ganamos" ? "Ganamos" : "MultiPanel"}`
+      ? `${missingPlatformMigration ? "Migrar usuario" : "Crear"} ${missingPlatform === "ganamos" ? "Ganamos" : "MultiPanel"}`
       : "Crear usuario";
     createUserButton.textContent = createFromScratch ? "Crear Usuario" : "+";
     createUserButton.title = createUserLabel;
