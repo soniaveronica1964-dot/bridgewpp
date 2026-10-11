@@ -4966,7 +4966,14 @@
     const host = getOrCreateHost();
     host.style.display = "block";
     if (!selectingContactUserText) positionHost(host, title);
-    const accountsKey = JSON.stringify({ usernames, phone });
+    const accountsKey = JSON.stringify({
+      usernames: usernames && {
+        ganamos: usernames.ganamos,
+        multipanel: usernames.multipanel,
+        firstPlatform: usernames.firstPlatform
+      },
+      phone
+    });
     if (host.dataset.accounts === accountsKey && activeAccountsKey === accountsKey) return;
     if (host.dataset.accounts && host.dataset.accounts !== accountsKey) {
       host.shadowRoot.querySelector(".dialog-root").replaceChildren();
