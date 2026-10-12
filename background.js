@@ -612,7 +612,8 @@ async function requestMultiPanelForm(path, fields) {
   const mayHaveChangedData = [
     "/api/admin/manualDeposit",
     "/api/admin/register",
-    "/api/admin/updatePasswordAgent"
+    "/api/admin/updatePasswordAgent",
+    "/api/admin/updateUserWebsitesPlayer"
   ].includes(url.pathname);
   return withPlatformRequestTimeout("MultiPanel", mayHaveChangedData, async (signal) => {
     const response = await fetch(url, {
@@ -1241,6 +1242,20 @@ async function resetUserPassword(data) {
         db: user.db,
         password: userCreationPassword
       });
+      try {
+        await requestMultiPanelForm("/api/admin/updateUserWebsitesPlayer", {
+          session: user.session,
+          company: "MULT",
+          user: `${user.db}.${user.user}`,
+          websites: JSON.stringify(MULTIPANEL_WEBSITES)
+        });
+      } catch (error) {
+        const websitesError = new Error(
+          `La contraseña se actualizó, pero no se pudieron activar todos los sitios: ${error.message}`
+        );
+        if (error?.code != null) websitesError.code = error.code;
+        throw websitesError;
+      }
       return { ok: true, username: user.alias };
     } catch (error) {
       lastError = error;
@@ -1291,6 +1306,7 @@ async function getBridgeSettings() {
 function isValidActiveBonusConfig(config) {
   if (config === null) return true;
   if (!config || typeof config !== "object" || typeof config.enabled !== "boolean") return false;
+  if (config.copyBonus !== undefined && typeof config.copyBonus !== "boolean") return false;
   const isPercent = (value) => typeof value === "number" &&
     Number.isFinite(value) && value >= 0 && value <= 100;
   if (config.type === "none") return !config.enabled;

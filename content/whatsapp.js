@@ -503,6 +503,7 @@
   function validateActiveBonusConfig(config) {
     if (!config || typeof config !== "object" ||
       typeof config.enabled !== "boolean" || !ACTIVE_BONUS_TYPES.includes(config.type)) return null;
+    if (config.copyBonus !== undefined && typeof config.copyBonus !== "boolean") return null;
     if (config.type === "none") return config;
     const isPercentValid = (value) => value === null || isValidBonusPercent(value);
     const isConfiguredPercent = (value) =>
@@ -2175,11 +2176,22 @@
     cancel.className = "secondary";
     cancel.textContent = "Cancelar";
     cancel.addEventListener("click", () => root.replaceChildren());
+    const copyBonusLabel = document.createElement("label");
+    copyBonusLabel.className = "active-bonus-copy-toggle";
+    const copyBonusInput = document.createElement("input");
+    copyBonusInput.type = "checkbox";
+    copyBonusInput.checked = savedConfig?.copyBonus === true;
+    const copyBonusSwitch = document.createElement("span");
+    copyBonusSwitch.className = "active-bonus-copy-switch";
+    copyBonusSwitch.setAttribute("aria-hidden", "true");
+    const copyBonusText = document.createElement("span");
+    copyBonusText.textContent = "Copiar Bono";
+    copyBonusLabel.append(copyBonusInput, copyBonusSwitch, copyBonusText);
     const save = document.createElement("button");
     save.type = "submit";
     save.textContent = "Guardar";
     actionButtons.append(cancel, save);
-    actions.append(actionButtons);
+    actions.append(copyBonusLabel, actionButtons);
     content.append(fields, error);
     const formLayout = document.createElement("div");
     formLayout.className = "active-bonus-layout";
@@ -2236,7 +2248,8 @@
 
       const config = {
         enabled: selectedType !== "none",
-        type: selectedType
+        type: selectedType,
+        copyBonus: copyBonusInput.checked
       };
       if (selectedType === "simple") config.percent = percentages.percent.value;
       if (selectedType === "double") {
@@ -3633,7 +3646,7 @@
     const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
     try {
       await navigator.clipboard.writeText(username);
-      showToast(host, platformName, `Usuario ${username} añadido al portapapeles.`, "success",
+      showToast(host, platformName, `Copiado el usuario ${username} al portapapeles.`, "success",
         `copy-balance:${platform}`);
     } catch (error) {
       console.error(
@@ -4431,6 +4444,15 @@
         if (!response?.ok) throw new Error(response?.error || "La API no confirmó la operación.");
         const amountValue = numericAmount;
         const bonusValue = bonus?.enabled ? Number(bonus.value) : 0;
+        let bonusClipboardWriteFailed = false;
+        if (operation === "deposit" && activeBonusConfig?.copyBonus === true && bonusValue > 0) {
+          try {
+            await navigator.clipboard.writeText(String(Math.round(bonusValue)));
+          } catch (error) {
+            bonusClipboardWriteFailed = true;
+            console.error("[Ganamos balance extension] No se pudo copiar el bono al portapapeles.", error);
+          }
+        }
         const creditedAmount = operation === "deposit" ? amountValue + bonusValue : amountValue;
         const amountSummary = `$${formatCurrency(creditedAmount)}`;
         const bonusSummary = `$${formatCurrency(bonusValue)}`;
@@ -4475,6 +4497,9 @@
           if (!movementSaved) {
             showToast(host, username, "La operación se completó, pero no se pudo guardar el movimiento.", "error");
           }
+        }
+        if (bonusClipboardWriteFailed) {
+          showToast(host, username, "El depósito se completó, pero no se pudo copiar el bono al portapapeles.", "error");
         }
         void refreshBalance(host);
         if (selectedPlatform === "ganamos") void refreshAgentBalance();
@@ -4724,7 +4749,7 @@
             "success", toastKey);
           try {
             await navigator.clipboard.writeText(username);
-            showToast(host, username, "Usuario copiado al portapapeles.", "success", toastKey);
+            showToast(host, username, `Copiado el usuario ${username} al portapapeles.`, "success", toastKey);
           } catch (error) {
             console.error("[Ganamos balance extension] No se pudo copiar el usuario al portapapeles.", error);
             showToast(host, username,
@@ -4919,7 +4944,11 @@
           }
         });
         if (!response?.ok) throw new Error(response?.error || "La plataforma no confirmó la restauración de la contraseña.");
-        showToast(host, username, "Contraseña restaurada correctamente.", "success");
+        showToast(host, username,
+          selectedPlatform === "multipanel"
+            ? "Contraseña restaurada y todos los links de MultiPanel activados."
+            : "Contraseña restaurada correctamente.",
+          "success");
       } catch (error) {
         showToast(host, username, error.message || "No se pudo restaurar la contraseña.", "error");
       } finally {

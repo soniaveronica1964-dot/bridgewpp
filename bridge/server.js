@@ -178,6 +178,7 @@ function waitForTask(response, origin) {
 function validateActiveBonusConfig(config) {
   if (config === null) return true;
   if (!config || typeof config !== "object" || typeof config.enabled !== "boolean") return false;
+  if (config.copyBonus !== undefined && typeof config.copyBonus !== "boolean") return false;
   const isPercent = (value) => typeof value === "number" &&
     Number.isFinite(value) && value >= 0 && value <= 100;
   if (config.type === "none") return !config.enabled;
