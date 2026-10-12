@@ -548,12 +548,12 @@
     shortcuts.setAttribute("aria-label", "Sumar un monto rápido");
     const amounts = [
       [500, "$500"],
-      [1000, "$1K"],
-      [2500, "$2.5K"],
-      [3000, "$3K"],
-      [5000, "$5K"],
-      [10000, "$10K"],
-      [20000, "$20K"]
+      [1000, "$1.000"],
+      [2500, "$2.500"],
+      [3000, "$3.000"],
+      [5000, "$5.000"],
+      [10000, "$10.000"],
+      [20000, "$20.000"]
     ];
     for (const [shortcutAmount, label] of amounts) {
       const button = document.createElement("button");
@@ -3573,25 +3573,57 @@
     }));
   }
 
+  async function copyContactPlatformUsername(host, platform) {
+    const username = host.dataset[
+      platform === "ganamos" ? "username" : "multipanelUsername"
+    ];
+    if (!username) return;
+    const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
+    try {
+      await navigator.clipboard.writeText(username);
+      showToast(host, platformName, `Usuario ${username} añadido al portapapeles.`, "success",
+        `copy-balance:${platform}`);
+    } catch (error) {
+      console.error(
+        `[Ganamos balance extension] No se pudo copiar el usuario de ${platformName}.`,
+        error
+      );
+      showToast(host, platformName, "No se pudo copiar el usuario al portapapeles.", "error",
+        `copy-balance:${platform}`);
+    }
+  }
+
   function renderBalanceRows(host, accounts) {
     const status = host.shadowRoot?.querySelector(".status");
     const label = status?.querySelector(".balance-label");
     const refresh = status?.querySelector(".refresh");
     if (!label || !refresh) return;
 
-    label.textContent = accounts.filter(([, username]) => username).map(([platform]) => {
+    const visibleAccounts = accounts.filter(([, username]) => username);
+    label.replaceChildren();
+    visibleAccounts.forEach(([platform], index) => {
+      if (index > 0) label.append(document.createTextNode(" | "));
       const state = host.balanceStates?.[platform];
       const platformLabel = platform === "ganamos" ? "Ganamos" : "MultiPanel";
-      if (state?.loading) return `${platformLabel}: consultando...`;
-      if (state?.error) return `${platformLabel}: ${state.error}`;
-      if (state?.balance != null) {
+      const copyButton = document.createElement("button");
+      copyButton.type = "button";
+      copyButton.className = "balance-platform-copy";
+      copyButton.textContent = platformLabel;
+      copyButton.title = `Copiar usuario de ${platformLabel}`;
+      copyButton.setAttribute("aria-label", copyButton.title);
+      copyButton.addEventListener("click", () =>
+        void copyContactPlatformUsername(host, platform));
+      label.append(copyButton);
+
+      let balanceText;
+      if (state?.loading) balanceText = "consultando...";
+      else if (state?.error) balanceText = state.error;
+      else if (state?.balance != null) {
         const balance = parseBalance(state.balance);
-        return balance === null
-          ? `${platformLabel}: saldo inválido`
-          : `${platformLabel}: $${formatBalance(balance)}`;
-      }
-      return `${platformLabel}: pendiente`;
-    }).join(" | ");
+        balanceText = balance === null ? "saldo inválido" : `$${formatBalance(balance)}`;
+      } else balanceText = "pendiente";
+      label.append(document.createTextNode(`: ${balanceText}`));
+    });
     refresh.disabled = accounts.some(([platform, username]) => username && host.balanceStates?.[platform]?.loading);
   }
 
@@ -4132,7 +4164,14 @@
 
     if (operation === "withdrawal") {
       const recoveryFields = document.createElement("div");
-      recoveryFields.className = "bonus-fields";
+      recoveryFields.className = "bonus-fields bonus-fields--withdrawal";
+      const loadLastDepositButton = document.createElement("button");
+      loadLastDepositButton.type = "button";
+      loadLastDepositButton.className = "load-last-deposit";
+      loadLastDepositButton.textContent = "↻";
+      loadLastDepositButton.title = "Cargar los datos del último depósito de esta plataforma";
+      loadLastDepositButton.setAttribute("aria-label", loadLastDepositButton.title);
+      recoveryFields.append(loadLastDepositButton);
       const loadLabel = document.createElement("label");
       loadLabel.textContent = "Carga (Opcional)";
       loadAmountInput = document.createElement("input");
@@ -4154,7 +4193,7 @@
       updateWithdrawalSummary();
     }
 
-    const loadWithdrawalBalance = async (balancePlatform, fillAmount = false) => {
+    const loadWithdrawalBalance = async (balancePlatform, fillAmount = false, roundingUnit = 1) => {
       const balanceUsername = getPlatformUsername(balancePlatform);
       const response = await chrome.runtime.sendMessage({
         type: "BALANCE_REQUEST",
@@ -4170,9 +4209,11 @@
         throw new Error("El saldo disponible no es válido para un retiro.");
       }
       if (fillAmount) {
-        const wholeBalance = Math.floor(balance);
+        const wholeBalance = Math.floor(balance / roundingUnit) * roundingUnit;
         if (wholeBalance <= 0) {
-          throw new Error("El saldo disponible no alcanza para cargar un monto entero.");
+          throw new Error(roundingUnit === 1
+            ? "El saldo disponible no alcanza para cargar un monto entero."
+            : `El saldo disponible no alcanza para cargar un múltiplo de ${formatBalance(roundingUnit)}.`);
         }
         amountInput.value = new Intl.NumberFormat("es-AR").format(wholeBalance);
         formatNumericInput(amountInput, amountInput.value.length);
@@ -4182,23 +4223,86 @@
     };
 
     if (operation === "withdrawal") {
-      const loadBalanceButton = document.createElement("button");
-      loadBalanceButton.type = "button";
-      loadBalanceButton.className = "secondary";
-      loadBalanceButton.textContent = "Todo";
-      loadBalanceButton.addEventListener("click", async () => {
+      const recoveryFields = dialog.querySelector(".bonus-fields--withdrawal");
+      const loadLastDepositButton = recoveryFields?.querySelector(".load-last-deposit");
+      loadLastDepositButton?.addEventListener("click", async () => {
         const balancePlatform = selectedPlatform;
         const balanceUsername = getPlatformUsername(balancePlatform);
-        loadBalanceButton.disabled = true;
+        loadLastDepositButton.disabled = true;
         try {
-          await loadWithdrawalBalance(balancePlatform, true);
-        } catch (exception) {
-          showToast(host, balanceUsername, exception.message || "No se pudo consultar el saldo.", "error");
+          const movements = await stateStorage.getMovements({
+            contactKey: openedAccountsKey,
+            operation: "deposit",
+          });
+          if (host.dataset.accounts !== openedAccountsKey ||
+            selectedPlatform !== balancePlatform) {
+            throw new Error("El chat o la plataforma cambió; volvé a cargar el último depósito.");
+          }
+          const movement = movements.find((candidate) =>
+            candidate?.operation === "deposit" && candidate.platform === balancePlatform);
+          if (!movement) {
+            throw new Error("No hay depósitos registrados para este usuario en esta plataforma.");
+          }
+          const baseAmount = Number(movement.transactionAmount);
+          const bonusAmount = Number(movement.bonusAmount);
+          if (movement.operation !== "deposit" || movement.platform !== balancePlatform ||
+            !Number.isFinite(baseAmount) || baseAmount <= 0 ||
+            !Number.isFinite(bonusAmount) || bonusAmount < 0) {
+            throw new Error("El último depósito no tiene una carga y un bono válidos guardados.");
+          }
+          const bonusPercent = Math.round(bonusAmount / baseAmount * 10_000) / 100;
+          if (bonusPercent > 100) {
+            throw new Error("El porcentaje del último bono supera el máximo permitido.");
+          }
+          loadAmountInput.value = formatBalance(baseAmount);
+          recoveryPercentInput.value = formatBalance(bonusPercent);
+          loadAmountInput.dispatchEvent(new Event("input", { bubbles: true }));
+          recoveryPercentInput.dispatchEvent(new Event("input", { bubbles: true }));
+        } catch (error) {
+          console.error("[Ganamos balance extension] No se pudieron cargar los datos del último depósito.", error);
+          showToast(
+            host,
+            balanceUsername,
+            error.message || "No se pudieron cargar los datos del último depósito.",
+            "error"
+          );
         } finally {
-          loadBalanceButton.disabled = false;
+          loadLastDepositButton.disabled = false;
         }
       });
-      amountEntry.append(loadBalanceButton);
+    }
+
+    if (operation === "withdrawal") {
+      const createBalanceShortcut = (label, roundingUnit, title) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "secondary";
+        if (roundingUnit > 1) button.classList.add("withdrawal-rounding-shortcut");
+        button.textContent = label;
+        button.title = title;
+        button.setAttribute("aria-label", title);
+        button.addEventListener("click", async () => {
+          const balancePlatform = selectedPlatform;
+          const balanceUsername = getPlatformUsername(balancePlatform);
+          button.disabled = true;
+          try {
+            await loadWithdrawalBalance(balancePlatform, true, roundingUnit);
+          } catch (exception) {
+            showToast(host, balanceUsername, exception.message || "No se pudo consultar el saldo.", "error");
+          } finally {
+            button.disabled = false;
+          }
+        });
+        return button;
+      };
+      amountEntry.append(
+        ...[1000, 100, 10].map((roundingUnit) => createBalanceShortcut(
+          `${roundingUnit}↓`,
+          roundingUnit,
+          `Completar el saldo redondeado hacia abajo al múltiplo de ${formatBalance(roundingUnit)}`
+        )),
+        createBalanceShortcut("Todo", 1, "Completar con todo el saldo disponible")
+      );
     }
 
     dialogActions = document.createElement("div");
