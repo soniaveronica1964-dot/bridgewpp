@@ -504,6 +504,13 @@
     if (!config || typeof config !== "object" ||
       typeof config.enabled !== "boolean" || !ACTIVE_BONUS_TYPES.includes(config.type)) return null;
     if (config.copyBonus !== undefined && typeof config.copyBonus !== "boolean") return null;
+    if (config.invertDepositButtons !== undefined &&
+      typeof config.invertDepositButtons !== "boolean") return null;
+    if (config.activeAdvertising !== undefined &&
+      typeof config.activeAdvertising !== "boolean") return null;
+    if (config.advertisingPercent !== undefined &&
+      config.advertisingPercent !== null &&
+      !isValidBonusPercent(config.advertisingPercent)) return null;
     if (config.type === "none") return config;
     const isPercentValid = (value) => value === null || isValidBonusPercent(value);
     const isConfiguredPercent = (value) =>
@@ -1931,22 +1938,65 @@
     };
     const bonusName = enabled ? bonusNames[config.type] : "Sin bono";
     host.dataset.bonusType = enabled ? config.type : "none";
-    updateDepositBonusBypassVisibility(enabled);
+    host.dataset.copyBonus = String(config?.copyBonus === true);
+    host.dataset.invertDepositButtons = String(config?.invertDepositButtons === true);
+    host.dataset.activeAdvertising = String(config?.activeAdvertising === true);
+    host.dataset.advertisingReady = String(
+      config?.activeAdvertising === true && isValidBonusPercent(config.advertisingPercent)
+    );
+    updateDepositBonusBypassVisibility(enabled, config?.invertDepositButtons === true);
+    updateDepositAdvertisingVisibility(
+      config?.activeAdvertising === true && isValidBonusPercent(config.advertisingPercent)
+    );
     if (enabled && config.type === "specific") host.dataset.platform = config.platform;
     else delete host.dataset.platform;
     percentLabel.textContent = enabled ? bonusPercentages[config.type] : "";
     label.textContent = bonusName;
     button.setAttribute("aria-pressed", String(enabled));
-    button.title = enabled ? `Configurar bono activo: ${bonusName}` : "Colocar bono activo";
+    button.title = enabled ? `Configurar bono activo: ${bonusName}` : "Configuración de bono activo";
     button.setAttribute("aria-label", button.title);
   }
 
-  function updateDepositBonusBypassVisibility(bonusEnabled) {
-    const bypassButton = document.getElementById(HOST_ID)?.shadowRoot?.querySelector(".deposit-bonus-bypass");
-    if (!bypassButton) return;
+  function updateDepositBonusBypassVisibility(bonusEnabled, invertDepositButtons = false) {
     const accountHost = document.getElementById(HOST_ID);
+    const bypassButton = accountHost?.shadowRoot?.querySelector(".deposit-bonus-bypass");
+    const depositButton = accountHost?.shadowRoot?.querySelector('[data-action="deposit"]');
+    if (bypassButton) {
+      bypassButton.dataset.appliesBonus = String(invertDepositButtons);
+      bypassButton.title = !bonusEnabled
+        ? "Depositar"
+        : invertDepositButtons
+          ? "Depositar aplicando el bono automático"
+          : "Depositar sin aplicar el bono automático";
+      bypassButton.setAttribute("aria-label", bypassButton.title);
+    }
+    if (depositButton) {
+      depositButton.title = !bonusEnabled
+        ? "Depositar"
+        : invertDepositButtons
+          ? "Depositar sin aplicar el bono automático"
+          : "Depositar aplicando el bono automático";
+      depositButton.setAttribute("aria-label", depositButton.title);
+    }
+    if (!bypassButton) return;
     const hasPlatformUsers = Boolean(accountHost?.dataset.username || accountHost?.dataset.multipanelUsername);
     bypassButton.hidden = !bonusEnabled || !hasPlatformUsers;
+  }
+
+  function updateDepositAdvertisingVisibility(advertisingEnabled) {
+    const accountHost = document.getElementById(HOST_ID);
+    const advertisingButton = accountHost?.shadowRoot?.querySelector(".deposit-advertising-button");
+    if (!advertisingButton) return;
+    const hasPlatformUsers = Boolean(accountHost?.dataset.username || accountHost?.dataset.multipanelUsername);
+    advertisingButton.hidden = !advertisingEnabled || !hasPlatformUsers;
+    advertisingButton.title = "Depositar con bono de publicidad";
+    advertisingButton.setAttribute("aria-label", advertisingButton.title);
+    const bypassButton = accountHost.shadowRoot.querySelector(".deposit-bonus-bypass");
+    const actions = accountHost.shadowRoot.querySelector(".actions");
+    actions?.classList.toggle(
+      "has-advertising-deposit-buttons",
+      !advertisingButton.hidden && Boolean(bypassButton && !bypassButton.hidden)
+    );
   }
 
   async function openActiveBonusDialog(host) {
@@ -1976,8 +2026,56 @@
     dialog.className = "dialog active-bonus-dialog";
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
-    const title = document.createElement("h2");
-    title.textContent = "Colocar bono activo";
+    const tabs = document.createElement("div");
+    tabs.className = "active-bonus-tabs";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Sección del bono activo");
+    const createTab = (id, label, selected) => {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "active-bonus-tab";
+      tab.id = `active-bonus-tab-${id}`;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", `active-bonus-panel-${id}`);
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      tab.textContent = label;
+      tabs.append(tab);
+      return tab;
+    };
+    const bonusTab = createTab("bonus", "Colocar Bono Activo", true);
+    const settingsTab = createTab("settings", "Configuración", false);
+    const bonusPanel = document.createElement("div");
+    bonusPanel.className = "active-bonus-tab-panel";
+    bonusPanel.id = "active-bonus-panel-bonus";
+    bonusPanel.setAttribute("role", "tabpanel");
+    bonusPanel.setAttribute("aria-labelledby", bonusTab.id);
+    const settingsPanel = document.createElement("div");
+    settingsPanel.className = "active-bonus-tab-panel";
+    settingsPanel.id = "active-bonus-panel-settings";
+    settingsPanel.setAttribute("role", "tabpanel");
+    settingsPanel.setAttribute("aria-labelledby", settingsTab.id);
+    settingsPanel.hidden = true;
+    const setActiveTab = (tabName, moveFocus = false) => {
+      const showSettings = tabName === "settings";
+      bonusTab.setAttribute("aria-selected", String(!showSettings));
+      bonusTab.tabIndex = showSettings ? -1 : 0;
+      settingsTab.setAttribute("aria-selected", String(showSettings));
+      settingsTab.tabIndex = showSettings ? 0 : -1;
+      bonusPanel.hidden = showSettings;
+      settingsPanel.hidden = !showSettings;
+      if (moveFocus) (showSettings ? settingsTab : bonusTab).focus();
+    };
+    bonusTab.addEventListener("click", () => setActiveTab("bonus"));
+    settingsTab.addEventListener("click", () => setActiveTab("settings"));
+    tabs.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const nextTab = event.key === "Home" || event.key === "ArrowLeft"
+        ? "bonus"
+        : "settings";
+      setActiveTab(nextTab, true);
+    });
     const typeSelector = document.createElement("div");
     typeSelector.className = "active-bonus-type-selector";
     typeSelector.setAttribute("role", "group");
@@ -2176,27 +2274,63 @@
     cancel.className = "secondary";
     cancel.textContent = "Cancelar";
     cancel.addEventListener("click", () => root.replaceChildren());
-    const copyBonusLabel = document.createElement("label");
-    copyBonusLabel.className = "active-bonus-copy-toggle";
-    const copyBonusInput = document.createElement("input");
-    copyBonusInput.type = "checkbox";
-    copyBonusInput.checked = savedConfig?.copyBonus === true;
-    const copyBonusSwitch = document.createElement("span");
-    copyBonusSwitch.className = "active-bonus-copy-switch";
-    copyBonusSwitch.setAttribute("aria-hidden", "true");
-    const copyBonusText = document.createElement("span");
-    copyBonusText.textContent = "Copiar Bono";
-    copyBonusLabel.append(copyBonusInput, copyBonusSwitch, copyBonusText);
+    const createBonusSettingToggle = (text, checked) => {
+      const label = document.createElement("label");
+      label.className = "active-bonus-setting-toggle";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = checked;
+      const toggleSwitch = document.createElement("span");
+      toggleSwitch.className = "active-bonus-setting-switch";
+      toggleSwitch.setAttribute("aria-hidden", "true");
+      const toggleText = document.createElement("span");
+      toggleText.textContent = text;
+      label.append(input, toggleSwitch, toggleText);
+      return { label, input };
+    };
+    const bonusSettings = document.createElement("div");
+    bonusSettings.className = "active-bonus-settings";
+    const { label: copyBonusLabel, input: copyBonusInput } =
+      createBonusSettingToggle("Copiar Bono", savedConfig?.copyBonus === true);
+    copyBonusLabel.classList.add("active-bonus-setting-toggle--copy");
+    const { label: invertDepositButtonsLabel, input: invertDepositButtonsInput } =
+      createBonusSettingToggle("Invertir B. Dep.", savedConfig?.invertDepositButtons === true);
+    invertDepositButtonsLabel.classList.add("active-bonus-setting-toggle--invert");
+    const { label: activeAdvertisingLabel, input: activeAdvertisingInput } =
+      createBonusSettingToggle("Publi Activa", savedConfig?.activeAdvertising === true);
+    const advertisingSetting = document.createElement("span");
+    advertisingSetting.className = "active-bonus-advertising-setting";
+    const advertisingPercentLabel = document.createElement("label");
+    advertisingPercentLabel.className = "active-bonus-advertising-percent";
+    advertisingPercentLabel.textContent = "Bono Publi";
+    const advertisingPercentInput = document.createElement("input");
+    configureNumericInput(advertisingPercentInput);
+    advertisingPercentInput.inputMode = "decimal";
+    advertisingPercentInput.placeholder = "%";
+    advertisingPercentInput.setAttribute("aria-label", "Porcentaje de bono de publicidad");
+    advertisingPercentInput.value = savedConfig?.advertisingPercent == null
+      ? ""
+      : formatBalance(savedConfig.advertisingPercent);
+    advertisingPercentLabel.append(createInputAffix(advertisingPercentInput, "%", "suffix"));
+    const updateAdvertisingPercentVisibility = () => {
+      advertisingPercentLabel.hidden = !activeAdvertisingInput.checked;
+    };
+    activeAdvertisingInput.addEventListener("change", updateAdvertisingPercentVisibility);
+    updateAdvertisingPercentVisibility();
+    advertisingSetting.append(activeAdvertisingLabel, advertisingPercentLabel);
+    bonusSettings.append(copyBonusLabel, invertDepositButtonsLabel, advertisingSetting);
     const save = document.createElement("button");
     save.type = "submit";
     save.textContent = "Guardar";
     actionButtons.append(cancel, save);
-    actions.append(copyBonusLabel, actionButtons);
-    content.append(fields, error);
+    actions.append(actionButtons);
+    content.append(fields);
     const formLayout = document.createElement("div");
     formLayout.className = "active-bonus-layout";
     formLayout.append(typeSelector, content);
-    dialog.append(title, formLayout, actions);
+    bonusPanel.append(formLayout);
+    settingsPanel.append(bonusSettings);
+    dialog.append(tabs, bonusPanel, settingsPanel, error, actions);
     modal.append(dialog);
     root.append(modal);
 
@@ -2225,6 +2359,13 @@
       const relevantKeys = requiredKeys;
       const invalidPercent = relevantKeys.some((key) => percentages[key].invalid);
       const missingPercent = requiredKeys.some((key) => percentages[key].value === null);
+      const advertisingPercent = advertisingPercentInput.value
+        ? numericInputValue(advertisingPercentInput)
+        : null;
+      const invalidAdvertisingPercent = (activeAdvertisingInput.checked &&
+        advertisingPercent === null) || (advertisingPercentInput.value &&
+        (!isValidBonusPercent(advertisingPercent) ||
+          !hasValidInputPrecision(advertisingPercentInput)));
       const mysteriousOutcomes = outcomeRows.map(({ percentInput, weightInput }) => ({
         percent: numericInputValue(percentInput),
         weight: weightInput.value === "" ? null : Number(weightInput.value)
@@ -2236,9 +2377,11 @@
           !Number.isSafeInteger(outcome.weight) || outcome.weight < 0) ||
           new Set(mysteriousOutcomes.map(({ percent }) => percent)).size !== mysteriousOutcomes.length ||
           !validateMysteriousBonusOutcomes(mysteriousOutcomes));
-      if (invalidPercent || missingPercent || invalidMysteriousOutcomes) {
+      if (invalidPercent || missingPercent || invalidMysteriousOutcomes || invalidAdvertisingPercent) {
         error.textContent = invalidPercent
           ? "Los porcentajes deben estar entre 0 y 100 y tener hasta dos decimales."
+          : invalidAdvertisingPercent
+            ? "Ingresá un porcentaje de publicidad válido entre 0 y 100, con hasta dos decimales."
           : missingPercent
             ? "Completá todos los porcentajes del tipo de bono seleccionado."
             : "Revisá los porcentajes y pesos: no debe haber porcentajes repetidos y la suma de los pesos debe ser mayor que cero.";
@@ -2249,7 +2392,10 @@
       const config = {
         enabled: selectedType !== "none",
         type: selectedType,
-        copyBonus: copyBonusInput.checked
+        copyBonus: copyBonusInput.checked,
+        invertDepositButtons: invertDepositButtonsInput.checked,
+        activeAdvertising: activeAdvertisingInput.checked,
+        advertisingPercent
       };
       if (selectedType === "simple") config.percent = percentages.percent.value;
       if (selectedType === "double") {
@@ -2329,6 +2475,8 @@
     }
     definitions.append(gradient);
     icon.append(definitions);
+    const giftIcon = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    giftIcon.classList.add("active-bonus-icon-gift");
     const giftPaths = [
       ["path", "M3 10h18v11H3z"],
       ["path", "M2 7h20v3H2z"],
@@ -2339,20 +2487,72 @@
     for (const [tag, pathData] of giftPaths) {
       const path = document.createElementNS("http://www.w3.org/2000/svg", tag);
       path.setAttribute("d", pathData);
-      icon.append(path);
+      giftIcon.append(path);
     }
+    const settingsIcon = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    settingsIcon.classList.add("active-bonus-icon-settings");
+    for (const pathData of [
+      "M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Z",
+      "M19.4 13.5a7.8 7.8 0 0 0 0-3l2-1.5-2-3.5-2.3.9a7.8 7.8 0 0 0-2.6-1.5L14 2h-4l-.5 2.9a7.8 7.8 0 0 0-2.6 1.5l-2.3-.9-2 3.5 2 1.5a7.8 7.8 0 0 0 0 3l-2 1.5 2 3.5 2.3-.9a7.8 7.8 0 0 0 2.6 1.5L10 21h4l.5-2.9a7.8 7.8 0 0 0 2.6-1.5l2.3.9 2-3.5-2-1.5Z"
+    ]) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", pathData);
+      settingsIcon.append(path);
+    }
+    icon.append(giftIcon, settingsIcon);
     button.append(icon);
     button.title = "Colocar bono activo";
     button.setAttribute("aria-label", button.title);
     button.setAttribute("aria-pressed", "false");
     button.addEventListener("click", () => void openActiveBonusDialog(host));
+    const indicators = document.createElement("div");
+    indicators.className = "active-bonus-indicators";
+    indicators.setAttribute("aria-label", "Preferencias de bonos y publicidad");
+    const createIndicator = (name, label, paths) => {
+      const indicator = document.createElement("span");
+      indicator.className = `active-bonus-indicator active-bonus-indicator--${name}`;
+      indicator.title = label;
+      indicator.setAttribute("aria-label", label);
+      indicator.setAttribute("role", "img");
+      const indicatorIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      indicatorIcon.setAttribute("viewBox", "0 0 24 24");
+      indicatorIcon.setAttribute("aria-hidden", "true");
+      indicatorIcon.setAttribute("focusable", "false");
+      for (const pathData of paths) {
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", pathData);
+        indicatorIcon.append(path);
+      }
+      indicator.append(indicatorIcon);
+      return indicator;
+    };
+    indicators.append(
+      createIndicator("advertising", "Publicidad activa", [
+        "M3 11v2h3l11 5V6L6 11H3Z",
+        "M6 13l2 6h4l-2.7-4.8",
+        "M20 9c1.2 1.7 1.2 4.3 0 6"
+      ])
+    );
+    const settingsIndicators = document.createElement("span");
+    settingsIndicators.className = "active-bonus-setting-indicators";
+    settingsIndicators.append(
+      createIndicator("copy", "Copiar Bono", [
+        "M8 8V4a2 2 0 0 1 2-2h9l3 3v13a2 2 0 0 1-2 2h-4",
+        "M3 8h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Z"
+      ]),
+      createIndicator("invert", "Invertir botones de depósito", [
+        "M7 3v18m0 0-4-4m4 4 4-4",
+        "M17 21V3m0 0-4 4m4-4 4 4"
+      ])
+    );
+    indicators.append(settingsIndicators);
     const percentLabel = document.createElement("span");
     percentLabel.className = "active-bonus-percent-label";
     const label = document.createElement("span");
     label.className = "active-bonus-type-label";
     const root = document.createElement("div");
     root.className = "active-bonus-dialog-root";
-    shadow.append(stylesheet, button, percentLabel, label, root);
+    shadow.append(stylesheet, button, indicators, percentLabel, label, root);
     button.style.pointerEvents = "auto";
     root.style.pointerEvents = "auto";
     document.documentElement.append(host);
@@ -3506,10 +3706,16 @@
     }
     bypassBonusButton.append(bypassBonusIcon);
     bypassBonusButton.addEventListener("click", () =>
-      openTransactionDialog(host, "deposit", { skipAutomaticBonus: true }));
+      openTransactionDialog(host, "deposit", { depositButtonRole: "compact" }));
     void readActiveBonusConfig()
       .then((config) => {
-        updateDepositBonusBypassVisibility(Boolean(config?.enabled && config.type !== "none"));
+        updateDepositBonusBypassVisibility(
+          Boolean(config?.enabled && config.type !== "none"),
+          config?.invertDepositButtons === true
+        );
+        updateDepositAdvertisingVisibility(
+          config?.activeAdvertising === true && isValidBonusPercent(config.advertisingPercent)
+        );
       })
       .catch((error) => console.error(
         "[Ganamos balance extension] No se pudo actualizar el botón para omitir el bono.",
@@ -3519,8 +3725,31 @@
     depositButton.type = "button";
     depositButton.dataset.action = "deposit";
     depositButton.textContent = "Depositar";
-    depositButton.addEventListener("click", () => openTransactionDialog(host, "deposit"));
-    depositGroup.append(bypassBonusButton, depositButton);
+    depositButton.addEventListener("click", () =>
+      openTransactionDialog(host, "deposit", { depositButtonRole: "main" }));
+    const advertisingButton = document.createElement("button");
+    advertisingButton.type = "button";
+    advertisingButton.className = "deposit-advertising-button";
+    advertisingButton.title = "Depositar con bono de publicidad";
+    advertisingButton.setAttribute("aria-label", advertisingButton.title);
+    advertisingButton.hidden = true;
+    const advertisingIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    advertisingIcon.setAttribute("viewBox", "0 0 24 24");
+    advertisingIcon.setAttribute("aria-hidden", "true");
+    advertisingIcon.setAttribute("focusable", "false");
+    for (const pathData of [
+      "M3 11v2h3l11 5V6L6 11H3Z",
+      "M6 13l2 6h4l-2.7-4.8",
+      "M20 9c1.2 1.7 1.2 4.3 0 6"
+    ]) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", pathData);
+      advertisingIcon.append(path);
+    }
+    advertisingButton.append(advertisingIcon);
+    advertisingButton.addEventListener("click", () =>
+      void openTransactionDialog(host, "deposit", { advertisingDeposit: true }));
+    depositGroup.append(advertisingButton, bypassBonusButton, depositButton);
     actions.append(depositGroup);
     const withdrawalGroup = document.createElement("div");
     withdrawalGroup.className = "withdrawal-action-group";
@@ -3798,12 +4027,73 @@
 
     const amountLabel = document.createElement("label");
     amountLabel.textContent = "Monto";
+    const amountEntry = document.createElement("div");
+    amountEntry.className = "amount-entry";
     const amountInput = document.createElement("input");
     configureNumericInput(amountInput);
     amountInput.required = true;
     amountInput.placeholder = "-";
     amountLabel.append(createInputAffix(amountInput, "$"));
-    dialog.append(amountLabel);
+    amountEntry.append(amountLabel);
+    const createBalanceShortcut = (label, roundingUnit, title) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary withdrawal-rounding-shortcut";
+      button.textContent = label;
+      button.title = title;
+      button.setAttribute("aria-label", title);
+      button.addEventListener("click", async () => {
+        const fromPlatform = platformSelects.from.value;
+        const fromUsername = usernames[fromPlatform];
+        button.disabled = true;
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: "BALANCE_REQUEST",
+            data: { nombre: fromUsername, platform: fromPlatform, force: true }
+          });
+          if (!response?.ok) {
+            throw new Error(response?.error || "No se pudo consultar el saldo de origen.");
+          }
+          if (host.dataset.accounts !== openedAccountsKey ||
+            platformSelects.from.value !== fromPlatform) {
+            throw new Error("El chat o la plataforma de origen cambió; volvé a consultar el saldo.");
+          }
+          const balance = parseBalance(response.balance);
+          if (balance === null || balance <= 0) {
+            throw new Error("El saldo de origen no es válido para un intercambio.");
+          }
+          const wholeBalance = Math.floor(balance / roundingUnit) * roundingUnit;
+          if (wholeBalance <= 0) {
+            throw new Error(roundingUnit === 1
+              ? "El saldo disponible no alcanza para cargar un monto entero."
+              : `El saldo disponible no alcanza para cargar un múltiplo de ${formatBalance(roundingUnit)}.`);
+          }
+          amountInput.value = new Intl.NumberFormat("es-AR").format(wholeBalance);
+          formatNumericInput(amountInput, amountInput.value.length);
+          amountInput.dispatchEvent(new Event("input", { bubbles: true }));
+          amountInput.focus();
+        } catch (error) {
+          showToast(
+            host,
+            fromUsername,
+            error.message || "No se pudo consultar el saldo de origen.",
+            "error"
+          );
+        } finally {
+          button.disabled = false;
+        }
+      });
+      return button;
+    };
+    amountEntry.append(
+      ...[1000, 100, 10].map((roundingUnit) => createBalanceShortcut(
+        `${roundingUnit}↓`,
+        roundingUnit,
+        `Completar el saldo redondeado hacia abajo al múltiplo de ${formatBalance(roundingUnit)}`
+      )),
+      createBalanceShortcut("Todo", 1, "Completar con todo el saldo disponible")
+    );
+    dialog.append(amountEntry);
     dialog.append(createAmountShortcuts(amountInput));
 
     const actions = document.createElement("div");
@@ -3972,7 +4262,9 @@
 
   async function openTransactionDialog(host, operation, {
     skipAutomaticBonus = false,
-    skipMovementRecord = false
+    skipMovementRecord = false,
+    depositButtonRole = null,
+    advertisingDeposit = false
   } = {}) {
     const shadow = host.shadowRoot;
     const root = shadow?.querySelector(".dialog-root");
@@ -3982,13 +4274,31 @@
     let selectedPlatform = host.dataset.defaultPlatform ||
       (host.dataset.username ? "ganamos" : "multipanel");
     let activeBonusConfig = null;
+    let activeBonusConfigLoadFailed = false;
     if (operation === "deposit") {
       try {
         activeBonusConfig = await readActiveBonusConfig();
       } catch (error) {
+        activeBonusConfigLoadFailed = true;
         console.error("[Ganamos balance extension] No se pudo cargar el bono activo para el depósito.", error);
         showToast(host, getPlatformUsername(selectedPlatform), "No se pudo cargar el bono activo para este depósito.", "error");
       }
+    }
+    if (advertisingDeposit && activeBonusConfigLoadFailed) return;
+    if (operation === "deposit" && depositButtonRole) {
+      skipAutomaticBonus = Boolean(activeBonusConfig?.invertDepositButtons) ===
+        (depositButtonRole === "main");
+    }
+    if (advertisingDeposit &&
+      (!activeBonusConfig?.activeAdvertising ||
+        !isValidBonusPercent(activeBonusConfig.advertisingPercent))) {
+      showToast(
+        host,
+        getPlatformUsername(selectedPlatform),
+        "Activá Publi Activa y configurá un porcentaje válido antes de usar este depósito.",
+        "error"
+      );
+      return;
     }
     const mysteriousBonusPercent = activeBonusConfig?.enabled && activeBonusConfig.type === "mysterious"
       ? chooseMysteriousBonusPercent(activeBonusConfig)
@@ -4128,12 +4438,13 @@
       dialog.append(bonusFields);
 
       const numberValue = numericInputValue;
+      const maximumBonus = advertisingDeposit ? 5000 : 10000;
       const syncFixedFromPercent = () => {
         const amount = numberValue(amountInput);
         const percent = numberValue(bonusPercentInput);
         bonusInput.value = amount > 0 && percent != null
           ? new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(
-            Math.min(Math.ceil(amount * percent / 100), 10000)
+            Math.min(Math.ceil(amount * percent / 100), maximumBonus)
           )
           : "";
       };
@@ -4161,6 +4472,7 @@
       let applyingAutomaticBonusPercent = false;
       let specialBonusThresholdExceeded = (numberValue(amountInput) || 0) >= 10_000;
       const getActiveBonusPercent = () => {
+        if (advertisingDeposit) return activeBonusConfig.advertisingPercent;
         if (skipAutomaticBonus || !activeBonusConfig?.enabled) return null;
         switch (activeBonusConfig.type) {
           case "simple":
@@ -4195,6 +4507,11 @@
         if (!applyingAutomaticBonusPercent) manuallyChangedBonusPercent = true;
       });
       applyPlatformBonus = () => {
+        if (advertisingDeposit) {
+          manuallyChangedBonusPercent = false;
+          applyAutomaticBonusPercent();
+          return;
+        }
         if (skipAutomaticBonus || !activeBonusConfig?.enabled ||
           !["double", "specific"].includes(activeBonusConfig.type)) return;
         manuallyChangedBonusPercent = false;
@@ -4202,7 +4519,8 @@
       };
       amountInput.addEventListener("input", () => {
         const thresholdExceeded = (numberValue(amountInput) || 0) >= 10_000;
-        if (!skipAutomaticBonus && activeBonusConfig?.enabled && activeBonusConfig.type === "special" &&
+        if (!advertisingDeposit && !skipAutomaticBonus &&
+          activeBonusConfig?.enabled && activeBonusConfig.type === "special" &&
           thresholdExceeded !== specialBonusThresholdExceeded) {
           specialBonusThresholdExceeded = thresholdExceeded;
           manuallyChangedBonusPercent = false;
@@ -4217,7 +4535,9 @@
         getActiveBonusPercent
       );
       dialog.append(bonusPercentageShortcuts.element);
-      if (!skipAutomaticBonus && activeBonusConfig?.enabled) applyAutomaticBonusPercent();
+      if (advertisingDeposit || (!skipAutomaticBonus && activeBonusConfig?.enabled)) {
+        applyAutomaticBonusPercent();
+      }
       updateDepositSummary();
     }
 
@@ -5165,8 +5485,10 @@
     const hasPlatformUsers = Boolean(usernames?.ganamos || usernames?.multipanel);
     host.passwordResetCandidates = [];
     updateDepositBonusBypassVisibility(
-      Boolean(activeBonusHost?.dataset.bonusType && activeBonusHost.dataset.bonusType !== "none")
+      Boolean(activeBonusHost?.dataset.bonusType && activeBonusHost.dataset.bonusType !== "none"),
+      activeBonusHost?.dataset.invertDepositButtons === "true"
     );
+    updateDepositAdvertisingVisibility(activeBonusHost?.dataset.advertisingReady === "true");
     const contactUserSearch = host.shadowRoot.querySelector(".contact-user-search");
     contactUserSearch.hidden = true;
     contactUserSearch.querySelector(".contact-user-search-results").replaceChildren();
