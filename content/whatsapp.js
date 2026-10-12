@@ -53,6 +53,27 @@
   const agentBalanceToastErrors = {};
   const withdrawalChecksInProgress = new WeakSet();
 
+  function registerModalEscapeHandler(modal, onEscape) {
+    modal.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      onEscape();
+    }, true);
+    modal.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("button")
+        : null;
+      if (!button || !modal.contains(button)) return;
+      queueMicrotask(() => {
+        if (!modal.isConnected) return;
+        const input = [...modal.querySelectorAll('input:not([type="hidden"]):not(:disabled)')]
+          .find(isRenderedVisible);
+        input?.focus();
+      });
+    });
+  }
+
   stateStorage.get(["ganamosSuffix", "multiPanelSuffix"])
     .then(({ ganamosSuffix, multiPanelSuffix }) => {
       if (/^[a-z]$/i.test(ganamosSuffix || "") && /^[a-z]$/i.test(multiPanelSuffix || "") &&
@@ -1267,13 +1288,10 @@
       triggerButton.focus();
     };
     let closeAddDialog = () => {};
-    modal.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
+    registerModalEscapeHandler(modal, () => {
       if (addModal.style.display !== "none") closeAddDialog();
       else closeDialog();
-    }, true);
+    });
     modal.addEventListener("click", (event) => {
       if (event.target === modal) closeDialog();
     });
@@ -1680,13 +1698,10 @@
     const modal = document.createElement("div");
     modal.className = "modal";
     modal.style.pointerEvents = "auto";
-    modal.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
+    registerModalEscapeHandler(modal, () => {
       dialogHost.remove();
       resetButton.focus();
-    }, true);
+    });
     modal.addEventListener("click", (event) => {
       if (event.target !== modal) return;
       dialogHost.remove();
@@ -1949,12 +1964,9 @@
 
     const modal = document.createElement("div");
     modal.className = "modal";
-    modal.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
+    registerModalEscapeHandler(modal, () => {
       root.replaceChildren();
-    }, true);
+    });
     modal.addEventListener("click", (event) => {
       if (event.target === modal) root.replaceChildren();
     });
@@ -2709,12 +2721,9 @@
 
       const modal = document.createElement("div");
       modal.className = "modal recent-withdrawal-modal";
-      modal.addEventListener("keydown", (event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
+      registerModalEscapeHandler(modal, () => {
         finish(false);
-      }, true);
+      });
       modal.addEventListener("click", (event) => {
         if (event.target === modal) finish(false);
       });
@@ -2805,12 +2814,9 @@
     root.replaceChildren();
     const modal = document.createElement("div");
     modal.className = "modal";
-    modal.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
+    registerModalEscapeHandler(modal, () => {
       root.replaceChildren();
-    }, true);
+    });
     modal.addEventListener("click", (event) => {
       if (event.target === modal) root.replaceChildren();
     });
@@ -3059,6 +3065,52 @@
           details.append(bonus);
         }
         item.append(summary, details);
+        if (typeof movement.recordKey === "string" &&
+          movement.recordKey.startsWith(AGENT_MOVEMENT_PREFIX)) {
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "movement-history-delete";
+          remove.textContent = "×";
+          remove.title = "Eliminar movimiento";
+          remove.setAttribute("aria-label", "Eliminar movimiento");
+          remove.addEventListener("click", async () => {
+            const description = movement.operation === "deposit"
+              ? "depósito"
+              : movement.operation === "withdrawal"
+                ? "retiro"
+                : "intercambio";
+            if (!window.confirm(
+              `¿Eliminar este movimiento (${description} de $${formatCurrency(movement.amount)})? Esta acción no se puede deshacer.`
+            )) return;
+
+            remove.disabled = true;
+            try {
+              await stateStorage.remove(movement.recordKey);
+              storedMovements = storedMovements.filter((candidate) =>
+                candidate.recordKey !== movement.recordKey);
+              renderMovements();
+              const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+              if (balanceHost && agentBalanceContactKey === contactKey &&
+                isAgentMovementView(agentBalanceView)) {
+                void renderAgentMovements(balanceHost, agentBalanceView);
+              }
+              if (movement.operation === "withdrawal" && host.dataset.accounts === contactKey) {
+                void updateWithdrawalButtonState(host, contactKey);
+                void updateLastWithdrawalDisplay(host, contactKey);
+              }
+            } catch (error) {
+              console.error("[Ganamos balance extension] No se pudo eliminar el movimiento.", error);
+              remove.disabled = false;
+              showToast(
+                host,
+                platformUsernames[movement.platform] || "Chat",
+                error.message || "No se pudo eliminar el movimiento.",
+                "error"
+              );
+            }
+          });
+          item.append(remove);
+        }
         list.append(item);
       }
     };
@@ -3666,12 +3718,9 @@
 
     const modal = document.createElement("div");
     modal.className = "modal";
-    modal.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
+    registerModalEscapeHandler(modal, () => {
       root.replaceChildren();
-    }, true);
+    });
     modal.addEventListener("click", (event) => {
       if (event.target === modal) root.replaceChildren();
     });
@@ -3937,12 +3986,9 @@
 
     const modal = document.createElement("div");
     modal.className = "modal";
-    modal.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
+    registerModalEscapeHandler(modal, () => {
       root.replaceChildren();
-    }, true);
+    });
     const dialog = document.createElement("form");
     dialog.className = "dialog";
     dialog.dataset.operation = operation;
@@ -4473,12 +4519,9 @@
     let selectedPlatform = forcedPlatform || "ganamos";
     const modal = document.createElement("div");
     modal.className = "modal";
-    modal.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
+    registerModalEscapeHandler(modal, () => {
       root.replaceChildren();
-    }, true);
+    });
 
     const dialog = document.createElement("form");
     dialog.className = "dialog";
@@ -4717,12 +4760,9 @@
       };
       const modal = document.createElement("div");
       modal.className = "modal";
-      modal.addEventListener("keydown", (event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
+      registerModalEscapeHandler(modal, () => {
         finish(false);
-      }, true);
+      });
       modal.addEventListener("click", (event) => {
         if (event.target === modal) finish(false);
       });
@@ -4792,12 +4832,9 @@
         : availablePlatforms[0][0]);
     const modal = document.createElement("div");
     modal.className = "modal";
-    modal.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
+    registerModalEscapeHandler(modal, () => {
       root.replaceChildren();
-    }, true);
+    });
     modal.addEventListener("click", (event) => {
       if (event.target === modal) root.replaceChildren();
     });

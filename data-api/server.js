@@ -1718,7 +1718,7 @@ function createDataApiServer({ pool, config }) {
           limitClause = `LIMIT $${parameters.length}`;
         }
         const result = await pool.query(`
-          SELECT legacy_record_json
+          SELECT legacy_storage_key, legacy_record_json
           FROM agent_movements
           WHERE ${filters.join(" AND ")}
           ORDER BY timestamp_ms DESC NULLS LAST, legacy_storage_key DESC
@@ -1726,7 +1726,10 @@ function createDataApiServer({ pool, config }) {
         `, parameters);
         sendJson(response, 200, {
           ok: true,
-          movements: result.rows.map(({ legacy_record_json: movement }) => movement)
+          movements: result.rows.map(({
+            legacy_storage_key: recordKey,
+            legacy_record_json: movement
+          }) => ({ ...movement, recordKey }))
         }, origin, extensionId && `chrome-extension://${extensionId}`);
         return;
       }

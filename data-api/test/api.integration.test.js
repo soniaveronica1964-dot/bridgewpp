@@ -458,6 +458,7 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(movementHistory.status, 200, JSON.stringify(movementHistory.body));
     assert.equal(movementHistory.body.movements.length, 1);
     assert.equal(movementHistory.body.movements[0].username, "user-a");
+    assert.match(movementHistory.body.movements[0].recordKey, /^agentMovement:/);
     const invalidMovementQuery = await request(
       port,
       "GET",

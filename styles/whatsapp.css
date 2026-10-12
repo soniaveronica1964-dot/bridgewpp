@@ -2087,6 +2087,33 @@ button:disabled {
   white-space: nowrap;
 }
 
+.movement-history-delete {
+  order: 3;
+  flex: 0 0 22px;
+  width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: #ff9999;
+  background: transparent;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.movement-history-delete:hover,
+.movement-history-delete:focus-visible {
+  color: #fff;
+  background: #ff6b6b33;
+}
+
+.movement-history-delete:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
 .movement-history-details {
   order: 1;
   display: flex;
