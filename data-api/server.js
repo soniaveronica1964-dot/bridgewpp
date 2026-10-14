@@ -6,7 +6,7 @@ const { isDeepStrictEqual } = require("node:util");
 const { canonicalJson, decryptValue, encryptValue, sha256Hex, validatePayload } = require("./archive");
 
 const API_VERSION = 1;
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 8;
 const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 15_000 * 60_000;
 const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
 const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS =
@@ -141,7 +141,8 @@ function sendJson(response, status, body, origin, allowedOrigin) {
 function getRoute(request) {
   const url = new URL(request.url, "https://localhost");
   const stateReadQuery = request.method === "GET" &&
-    ["/v1/state", "/v1/state/changes", "/v1/movements"].includes(url.pathname);
+    ["/v1/state", "/v1/state/changes", "/v1/movements", "/v1/advertising-stats"]
+      .includes(url.pathname);
   if (url.hash || url.search && !stateReadQuery) {
     throw new ApiError(400, "invalid_url", "La ruta de la solicitud no es válida.");
   }
@@ -202,7 +203,7 @@ function buildReport(payload) {
     } else if (![
       "bridgeRole", "bridgeToken", "ganamosUserId", "ganamosSuffix",
       "multiPanelSuffix", "userCreationPassword", "remoteCreateDestinations",
-      "multiPanelSession", "activeBonusConfig", "contactFlowCounters",
+      "multiPanelSession", "activeBonusConfig", "hiddenAdvertisingProfiles", "contactFlowCounters",
       "agentBalanceView", "agentBalancesMinimized"
     ].includes(entry.key)) {
       unknownKeyCount++;
@@ -318,6 +319,7 @@ const PROFILE_SETTING_KEYS = new Set([
   "ganamosSuffix",
   "multiPanelSuffix",
   "activeBonusConfig",
+  "hiddenAdvertisingProfiles",
   "agentBalanceView",
   "agentBalancesMinimized"
 ]);
@@ -337,8 +339,12 @@ const PUBLIC_STATE_KEYS = new Set([
 const CONTACT_COUNTER_KEYS = new Set([
   "arrived",
   "derived",
+  "generation",
+  "generationStartedAt",
   "countedNumbers",
-  "panels"
+  "panels",
+  "adjustmentOperations",
+  "resetOperations"
 ]);
 
 function stateScope(key) {
@@ -348,6 +354,142 @@ function stateScope(key) {
 
 function isStateSecret(key, value) {
   return !PUBLIC_STATE_KEYS.has(key) && !key.startsWith("agentMovement:");
+}
+
+async function readContactFlowCounterSnapshot(pool, workspaceId, fallbackValue) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const stateResult = await client.query(`
+      SELECT generation, generation_started_at_ms, arrived_adjustment, legacy_unknown_json,
+             arrived_adjustment +
+             (SELECT COUNT(*) FROM contact_flow_count_events
+              WHERE workspace_id = state.workspace_id
+                AND generation = state.generation AND event_type = 'arrived') +
+             COALESCE((
+               SELECT SUM(delta) FROM contact_flow_adjustment_events
+               WHERE workspace_id = state.workspace_id
+                 AND generation = state.generation AND target_type = 'arrived'
+             ), 0) AS arrived
+      FROM contact_flow_state AS state
+      WHERE workspace_id = $1
+    `, [workspaceId]);
+    if (stateResult.rowCount === 0) {
+      await client.query("COMMIT");
+      return fallbackValue;
+    }
+    const state = stateResult.rows[0];
+    const generation = Number(state.generation);
+    const now = Date.now();
+    const cutoff = now - CONTACT_FLOW_COUNTED_NUMBER_TTL_MS;
+    const [arrivals, destinationTotals, panels] = await Promise.all([
+      client.query(`
+        SELECT phone, counted_at_ms FROM contact_flow_counted_numbers
+        WHERE workspace_id = $1 AND counted_at_ms > $2 AND counted_at_ms <= $3
+        ORDER BY counted_at_ms, phone
+      `, [workspaceId, cutoff, now + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS]),
+      client.query(`
+        WITH destinations AS (
+          SELECT destination_id FROM contact_flow_derived WHERE workspace_id = $1
+          UNION
+          SELECT destination_id FROM contact_flow_count_events
+          WHERE workspace_id = $1 AND event_type = 'derived'
+          UNION
+          SELECT target_id FROM contact_flow_adjustment_events
+          WHERE workspace_id = $1 AND target_type = 'destination'
+        )
+        SELECT destinations.destination_id,
+          COALESCE(derived.manual_adjustment, 0) +
+          (SELECT COUNT(*) FROM contact_flow_count_events AS events
+           WHERE events.workspace_id = $1 AND events.generation = $2
+             AND events.event_type = 'derived'
+             AND events.destination_id = destinations.destination_id) +
+          COALESCE((
+            SELECT SUM(delta) FROM contact_flow_adjustment_events AS adjustments
+            WHERE adjustments.workspace_id = $1 AND adjustments.generation = $2
+              AND adjustments.target_type = 'destination'
+              AND adjustments.target_id = destinations.destination_id
+          ), 0) AS total
+        FROM destinations
+        LEFT JOIN contact_flow_derived AS derived
+          ON derived.workspace_id = $1
+         AND derived.destination_id = destinations.destination_id
+      `, [workspaceId, generation]),
+      client.query(`
+        SELECT panels.panel_id, panels.title, panels.keyword, panels.destination_id,
+               panels.legacy_json, panels.manual_adjustment +
+               (SELECT COUNT(*) FROM contact_flow_count_events AS events
+                WHERE events.workspace_id = $1 AND events.generation = $2
+                  AND events.event_type = 'derived' AND events.panel_id = panels.panel_id)
+               AS total
+        FROM contact_flow_panels AS panels
+        WHERE panels.workspace_id = $1
+        ORDER BY panels.ordinal
+      `, [workspaceId, generation])
+    ]);
+    const derived = Object.fromEntries(destinationTotals.rows.map((row) => [
+      row.destination_id,
+      safeContactFlowCount(row.total)
+    ]));
+    const canonicalPanels = [];
+    for (const panel of panels.rows) {
+      const markers = await client.query(`
+        SELECT phone, counted_at_ms FROM contact_flow_panel_counted_numbers
+        WHERE workspace_id = $1 AND panel_id = $2
+          AND counted_at_ms > $3 AND counted_at_ms <= $4
+        ORDER BY counted_at_ms, phone
+      `, [
+        workspaceId,
+        panel.panel_id,
+        cutoff,
+        now + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS
+      ]);
+      canonicalPanels.push({
+        ...(panel.legacy_json && typeof panel.legacy_json === "object"
+          ? panel.legacy_json
+          : {}),
+        id: panel.panel_id,
+        title: panel.title,
+        keyword: panel.keyword,
+        destinationId: panel.destination_id,
+        count: safeContactFlowCount(panel.total),
+        countedNumbers: markers.rows.map(({ phone, counted_at_ms: countedAt }) => ({
+          number: phone,
+          countedAt: Number(countedAt)
+        }))
+      });
+    }
+    await client.query("COMMIT");
+    return {
+      ...(fallbackValue && typeof fallbackValue === "object" ? fallbackValue : {}),
+      ...(state.legacy_unknown_json && typeof state.legacy_unknown_json === "object"
+        ? state.legacy_unknown_json
+        : {}),
+      arrived: safeContactFlowCount(state.arrived),
+      derived,
+      generation,
+      generationStartedAt: Number(state.generation_started_at_ms),
+      countedNumbers: arrivals.rows.map(({ phone, counted_at_ms: countedAt }) => ({
+        number: phone,
+        countedAt: Number(countedAt)
+      })),
+      panels: canonicalPanels,
+      adjustmentOperations: [],
+      resetOperations: []
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        "No se pudo leer consistentemente el conteo compartido ni confirmar el rollback."
+      );
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function readExtensionState(pool, config, identity, keys) {
@@ -386,6 +528,14 @@ async function readExtensionState(pool, config, identity, keys) {
       : row.value_json;
   }
   for (const row of movements.rows) values[row.legacy_storage_key] = row.legacy_record_json;
+  if (workspaceKeys.includes("contactFlowCounters")) {
+    const counters = await readContactFlowCounterSnapshot(
+      pool,
+      identity.workspace_id,
+      values.contactFlowCounters
+    );
+    if (counters !== undefined) values.contactFlowCounters = counters;
+  }
   if (keys === null || keys.some((key) => !PROFILE_SETTING_KEYS.has(key) &&
     !PROFILE_SECRET_KEYS.has(key) && !SHARED_KEYS.has(key) &&
     !key.startsWith("agentMovement:"))) {
@@ -475,6 +625,14 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
     new Set([...keys, ...removes]).size !== keys.length + removes.length) {
     throw new ApiError(400, "invalid_state", "Las claves del estado están vacías, repetidas o superan el límite.");
   }
+  const hiddenAdvertisingProfiles = changes.hiddenAdvertisingProfiles;
+  if (Object.hasOwn(changes, "hiddenAdvertisingProfiles") &&
+    (!Array.isArray(hiddenAdvertisingProfiles) || hiddenAdvertisingProfiles.length > 1000 ||
+      hiddenAdvertisingProfiles.some((profileId) =>
+        typeof profileId !== "string" || !UUID_PATTERN.test(profileId)) ||
+      new Set(hiddenAdvertisingProfiles).size !== hiddenAdvertisingProfiles.length)) {
+    throw new ApiError(400, "invalid_state", "La lista de paneles minimizados no es válida.");
+  }
   if (sharedWrite && expectedRevision === undefined) {
     throw new ApiError(428, "state_revision_required", "Las escrituras compartidas requieren la revisión leída para evitar sobrescrituras.");
   }
@@ -560,10 +718,10 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
             workspace_id, source_profile_id, source_device_id, legacy_storage_key,
             timestamp_ms, contact_key, operation, amount_minor, platform, username,
             transaction_minor, bonus_minor, from_platform, to_platform, status,
-            verification_json, legacy_record_json, imported_at_ms
+            verification_json, legacy_record_json, imported_at_ms, is_advertising
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-            $16::jsonb, $17::jsonb, $18
+            $16::jsonb, $17::jsonb, $18, $19
           )
           ON CONFLICT (workspace_id, source_profile_id, legacy_storage_key) DO UPDATE SET
             timestamp_ms = EXCLUDED.timestamp_ms, contact_key = EXCLUDED.contact_key,
@@ -572,7 +730,8 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
             transaction_minor = EXCLUDED.transaction_minor, bonus_minor = EXCLUDED.bonus_minor,
             from_platform = EXCLUDED.from_platform, to_platform = EXCLUDED.to_platform,
             status = EXCLUDED.status, verification_json = EXCLUDED.verification_json,
-            legacy_record_json = EXCLUDED.legacy_record_json
+            legacy_record_json = EXCLUDED.legacy_record_json,
+            is_advertising = EXCLUDED.is_advertising
         `, [
           identity.workspace_id, identity.profile_id, identity.device_id, key,
           safeEpochMilliseconds(movement.timestamp),
@@ -588,63 +747,23 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
           typeof movement.status === "string" ? movement.status : null,
           movement.verification === undefined ? null : JSON.stringify(movement.verification),
           valueJson,
-          timestamp
+          timestamp,
+          movement.depositType === "advertising"
         ]);
       } else if (key === "contactFlowCounters") {
-        const counters = validateCounterSnapshot(value);
-        await client.query(`
-          INSERT INTO contact_flow_state (workspace_id, arrived, legacy_unknown_json, updated_at_ms)
-          VALUES ($1, $2, $3::jsonb, $4)
-          ON CONFLICT (workspace_id) DO UPDATE SET
-            arrived = EXCLUDED.arrived,
-            legacy_unknown_json = EXCLUDED.legacy_unknown_json,
-            revision = contact_flow_state.revision + 1,
-            updated_at_ms = EXCLUDED.updated_at_ms
-        `, [
+        const canonicalCounters = await persistContactFlowCounterSnapshot(
+          client,
           identity.workspace_id,
-          counters.arrived,
-          jsonValue(counters.legacyUnknown),
+          value,
           timestamp
-        ]);
-        await client.query("DELETE FROM contact_flow_derived WHERE workspace_id = $1", [identity.workspace_id]);
-        await client.query("DELETE FROM contact_flow_counted_numbers WHERE workspace_id = $1", [identity.workspace_id]);
-        await client.query("DELETE FROM contact_flow_panels WHERE workspace_id = $1", [identity.workspace_id]);
-        for (const [destinationId, count] of counters.derived) {
-          await client.query(`
-            INSERT INTO contact_flow_derived (workspace_id, destination_id, count)
-            VALUES ($1, $2, $3)
-          `, [identity.workspace_id, destinationId, count]);
-        }
-        for (const { number, countedAt } of counters.countedNumbers) {
-          await client.query(`
-            INSERT INTO contact_flow_counted_numbers (workspace_id, phone, counted_at_ms)
-            VALUES ($1, $2, $3)
-          `, [identity.workspace_id, number, countedAt]);
-        }
-        for (const panel of counters.panels) {
-          await client.query(`
-            INSERT INTO contact_flow_panels (
-              workspace_id, panel_id, ordinal, title, keyword, destination_id,
-              count, legacy_json
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-          `, [
-            identity.workspace_id,
-            panel.id,
-            panel.ordinal,
-            panel.title,
-            panel.keyword,
-            panel.destinationId,
-            panel.count,
-            jsonValue(panel.legacy)
-          ]);
-          for (const { number, countedAt } of panel.countedNumbers) {
-            await client.query(`
-              INSERT INTO contact_flow_panel_counted_numbers (
-                workspace_id, panel_id, phone, counted_at_ms
-              ) VALUES ($1, $2, $3, $4)
-            `, [identity.workspace_id, panel.id, number, countedAt]);
-          }
-        }
+        );
+        const canonicalCountersJson = canonicalJson(canonicalCounters);
+        await client.query(`
+          UPDATE extension_state_values
+          SET value_json = $2::jsonb, value_ciphertext = NULL
+          WHERE scope_type = 'workspace' AND scope_id = $1
+            AND storage_key = 'contactFlowCounters'
+        `, [identity.workspace_id, canonicalCountersJson]);
         await client.query(`
           INSERT INTO app_secrets (scope_type, scope_id, secret_key, ciphertext, updated_at_ms)
           VALUES ('workspace', $1, 'contactFlowCountersSource', $2, $3)
@@ -652,9 +771,10 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
             ciphertext = EXCLUDED.ciphertext, updated_at_ms = EXCLUDED.updated_at_ms
         `, [
           identity.workspace_id,
-          encryptValue(valueJson, config.encryptionKey),
+          encryptValue(canonicalCountersJson, config.encryptionKey),
           timestamp
         ]);
+        changes[key] = canonicalCounters;
       }
     }
     for (const key of removes) {
@@ -913,11 +1033,58 @@ function validateCounterSnapshot(value) {
   const legacyUnknown = Object.fromEntries(
     Object.entries(value).filter(([key]) => !CONTACT_COUNTER_KEYS.has(key))
   );
+  const adjustmentOperations = [];
+  const adjustmentOperationIds = new Set();
+  if (Array.isArray(value.adjustmentOperations)) {
+    for (const operation of value.adjustmentOperations) {
+      if (!operation || typeof operation !== "object" ||
+        typeof operation.id !== "string" || !UUID_PATTERN.test(operation.id) ||
+        adjustmentOperationIds.has(operation.id) ||
+        !Number.isSafeInteger(operation.delta) || operation.delta === 0 ||
+        (operation.target !== "arrived" &&
+          (typeof operation.target !== "string" ||
+            !operation.target.startsWith("destination:") ||
+            !operation.target.slice("destination:".length)))) continue;
+      adjustmentOperationIds.add(operation.id);
+      adjustmentOperations.push({
+        id: operation.id,
+        target: operation.target,
+        delta: operation.delta,
+        generation: Number.isSafeInteger(operation.generation) && operation.generation > 0
+          ? operation.generation
+          : null
+      });
+    }
+  }
+  const resetOperations = [];
+  const resetOperationIds = new Set();
+  if (Array.isArray(value.resetOperations)) {
+    for (const operation of value.resetOperations) {
+      if (!operation || typeof operation !== "object" ||
+        typeof operation.id !== "string" || !UUID_PATTERN.test(operation.id) ||
+        resetOperationIds.has(operation.id) ||
+        typeof operation.clearCountedNumbers !== "boolean") continue;
+      resetOperationIds.add(operation.id);
+      resetOperations.push({
+        id: operation.id,
+        clearCountedNumbers: operation.clearCountedNumbers
+      });
+    }
+  }
   return {
     arrived,
     derived,
+    generation: Number.isSafeInteger(value.generation) && value.generation > 0
+      ? value.generation
+      : 1,
+    generationStartedAt: Number.isSafeInteger(value.generationStartedAt) &&
+      value.generationStartedAt >= 0
+      ? value.generationStartedAt
+      : 0,
     countedNumbers: normalizeNumbers(value.countedNumbers),
     panels,
+    adjustmentOperations,
+    resetOperations,
     legacyUnknown
   };
 }
@@ -929,19 +1096,20 @@ function mergeContactFlowCounterSnapshots(currentValue, incomingValue, now = Dat
     countedAt <= now && now - countedAt < CONTACT_FLOW_COUNTED_NUMBER_TTL_MS);
   const mergeNumbers = (currentNumbers, incomingNumbers) => {
     const merged = new Map(activeNumbers(currentNumbers).map((entry) => [entry.number, entry.countedAt]));
-    let added = 0;
     for (const entry of activeNumbers(incomingNumbers)) {
-      if (!merged.has(entry.number)) added++;
       merged.set(entry.number, Math.max(merged.get(entry.number) || 0, entry.countedAt));
     }
-    return {
-      numbers: [...merged].map(([number, countedAt]) => ({ number, countedAt })),
-      added
-    };
+    return [...merged].map(([number, countedAt]) => ({ number, countedAt }));
   };
+  const incomingGenerationIsStale = incoming.generation < current.generation;
+  const currentGenerationNumbers = (numbers) => incomingGenerationIsStale
+    ? numbers.filter(({ countedAt }) => countedAt >= current.generationStartedAt)
+    : numbers;
   const currentDerived = Object.fromEntries(current.derived);
-  const incomingDerived = Object.fromEntries(incoming.derived);
   const mergedDerived = { ...currentDerived };
+  const alreadyAppliedResets = new Set(current.resetOperations.map(({ id }) => id));
+  const clearsMarkers = incoming.resetOperations.some((operation) =>
+    operation.clearCountedNumbers && !alreadyAppliedResets.has(operation.id));
   const currentPanels = new Map(current.panels.map((panel) => [panel.id, panel]));
   const incomingPanels = new Map(incoming.panels.map((panel) => [panel.id, panel]));
   const mergedPanels = [];
@@ -949,47 +1117,380 @@ function mergeContactFlowCounterSnapshots(currentValue, incomingValue, now = Dat
   for (const [id, currentPanel] of currentPanels) {
     const incomingPanel = incomingPanels.get(id);
     const numbers = mergeNumbers(
-      currentPanel.countedNumbers,
-      incomingPanel?.countedNumbers || []
+      clearsMarkers ? [] : currentPanel.countedNumbers,
+      clearsMarkers ? [] : currentGenerationNumbers(incomingPanel?.countedNumbers || [])
     );
     mergedPanels.push({
       ...currentPanel,
-      count: Math.max(currentPanel.count + numbers.added, incomingPanel?.count || 0),
-      countedNumbers: numbers.numbers
+      count: currentPanel.count,
+      countedNumbers: numbers
     });
-    if (incomingPanel && numbers.added) {
-      mergedDerived[currentPanel.destinationId] =
-        (mergedDerived[currentPanel.destinationId] || 0) + numbers.added;
-    }
   }
 
   for (const [id, incomingPanel] of incomingPanels) {
     if (currentPanels.has(id)) continue;
-    const numbers = mergeNumbers([], incomingPanel.countedNumbers);
+    const numbers = mergeNumbers(
+      [],
+      clearsMarkers ? [] : currentGenerationNumbers(incomingPanel.countedNumbers)
+    );
     mergedPanels.push({
       ...incomingPanel,
-      count: Math.max(incomingPanel.count, numbers.added),
-      countedNumbers: numbers.numbers
+      count: incomingPanel.count,
+      countedNumbers: numbers
     });
   }
-  for (const [destinationId, count] of Object.entries(incomingDerived)) {
-    mergedDerived[destinationId] = Math.max(mergedDerived[destinationId] || 0, count);
-  }
 
-  const countedNumbers = mergeNumbers(current.countedNumbers, incoming.countedNumbers);
-  const arrived = Math.max(current.arrived + countedNumbers.added, incoming.arrived);
-  if (!Number.isSafeInteger(arrived) ||
-    Object.values(mergedDerived).some((count) => !Number.isSafeInteger(count)) ||
-    mergedPanels.some((panel) => !Number.isSafeInteger(panel.count))) {
-    throw new ApiError(409, "invalid_contact_flow", "La combinación de contadores supera el límite seguro.");
-  }
+  const countedNumbers = mergeNumbers(
+    clearsMarkers ? [] : current.countedNumbers,
+    clearsMarkers ? [] : currentGenerationNumbers(incoming.countedNumbers)
+  );
+  const mergeOperations = (left, right) => {
+    const byId = new Map(left.map((operation) => [operation.id, operation]));
+    for (const operation of right) byId.set(operation.id, operation);
+    return [...byId.values()];
+  };
   return {
-    arrived,
+    arrived: current.arrived,
     derived: mergedDerived,
-    countedNumbers: countedNumbers.numbers,
+    generation: current.generation,
+    generationStartedAt: current.generationStartedAt,
+    countedNumbers,
     panels: mergedPanels,
+    adjustmentOperations: mergeOperations(
+      current.adjustmentOperations,
+      incoming.adjustmentOperations
+    ),
+    resetOperations: mergeOperations(current.resetOperations, incoming.resetOperations),
     ...current.legacyUnknown,
     ...incoming.legacyUnknown
+  };
+}
+
+function safeContactFlowCount(value) {
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new ApiError(409, "invalid_contact_flow", "Un contador compartido quedó fuera del rango seguro.");
+  }
+  return count;
+}
+
+async function persistContactFlowCounterSnapshot(client, workspaceId, value, timestamp) {
+  const counters = validateCounterSnapshot(value);
+  await client.query(`
+    INSERT INTO contact_flow_state (
+      workspace_id, arrived, generation_started_at_ms, updated_at_ms
+    ) VALUES ($1, 0, $2, $2)
+    ON CONFLICT (workspace_id) DO NOTHING
+  `, [workspaceId, timestamp]);
+
+  let state = await client.query(`
+    SELECT generation, generation_started_at_ms
+    FROM contact_flow_state
+    WHERE workspace_id = $1
+    FOR UPDATE
+  `, [workspaceId]);
+  let generation = Number(state.rows[0].generation);
+  let generationStartedAt = Number(state.rows[0].generation_started_at_ms);
+  for (const operation of counters.resetOperations) {
+    const nextGeneration = generation + 1;
+    const inserted = await client.query(`
+      INSERT INTO contact_flow_reset_operations (
+        workspace_id, operation_id, generation, clear_counted_numbers, created_at_ms
+      ) VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (workspace_id, operation_id) DO NOTHING
+      RETURNING operation_id
+    `, [
+      workspaceId,
+      operation.id,
+      nextGeneration,
+      operation.clearCountedNumbers,
+      timestamp
+    ]);
+    if (inserted.rowCount === 0) {
+      const existing = await client.query(`
+        SELECT clear_counted_numbers FROM contact_flow_reset_operations
+        WHERE workspace_id = $1 AND operation_id = $2
+      `, [workspaceId, operation.id]);
+      if (existing.rows[0]?.clear_counted_numbers !== operation.clearCountedNumbers) {
+        throw new ApiError(
+          409,
+          "contact_flow_operation_conflict",
+          "El identificador del reinicio ya se usó con otra operación."
+        );
+      }
+      continue;
+    }
+    generation = nextGeneration;
+    generationStartedAt = timestamp;
+    await client.query(`
+      UPDATE contact_flow_state
+      SET generation = $2, generation_started_at_ms = $3,
+          arrived = 0, arrived_adjustment = 0,
+          revision = revision + 1, updated_at_ms = $3
+      WHERE workspace_id = $1
+    `, [workspaceId, generation, timestamp]);
+    await client.query(`
+      UPDATE contact_flow_derived
+      SET count = 0, manual_adjustment = 0
+      WHERE workspace_id = $1
+    `, [workspaceId]);
+    await client.query(`
+      UPDATE contact_flow_panels
+      SET count = 0, manual_adjustment = 0
+      WHERE workspace_id = $1
+    `, [workspaceId]);
+    if (operation.clearCountedNumbers) {
+      await client.query(
+        "DELETE FROM contact_flow_counted_numbers WHERE workspace_id = $1",
+        [workspaceId]
+      );
+      await client.query(
+        "DELETE FROM contact_flow_panel_counted_numbers WHERE workspace_id = $1",
+        [workspaceId]
+      );
+    }
+  }
+
+  for (const operation of counters.adjustmentOperations) {
+    const isArrived = operation.target === "arrived";
+    const targetType = isArrived ? "arrived" : "destination";
+    const targetId = isArrived ? null : operation.target.slice("destination:".length);
+    const operationGeneration = operation.generation === null
+      ? generation
+      : Math.min(operation.generation, generation);
+    const inserted = await client.query(`
+      INSERT INTO contact_flow_adjustment_events (
+        workspace_id, operation_id, generation, target_type, target_id, delta, created_at_ms
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (workspace_id, operation_id) DO NOTHING
+      RETURNING operation_id
+    `, [
+      workspaceId,
+      operation.id,
+      operationGeneration,
+      targetType,
+      targetId,
+      operation.delta,
+      timestamp
+    ]);
+    if (inserted.rowCount !== 0) continue;
+    const existing = await client.query(`
+      SELECT generation, target_type, target_id, delta
+      FROM contact_flow_adjustment_events
+      WHERE workspace_id = $1 AND operation_id = $2
+    `, [workspaceId, operation.id]);
+    const stored = existing.rows[0];
+    if (!stored || Number(stored.generation) !== operationGeneration ||
+      stored.target_type !== targetType || stored.target_id !== targetId ||
+      Number(stored.delta) !== operation.delta) {
+      throw new ApiError(
+        409,
+        "contact_flow_operation_conflict",
+        "El identificador del ajuste ya se usó con otra operación."
+      );
+    }
+  }
+
+  await client.query(`
+    DELETE FROM contact_flow_counted_numbers
+    WHERE workspace_id = $1 AND counted_at_ms <= $2
+  `, [workspaceId, timestamp - CONTACT_FLOW_COUNTED_NUMBER_TTL_MS]);
+
+  const panelIds = counters.panels.map(({ id }) => id);
+  await client.query(
+    "UPDATE contact_flow_panels SET ordinal = ordinal + 1000 WHERE workspace_id = $1",
+    [workspaceId]
+  );
+  await client.query(`
+    DELETE FROM contact_flow_panels
+    WHERE workspace_id = $1 AND NOT (panel_id = ANY($2::text[]))
+  `, [workspaceId, panelIds]);
+  for (const panel of counters.panels) {
+    await client.query(`
+      INSERT INTO contact_flow_panels (
+        workspace_id, panel_id, ordinal, title, keyword, destination_id,
+        count, legacy_json
+      ) VALUES ($1, $2, $3, $4, $5, $6, 0, $7::jsonb)
+      ON CONFLICT (workspace_id, panel_id) DO UPDATE SET
+        ordinal = EXCLUDED.ordinal,
+        title = EXCLUDED.title,
+        keyword = EXCLUDED.keyword,
+        destination_id = EXCLUDED.destination_id,
+        legacy_json = EXCLUDED.legacy_json
+    `, [
+      workspaceId,
+      panel.id,
+      panel.ordinal,
+      panel.title,
+      panel.keyword,
+      panel.destinationId,
+      jsonValue(panel.legacy)
+    ]);
+  }
+
+  const activeNumbers = counters.countedNumbers.filter(({ countedAt }) =>
+    countedAt <= timestamp + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS &&
+    timestamp - countedAt < CONTACT_FLOW_COUNTED_NUMBER_TTL_MS &&
+    countedAt >= generationStartedAt);
+  for (const { number, countedAt } of activeNumbers) {
+    const marker = await client.query(`
+      INSERT INTO contact_flow_counted_numbers (workspace_id, phone, counted_at_ms)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (workspace_id, phone) DO NOTHING
+      RETURNING phone
+    `, [workspaceId, number, timestamp]);
+    if (marker.rowCount === 0) continue;
+    await client.query(`
+      INSERT INTO contact_flow_count_events (
+        workspace_id, generation, event_type, phone, counted_at_ms
+      ) VALUES ($1, $2, 'arrived', $3, $4)
+    `, [workspaceId, generation, number, timestamp]);
+  }
+
+  for (const panel of counters.panels) {
+    await client.query(`
+      DELETE FROM contact_flow_panel_counted_numbers
+      WHERE workspace_id = $1 AND panel_id = $2 AND counted_at_ms <= $3
+    `, [
+      workspaceId,
+      panel.id,
+      timestamp - CONTACT_FLOW_COUNTED_NUMBER_TTL_MS
+    ]);
+    const panelNumbers = panel.countedNumbers.filter(({ countedAt }) =>
+      countedAt <= timestamp + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS &&
+      timestamp - countedAt < CONTACT_FLOW_COUNTED_NUMBER_TTL_MS &&
+      countedAt >= generationStartedAt);
+    for (const { number, countedAt } of panelNumbers) {
+      const marker = await client.query(`
+        INSERT INTO contact_flow_panel_counted_numbers (
+          workspace_id, panel_id, phone, counted_at_ms
+        ) VALUES ($1, $2, $3, $4)
+        ON CONFLICT (workspace_id, panel_id, phone) DO NOTHING
+        RETURNING phone
+      `, [workspaceId, panel.id, number, timestamp]);
+      if (marker.rowCount === 0) continue;
+      await client.query(`
+        INSERT INTO contact_flow_count_events (
+          workspace_id, generation, event_type, panel_id, destination_id, phone, counted_at_ms
+        ) VALUES ($1, $2, 'derived', $3, $4, $5, $6)
+      `, [
+        workspaceId,
+        generation,
+        panel.id,
+        panel.destinationId,
+        number,
+        timestamp
+      ]);
+    }
+  }
+
+  const arrivedResult = await client.query(`
+    SELECT
+      state.arrived_adjustment +
+      COUNT(events.event_id) +
+      COALESCE((
+        SELECT SUM(delta) FROM contact_flow_adjustment_events
+        WHERE workspace_id = $1 AND generation = $2 AND target_type = 'arrived'
+      ), 0) AS total
+    FROM contact_flow_state AS state
+    LEFT JOIN contact_flow_count_events AS events
+      ON events.workspace_id = state.workspace_id
+     AND events.generation = state.generation
+     AND events.event_type = 'arrived'
+    WHERE state.workspace_id = $1
+    GROUP BY state.arrived_adjustment
+  `, [workspaceId, generation]);
+  const arrived = safeContactFlowCount(arrivedResult.rows[0]?.total ?? 0);
+  await client.query(`
+    UPDATE contact_flow_state
+    SET arrived = $2, legacy_unknown_json = $3::jsonb, updated_at_ms = $4
+    WHERE workspace_id = $1
+  `, [workspaceId, arrived, jsonValue(counters.legacyUnknown), timestamp]);
+
+  const destinationIdsResult = await client.query(`
+    SELECT destination_id FROM contact_flow_derived WHERE workspace_id = $1
+    UNION
+    SELECT destination_id FROM contact_flow_count_events
+    WHERE workspace_id = $1 AND event_type = 'derived'
+    UNION
+    SELECT destination_id FROM contact_flow_panels WHERE workspace_id = $1
+    UNION
+    SELECT target_id FROM contact_flow_adjustment_events
+    WHERE workspace_id = $1 AND target_type = 'destination'
+  `, [workspaceId]);
+  const derived = {};
+  for (const { destination_id: destinationId } of destinationIdsResult.rows) {
+    const result = await client.query(`
+      SELECT
+        COALESCE((
+          SELECT manual_adjustment FROM contact_flow_derived
+          WHERE workspace_id = $1 AND destination_id = $2
+        ), 0) +
+        (SELECT COUNT(*) FROM contact_flow_count_events
+         WHERE workspace_id = $1 AND generation = $3
+           AND event_type = 'derived' AND destination_id = $2) +
+        COALESCE((
+          SELECT SUM(delta) FROM contact_flow_adjustment_events
+          WHERE workspace_id = $1 AND generation = $3
+            AND target_type = 'destination' AND target_id = $2
+        ), 0) AS total
+    `, [workspaceId, destinationId, generation]);
+    derived[destinationId] = safeContactFlowCount(result.rows[0].total);
+    await client.query(`
+      INSERT INTO contact_flow_derived (workspace_id, destination_id, count)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (workspace_id, destination_id) DO UPDATE SET count = EXCLUDED.count
+    `, [workspaceId, destinationId, derived[destinationId]]);
+  }
+
+  const canonicalPanels = [];
+  for (const panel of counters.panels) {
+    const result = await client.query(`
+      SELECT
+        panel.manual_adjustment +
+        (SELECT COUNT(*) FROM contact_flow_count_events
+         WHERE workspace_id = $1 AND generation = $3
+           AND event_type = 'derived' AND panel_id = $2) AS total
+      FROM contact_flow_panels AS panel
+      WHERE panel.workspace_id = $1 AND panel.panel_id = $2
+    `, [workspaceId, panel.id, generation]);
+    const count = safeContactFlowCount(result.rows[0]?.total ?? 0);
+    await client.query(`
+      UPDATE contact_flow_panels SET count = $3
+      WHERE workspace_id = $1 AND panel_id = $2
+    `, [workspaceId, panel.id, count]);
+    const markers = await client.query(`
+      SELECT phone, counted_at_ms FROM contact_flow_panel_counted_numbers
+      WHERE workspace_id = $1 AND panel_id = $2
+      ORDER BY counted_at_ms, phone
+    `, [workspaceId, panel.id]);
+    canonicalPanels.push({
+      ...panel,
+      count,
+      countedNumbers: markers.rows.map(({ phone, counted_at_ms: countedAt }) => ({
+        number: phone,
+        countedAt: Number(countedAt)
+      }))
+    });
+  }
+  const arrivedMarkers = await client.query(`
+    SELECT phone, counted_at_ms FROM contact_flow_counted_numbers
+    WHERE workspace_id = $1
+    ORDER BY counted_at_ms, phone
+  `, [workspaceId]);
+  return {
+    arrived,
+    derived,
+    generation,
+    generationStartedAt,
+    countedNumbers: arrivedMarkers.rows.map(({ phone, counted_at_ms: countedAt }) => ({
+      number: phone,
+      countedAt: Number(countedAt)
+    })),
+    panels: canonicalPanels,
+    adjustmentOperations: [],
+    resetOperations: [],
+    ...counters.legacyUnknown
   };
 }
 
@@ -1146,10 +1647,10 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
             workspace_id, source_profile_id, source_device_id, legacy_storage_key,
             timestamp_ms, contact_key, operation, amount_minor, platform, username,
             transaction_minor, bonus_minor, from_platform, to_platform, status,
-            verification_json, legacy_record_json, imported_at_ms
+            verification_json, legacy_record_json, imported_at_ms, is_advertising
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-            $16::jsonb, $17::jsonb, $18
+            $16::jsonb, $17::jsonb, $18, $19
           )
           ON CONFLICT (workspace_id, source_profile_id, legacy_storage_key) DO NOTHING
           RETURNING legacy_storage_key
@@ -1167,7 +1668,8 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
           typeof movement.toPlatform === "string" ? movement.toPlatform : null,
           typeof movement.status === "string" ? movement.status : null,
           movement.verification === undefined ? null : jsonValue(movement.verification),
-          jsonValue(value), now
+          jsonValue(value), now,
+          movement.depositType === "advertising"
         ]);
         if (insertResult.rowCount === 0) {
           const existing = await client.query(`
@@ -1184,13 +1686,21 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
         const counters = validateCounterSnapshot(value);
         await client.query(`
           INSERT INTO contact_flow_state (
-            workspace_id, arrived, legacy_unknown_json, updated_at_ms
-          ) VALUES ($1, $2, $3::jsonb, $4)
-        `, [identity.workspace_id, counters.arrived, jsonValue(counters.legacyUnknown), now]);
+            workspace_id, arrived, generation_started_at_ms, arrived_adjustment,
+            legacy_unknown_json, updated_at_ms
+          ) VALUES ($1, $2, $3, $2, $4::jsonb, $5)
+        `, [
+          identity.workspace_id,
+          counters.arrived,
+          now,
+          jsonValue(counters.legacyUnknown),
+          now
+        ]);
         for (const [destinationId, count] of counters.derived) {
           await client.query(`
-            INSERT INTO contact_flow_derived (workspace_id, destination_id, count)
-            VALUES ($1, $2, $3)
+            INSERT INTO contact_flow_derived (
+              workspace_id, destination_id, count, manual_adjustment
+            ) VALUES ($1, $2, $3, $3)
           `, [identity.workspace_id, destinationId, count]);
         }
         for (const { number, countedAt } of counters.countedNumbers) {
@@ -1203,8 +1713,8 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
           await client.query(`
             INSERT INTO contact_flow_panels (
               workspace_id, panel_id, ordinal, title, keyword, destination_id,
-              count, legacy_json
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+              count, manual_adjustment, legacy_json
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8::jsonb)
           `, [
             identity.workspace_id, panel.id, panel.ordinal, panel.title,
             panel.keyword, panel.destinationId, panel.count, jsonValue(panel.legacy)
@@ -1673,13 +2183,235 @@ function createDataApiServer({ pool, config }) {
         return;
       }
 
+      if (route === "/v1/advertising-stats" && request.method === "GET") {
+        const identity = await authenticate(request);
+        const query = new URL(request.url, "https://localhost").searchParams;
+        const hasFrom = query.has("from");
+        const hasTo = query.has("to");
+        if ([...query.keys()].some((key) =>
+          !["days", "from", "to", "excludedProfiles"].includes(key)) ||
+          ["days", "from", "to", "excludedProfiles"].some((key) => query.getAll(key).length > 1) ||
+          hasFrom !== hasTo || query.has("days") && hasFrom) {
+          throw new ApiError(400, "invalid_advertising_stats_query", "Los filtros de estadísticas no son válidos.");
+        }
+        const daysValue = query.get("days");
+        if (daysValue !== null && !["7", "30", "90"].includes(daysValue)) {
+          throw new ApiError(400, "invalid_advertising_stats_query", "El período debe ser de 7, 30, 90 días o todo el historial.");
+        }
+        const fromValue = query.get("from");
+        const toValue = query.get("to");
+        const from = fromValue === null ? null : Number(fromValue);
+        const to = toValue === null ? null : Number(toValue);
+        if ((fromValue !== null && (!/^\d+$/.test(fromValue) || !Number.isSafeInteger(from))) ||
+          (toValue !== null && (!/^\d+$/.test(toValue) || !Number.isSafeInteger(to))) ||
+          from !== null && to !== null && (from < 0 || to <= from)) {
+          throw new ApiError(400, "invalid_advertising_stats_query", "El rango de fechas no es válido.");
+        }
+        let excludedProfiles = null;
+        const excludedProfilesValue = query.get("excludedProfiles");
+        if (excludedProfilesValue !== null) {
+          try {
+            excludedProfiles = JSON.parse(excludedProfilesValue);
+          } catch {
+            throw new ApiError(400, "invalid_advertising_stats_query", "La lista de paneles minimizados no es válida.");
+          }
+          if (!Array.isArray(excludedProfiles) || excludedProfiles.length > 1000 ||
+            excludedProfiles.some((profileId) =>
+              typeof profileId !== "string" || !UUID_PATTERN.test(profileId)) ||
+            new Set(excludedProfiles).size !== excludedProfiles.length) {
+            throw new ApiError(400, "invalid_advertising_stats_query", "La lista de paneles minimizados no es válida.");
+          }
+          if (!excludedProfiles.length) excludedProfiles = null;
+        }
+        const since = daysValue === null ? from : Date.now() - Number(daysValue) * 24 * 60 * 60 * 1000;
+        const until = to;
+        const [summary, platforms, profiles, hiddenProfiles] = await Promise.all([
+          pool.query(`
+            WITH advertising AS (
+              SELECT contact_key, timestamp_ms, amount_minor, transaction_minor,
+                     bonus_minor, platform, status, source_profile_id
+              FROM agent_movements
+              WHERE workspace_id = $1
+                AND is_advertising
+                AND operation = 'deposit'
+                AND ($4::uuid[] IS NULL OR source_profile_id <> ALL($4::uuid[]))
+                AND ($2::bigint IS NULL OR timestamp_ms >= $2)
+                AND ($3::bigint IS NULL OR timestamp_ms < $3)
+            ),
+            confirmed_advertising AS (
+              SELECT * FROM advertising
+              WHERE status IS DISTINCT FROM 'pending-verification'
+            ),
+            cohort AS (
+              SELECT contact_key, MIN(timestamp_ms) AS first_advertising_at
+              FROM confirmed_advertising
+              WHERE contact_key IS NOT NULL
+              GROUP BY contact_key
+            )
+            SELECT
+              (SELECT count(*)::text FROM confirmed_advertising) AS deposits,
+              (SELECT count(DISTINCT contact_key)::text FROM confirmed_advertising
+               WHERE contact_key IS NOT NULL) AS customers,
+              COALESCE((SELECT sum(transaction_minor)::text FROM confirmed_advertising), '0')
+                AS transaction_minor,
+              COALESCE((SELECT sum(bonus_minor)::text FROM confirmed_advertising), '0')
+                AS bonus_minor,
+              COALESCE((SELECT sum(amount_minor)::text FROM confirmed_advertising), '0')
+                AS credited_minor,
+              (SELECT count(*)::text FROM advertising
+               WHERE status = 'pending-verification') AS pending_deposits,
+              (SELECT count(*)::text FROM cohort) AS cohort_customers,
+              (SELECT count(*)::text FROM cohort
+               WHERE first_advertising_at <=
+                 floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 604800000)
+                AS eligible_7_day_cohort,
+              (SELECT count(*)::text FROM cohort
+               WHERE first_advertising_at <=
+                 floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 2592000000)
+                AS eligible_30_day_cohort,
+              (SELECT count(*)::text FROM cohort
+               WHERE EXISTS (
+                 SELECT 1 FROM agent_movements AS later
+                 WHERE later.workspace_id = $1
+                   AND later.contact_key = cohort.contact_key
+                   AND later.operation = 'deposit'
+                   AND ($4::uuid[] IS NULL OR later.source_profile_id <> ALL($4::uuid[]))
+                   AND later.status IS DISTINCT FROM 'pending-verification'
+                   AND later.timestamp_ms > cohort.first_advertising_at
+               )) AS customers_with_later_deposit,
+              (SELECT count(*)::text FROM cohort
+               WHERE EXISTS (
+                 SELECT 1 FROM agent_movements AS later
+                 WHERE later.workspace_id = $1
+                   AND later.contact_key = cohort.contact_key
+                   AND later.operation = 'deposit'
+                   AND later.is_advertising
+                   AND ($4::uuid[] IS NULL OR later.source_profile_id <> ALL($4::uuid[]))
+                   AND later.status IS DISTINCT FROM 'pending-verification'
+                   AND later.timestamp_ms > cohort.first_advertising_at
+               )) AS customers_with_later_advertising,
+              (SELECT count(*)::text FROM cohort
+               WHERE EXISTS (
+                 SELECT 1 FROM agent_movements AS later
+                 WHERE later.workspace_id = $1
+                   AND later.contact_key = cohort.contact_key
+                   AND later.operation = 'deposit'
+                   AND ($4::uuid[] IS NULL OR later.source_profile_id <> ALL($4::uuid[]))
+                   AND later.status IS DISTINCT FROM 'pending-verification'
+                   AND later.timestamp_ms > cohort.first_advertising_at
+                   AND later.timestamp_ms <= cohort.first_advertising_at + 604800000
+               )) AS customers_returned_within_7_days,
+              (SELECT count(*)::text FROM cohort
+               WHERE EXISTS (
+                 SELECT 1 FROM agent_movements AS later
+                 WHERE later.workspace_id = $1
+                   AND later.contact_key = cohort.contact_key
+                   AND later.operation = 'deposit'
+                   AND ($4::uuid[] IS NULL OR later.source_profile_id <> ALL($4::uuid[]))
+                   AND later.status IS DISTINCT FROM 'pending-verification'
+                   AND later.timestamp_ms > cohort.first_advertising_at
+                   AND later.timestamp_ms <= cohort.first_advertising_at + 2592000000
+               )) AS customers_returned_within_30_days
+          `, [identity.workspace_id, since, until, excludedProfiles]),
+          pool.query(`
+            SELECT movements.platform,
+                   count(*)::text AS deposits,
+                   count(DISTINCT movements.contact_key)::text AS customers,
+                   count(DISTINCT movements.contact_key) FILTER (WHERE EXISTS (
+                     SELECT 1 FROM agent_movements AS later
+                     WHERE later.workspace_id = movements.workspace_id
+                       AND later.contact_key = movements.contact_key
+                       AND later.operation = 'deposit'
+                       AND ($4::uuid[] IS NULL OR later.source_profile_id <> ALL($4::uuid[]))
+                       AND later.status IS DISTINCT FROM 'pending-verification'
+                       AND later.timestamp_ms > movements.timestamp_ms
+                   ))::text AS returning_customers,
+                   COALESCE(sum(transaction_minor)::text, '0') AS transaction_minor,
+                   COALESCE(sum(bonus_minor)::text, '0') AS bonus_minor,
+                   COALESCE(sum(amount_minor)::text, '0') AS credited_minor
+            FROM agent_movements AS movements
+            WHERE movements.workspace_id = $1
+              AND movements.is_advertising
+              AND movements.operation = 'deposit'
+              AND movements.status IS DISTINCT FROM 'pending-verification'
+              AND ($4::uuid[] IS NULL OR movements.source_profile_id <> ALL($4::uuid[]))
+              AND ($2::bigint IS NULL OR movements.timestamp_ms >= $2)
+              AND ($3::bigint IS NULL OR movements.timestamp_ms < $3)
+            GROUP BY movements.platform
+            ORDER BY movements.platform
+          `, [identity.workspace_id, since, until, excludedProfiles]),
+          pool.query(`
+            SELECT movements.source_profile_id::text AS profile_id,
+                   devices.display_name,
+                   count(*)::text AS deposits,
+                   count(DISTINCT movements.contact_key)::text AS customers,
+                   count(DISTINCT movements.contact_key) FILTER (WHERE EXISTS (
+                     SELECT 1 FROM agent_movements AS later
+                     WHERE later.workspace_id = movements.workspace_id
+                       AND later.contact_key = movements.contact_key
+                       AND later.operation = 'deposit'
+                       AND ($4::uuid[] IS NULL OR later.source_profile_id <> ALL($4::uuid[]))
+                       AND later.status IS DISTINCT FROM 'pending-verification'
+                       AND later.timestamp_ms > movements.timestamp_ms
+                   ))::text AS returning_customers,
+                   COALESCE(sum(movements.transaction_minor)::text, '0') AS transaction_minor,
+                   COALESCE(sum(movements.bonus_minor)::text, '0') AS bonus_minor,
+                   COALESCE(sum(movements.amount_minor)::text, '0') AS credited_minor
+            FROM agent_movements AS movements
+            JOIN extension_profiles AS profiles
+              ON profiles.profile_id = movements.source_profile_id
+             AND profiles.workspace_id = movements.workspace_id
+            JOIN enrolled_devices AS devices
+              ON devices.device_id = movements.source_device_id
+             AND devices.workspace_id = movements.workspace_id
+            WHERE movements.workspace_id = $1
+              AND movements.is_advertising
+              AND movements.operation = 'deposit'
+              AND movements.status IS DISTINCT FROM 'pending-verification'
+              AND ($4::uuid[] IS NULL OR movements.source_profile_id <> ALL($4::uuid[]))
+              AND ($2::bigint IS NULL OR movements.timestamp_ms >= $2)
+              AND ($3::bigint IS NULL OR movements.timestamp_ms < $3)
+            GROUP BY movements.source_profile_id, devices.display_name
+            ORDER BY devices.display_name, movements.source_profile_id
+          `, [identity.workspace_id, since, until, excludedProfiles]),
+          excludedProfiles?.length
+            ? pool.query(`
+                SELECT profiles.profile_id::text AS profile_id,
+                       devices.display_name
+                FROM extension_profiles AS profiles
+                JOIN enrolled_devices AS devices
+                  ON devices.device_id = profiles.device_id
+                 AND devices.workspace_id = profiles.workspace_id
+                WHERE profiles.workspace_id = $1
+                  AND profiles.profile_id = ANY($2::uuid[])
+                ORDER BY devices.display_name, profiles.profile_id
+              `, [identity.workspace_id, excludedProfiles])
+            : { rows: [] }
+        ]);
+        sendJson(response, 200, {
+          ok: true,
+          days: daysValue === null ? null : Number(daysValue),
+          from,
+          to,
+          summary: summary.rows[0],
+          platforms: platforms.rows,
+          profiles: profiles.rows,
+          hiddenProfiles: hiddenProfiles.rows
+        }, origin, extensionId && `chrome-extension://${extensionId}`);
+        return;
+      }
+
       if (route === "/v1/movements" && request.method === "GET") {
         const identity = await authenticate(request);
         const query = new URL(request.url, "https://localhost").searchParams;
-        const allowedParameters = new Set(["contactKey", "operation", "since", "limit"]);
+        const allowedParameters = new Set(["contactKey", "operation", "since", "limit", "source"]);
         if ([...query.keys()].some((key) => !allowedParameters.has(key)) ||
           [...allowedParameters].some((key) => query.getAll(key).length > 1)) {
           throw new ApiError(400, "invalid_movement_query", "Los filtros de movimientos no son válidos.");
+        }
+        const source = query.get("source");
+        if (source !== null && source !== "profile") {
+          throw new ApiError(400, "invalid_movement_query", "El origen consultado no es válido.");
         }
         const contactKey = query.get("contactKey");
         if (contactKey !== null &&
@@ -1700,6 +2432,10 @@ function createDataApiServer({ pool, config }) {
         }
         const parameters = [identity.workspace_id];
         const filters = ["workspace_id = $1"];
+        if (source === "profile") {
+          parameters.push(identity.profile_id);
+          filters.push(`source_profile_id = $${parameters.length}`);
+        }
         if (contactKey !== null) {
           parameters.push(contactKey);
           filters.push(`contact_key = $${parameters.length}`);

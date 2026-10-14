@@ -14,6 +14,7 @@ const PROFILE_RUNTIME_STATE_KEYS = [
   "multiPanelSuffix",
   "multiPanelSession"
 ];
+const HIDDEN_ADVERTISING_PROFILES_KEY = "hiddenAdvertisingProfiles";
 const SHARED_STATE_KEYS = new Set([
   "contactFlowCounters",
   "activeBonusConfig"
@@ -1346,6 +1347,16 @@ function isValidActiveBonusConfig(config) {
   return totalWeight > 0;
 }
 
+function isValidHiddenAdvertisingProfiles(profileIds) {
+  return Array.isArray(profileIds) &&
+    profileIds.length <= 1000 &&
+    profileIds.every((profileId) =>
+      typeof profileId === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(profileId)) &&
+    new Set(profileIds).size === profileIds.length;
+}
+
 async function publishActiveBonusConfig() {
   const { role, token } = await getBridgeSettings();
   if (role !== "primary" || !token) {
@@ -1360,6 +1371,23 @@ async function publishActiveBonusConfig() {
     method: "POST",
     timeoutMs: 10_000,
     body: { config }
+  });
+}
+
+async function publishHiddenAdvertisingProfiles() {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "primary" || !token) {
+    throw new Error("Este perfil no está configurado como principal.");
+  }
+  const stored = await getExtensionState(HIDDEN_ADVERTISING_PROFILES_KEY);
+  const profileIds = stored[HIDDEN_ADVERTISING_PROFILES_KEY] ?? [];
+  if (!isValidHiddenAdvertisingProfiles(profileIds)) {
+    throw new Error("La lista de paneles minimizados no es válida y no se puede sincronizar.");
+  }
+  return bridgeFetch("/v1/advertising-hidden-profiles", token, {
+    method: "POST",
+    timeoutMs: 10_000,
+    body: { profileIds }
   });
 }
 
@@ -1386,6 +1414,30 @@ async function syncActiveBonusConfig(revision) {
   } else {
     await setExtensionState({ activeBonusConfig: update.config });
   }
+  return update;
+}
+
+async function syncHiddenAdvertisingProfiles(revision) {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "secondary" || !token) {
+    throw new Error("Este perfil no está configurado como secundario.");
+  }
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("La versión de paneles minimizados recibida no es válida.");
+  }
+  const update = await bridgeFetch(
+    `/v1/advertising-hidden-profiles?revision=${revision}`,
+    token,
+    { timeoutMs: 25_000 }
+  );
+  if (!update?.ok || !Number.isSafeInteger(update.revision) || update.revision < 0) {
+    throw new Error("El puente devolvió una versión de paneles minimizados no válida.");
+  }
+  if (!update.changed) return update;
+  if (!isValidHiddenAdvertisingProfiles(update.profileIds)) {
+    throw new Error("El puente devolvió una lista de paneles minimizados no válida.");
+  }
+  await setExtensionState({ [HIDDEN_ADVERTISING_PROFILES_KEY]: update.profileIds });
   return update;
 }
 
@@ -1494,6 +1546,19 @@ async function sendRemoteOperation(destinationId, message, timeoutMs = 95_000) {
     if (!/^[a-z]$/i.test(suffix || "") ||
       !new RegExp(`^[a-z0-9]+${suffix}+$`, "i").test(message.data.username) ||
       message.data.username.length > 64) {
+      throw new Error(`El usuario no cumple el sufijo configurado para ${destination.name || "la PC destino"}.`);
+    }
+  } else if (message.type === "PASSWORD_RESET_REQUEST") {
+    if (!["ganamos", "multipanel"].includes(message.data?.platform) ||
+      typeof message.data.nombre !== "string") {
+      throw new Error("La plataforma o el nombre de usuario para restaurar la contraseña no son válidos.");
+    }
+    const suffix = message.data.platform === "ganamos"
+      ? destination.ganamosSuffix
+      : destination.multiPanelSuffix;
+    if (!/^[a-z]$/i.test(suffix || "") ||
+      !new RegExp(`^[a-z0-9]+${suffix}+$`, "i").test(message.data.nombre) ||
+      message.data.nombre.length > 64) {
       throw new Error(`El usuario no cumple el sufijo configurado para ${destination.name || "la PC destino"}.`);
     }
   } else if (message.type === "USER_SEARCH_REQUEST") {
@@ -1758,8 +1823,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     const filters = message.filters && typeof message.filters === "object" &&
       !Array.isArray(message.filters) ? message.filters : {};
-    const allowedFilters = new Set(["contactKey", "operation", "since", "limit"]);
+    const allowedFilters = new Set(["contactKey", "operation", "since", "limit", "ownProfile"]);
     if (Object.keys(filters).some((key) => !allowedFilters.has(key)) ||
+      (Object.hasOwn(filters, "ownProfile") && typeof filters.ownProfile !== "boolean") ||
       (Object.hasOwn(filters, "contactKey") &&
         (typeof filters.contactKey !== "string" || !filters.contactKey)) ||
       (Object.hasOwn(filters, "operation") &&
@@ -1772,6 +1838,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
     const query = new URLSearchParams();
+    if (filters.ownProfile === true) query.set("source", "profile");
     if (typeof filters.contactKey === "string") query.set("contactKey", filters.contactKey);
     if (typeof filters.operation === "string") query.set("operation", filters.operation);
     if (Number.isSafeInteger(filters.since)) query.set("since", String(filters.since));
@@ -1786,6 +1853,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((error) => sendResponse({
         ok: false,
         error: error.message || "No se pudieron consultar los movimientos."
+      }));
+    return true;
+  }
+
+  if (message?.type === "ADVERTISING_STATS_GET") {
+    if (!isStateStorageSender(sender)) {
+      sendResponse({ ok: false, error: "El origen no está autorizado para consultar estadísticas." });
+      return;
+    }
+    const excludedProfiles = message.excludedProfiles ?? [];
+    if (!Array.isArray(excludedProfiles) || excludedProfiles.length > 1000 ||
+      excludedProfiles.some((profileId) =>
+        typeof profileId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+          .test(profileId)) ||
+      new Set(excludedProfiles).size !== excludedProfiles.length) {
+      sendResponse({ ok: false, error: "La lista de paneles minimizados no es válida." });
+      return;
+    }
+    const hasCustomRange = message.from !== undefined || message.to !== undefined;
+    if (hasCustomRange
+      ? !Number.isSafeInteger(message.from) || !Number.isSafeInteger(message.to) ||
+        message.from < 0 || message.to <= message.from
+      : message.days !== null && ![7, 30, 90].includes(message.days)) {
+      sendResponse({ ok: false, error: "El período de estadísticas solicitado no es válido." });
+      return;
+    }
+    const query = new URLSearchParams();
+    if (hasCustomRange) {
+      query.set("from", String(message.from));
+      query.set("to", String(message.to));
+    } else if (message.days !== null) {
+      query.set("days", String(message.days));
+    }
+    if (excludedProfiles.length) {
+      query.set("excludedProfiles", JSON.stringify(excludedProfiles));
+    }
+    requestDataApi(`/v1/advertising-stats?${query}`)
+      .then((stats) => {
+        if (!stats.summary || !Array.isArray(stats.platforms) ||
+          !Array.isArray(stats.profiles) || !Array.isArray(stats.hiddenProfiles)) {
+          throw new Error("La API PostgreSQL devolvió estadísticas incompletas.");
+        }
+        sendResponse({ ok: true, stats });
+      })
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudieron consultar las estadísticas de publicidad."
       }));
     return true;
   }
@@ -1830,6 +1945,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((error) => sendResponse({
         ok: false,
         error: error.message || "No se pudo recibir la configuración del bono activo."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_ADVERTISING_PROFILES_PUBLISH") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de sincronización no válida." });
+      return;
+    }
+    publishHiddenAdvertisingProfiles()
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo sincronizar los paneles minimizados."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_ADVERTISING_PROFILES_POLL") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de sincronización no válida." });
+      return;
+    }
+    syncHiddenAdvertisingProfiles(message.revision)
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo recibir la configuración de paneles minimizados."
       }));
     return true;
   }
@@ -1928,14 +2071,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 extensionStateOnChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !changes.activeBonusConfig) return;
+  if (areaName !== "local" ||
+    (!changes.activeBonusConfig && !changes[HIDDEN_ADVERTISING_PROFILES_KEY])) return;
   void getBridgeSettings()
     .then(({ role }) => {
-      if (role === "primary") return publishActiveBonusConfig();
-      return null;
+      if (role !== "primary") return null;
+      const publications = [];
+      if (changes.activeBonusConfig) publications.push(publishActiveBonusConfig());
+      if (changes[HIDDEN_ADVERTISING_PROFILES_KEY]) {
+        publications.push(publishHiddenAdvertisingProfiles());
+      }
+      return Promise.all(publications);
     })
     .catch((error) => console.error(
-      "[Ganamos balance extension] No se pudo publicar la configuración del bono activo en el puente.",
+      "[Ganamos balance extension] No se pudo publicar la configuración compartida en el puente.",
       error
     ));
 });

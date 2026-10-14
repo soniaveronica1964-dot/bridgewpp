@@ -121,13 +121,51 @@
     }
   }
 
+  async function runPrimaryAdvertisingProfilesBridge() {
+    while (true) {
+      try {
+        const result = await sendRuntimeMessage({
+          type: "BRIDGE_ADVERTISING_PROFILES_PUBLISH"
+        });
+        if (!result?.ok) {
+          throw new Error(result?.error || "No se pudo publicar la configuración de paneles minimizados.");
+        }
+        await sleep(20_000);
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudieron sincronizar los paneles minimizados desde el perfil principal.", error);
+        await sleep(5000);
+      }
+    }
+  }
+
+  async function runSecondaryAdvertisingProfilesBridge() {
+    let revision = 0;
+    while (true) {
+      try {
+        const update = await sendRuntimeMessage({
+          type: "BRIDGE_ADVERTISING_PROFILES_POLL",
+          revision
+        });
+        if (!update?.ok) {
+          throw new Error(update?.error || "No se pudo consultar la configuración de paneles minimizados.");
+        }
+        revision = update.revision;
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudieron recibir los paneles minimizados del perfil principal.", error);
+        await sleep(5000);
+      }
+    }
+  }
+
   stateStorage.get(["bridgeRole", "bridgeToken"])
     .then(({ bridgeRole, bridgeToken }) => {
       if (bridgeRole === "primary" && typeof bridgeToken === "string" && bridgeToken) {
         void runPrimaryBridge();
         void runPrimaryBonusConfigBridge();
+        void runPrimaryAdvertisingProfilesBridge();
       } else if (bridgeRole === "secondary" && typeof bridgeToken === "string" && bridgeToken) {
         void runSecondaryBonusConfigBridge();
+        void runSecondaryAdvertisingProfilesBridge();
       }
     })
     .catch((error) => console.error("[Ganamos balance extension] No se pudo leer el modo del puente.", error));

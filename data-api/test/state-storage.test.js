@@ -10,6 +10,8 @@ test("extension storage adapter routes reads and revisioned writes through the s
   const responses = [
     { ok: true, values: { activeBonusConfig: { enabled: false } }, revision: 7 },
     { ok: true, movements: [{ operation: "withdrawal", amount: 10 }] },
+    { ok: true, stats: { summary: { deposits: "2" }, platforms: [], profiles: [] } },
+    { ok: true, stats: { summary: { deposits: "1" }, platforms: [], profiles: [] } },
     { ok: true, revision: 8, changeRevision: 12 },
     { ok: true, revision: 9, changeRevision: 13 }
   ];
@@ -38,25 +40,46 @@ test("extension storage adapter routes reads and revisioned writes through the s
   const movements = await context.stateStorage.getMovements({
     contactKey: "contact-1",
     operation: "withdrawal",
-    limit: 1
+    limit: 1,
+    ownProfile: true
   });
   assert.deepEqual(JSON.parse(JSON.stringify(movements)), [
     { operation: "withdrawal", amount: 10 }
   ]);
+  const advertisingStats = await context.stateStorage.getAdvertisingStats({ from: 1000, to: 2000 });
+  assert.equal(advertisingStats.summary.deposits, "2");
+  const filteredAdvertisingStats = await context.stateStorage.getAdvertisingStats(
+    { from: 1000, to: 2000 },
+    ["33333333-3333-4333-8333-333333333333"]
+  );
+  assert.equal(filteredAdvertisingStats.summary.deposits, "1");
   await context.stateStorage.set({ activeBonusConfig: { enabled: true } });
   await context.stateStorage.remove("activeBonusConfig");
 
   assert.deepEqual(messages.map(({ type }) => type), [
-    "STATE_GET", "MOVEMENTS_GET", "STATE_SET", "STATE_REMOVE"
+    "STATE_GET", "MOVEMENTS_GET", "ADVERTISING_STATS_GET", "ADVERTISING_STATS_GET",
+    "STATE_SET", "STATE_REMOVE"
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(messages[1].filters)), {
     contactKey: "contact-1",
     operation: "withdrawal",
-    limit: 1
+    limit: 1,
+    ownProfile: true
   });
-  assert.equal(messages[2].expectedRevision, 7);
-  assert.equal(messages[3].expectedRevision, 8);
-  assert.deepEqual(JSON.parse(JSON.stringify(messages[3].removes)), ["activeBonusConfig"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[2])), {
+    type: "ADVERTISING_STATS_GET",
+    from: 1000,
+    to: 2000
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[3])), {
+    type: "ADVERTISING_STATS_GET",
+    from: 1000,
+    to: 2000,
+    excludedProfiles: ["33333333-3333-4333-8333-333333333333"]
+  });
+  assert.equal(messages[4].expectedRevision, 7);
+  assert.equal(messages[5].expectedRevision, 8);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[5].removes)), ["activeBonusConfig"]);
   listeners[0]({
     type: "STATE_CHANGED",
     changes: { activeBonusConfig: { oldValue: { enabled: true }, newValue: { enabled: false } } }

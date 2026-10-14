@@ -89,7 +89,9 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
     { version: 3, name: "device_proof" },
     { version: 4, name: "profile_remote_destinations" },
     { version: 5, name: "contact_flow_counted_at" },
-    { version: 6, name: "profile_active_bonus" }
+    { version: 6, name: "profile_active_bonus" },
+    { version: 7, name: "advertising_movements" },
+    { version: 8, name: "contact_flow_event_counts" }
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE agent_movements/);
   assert.match(migrations[0].sql, /value_ciphertext BYTEA NOT NULL/);
@@ -102,6 +104,9 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
   assert.match(migrations[5].sql, /storage_key = 'activeBonusConfig'/);
   assert.match(migrations[5].sql, /setting_key = 'bridgeRole'/);
   assert.match(migrations[5].sql, /scope_type = 'profile'/);
+  assert.match(migrations[6].sql, /ADD COLUMN is_advertising BOOLEAN NOT NULL DEFAULT FALSE/);
+  assert.match(migrations[7].sql, /CREATE TABLE contact_flow_count_events/);
+  assert.match(migrations[7].sql, /CREATE TABLE contact_flow_adjustment_events/);
 });
 
 test("validates timestamped contact-flow numbers and keeps legacy number strings usable", () => {
@@ -134,7 +139,55 @@ test("validates timestamped contact-flow numbers and keeps legacy number strings
   }]);
 });
 
-test("merges concurrent contact-flow snapshots without double-counting duplicate numbers", () => {
+test("keeps manual counter operations and validates their target and generation", () => {
+  const snapshot = validateCounterSnapshot({
+    adjustmentOperations: [
+      {
+        id: "550e8400-e29b-41d4-a716-446655440000",
+        target: "arrived",
+        delta: -2,
+        generation: 3
+      },
+      {
+        id: "550e8400-e29b-41d4-a716-446655440001",
+        target: "destination:remote-1",
+        delta: 4,
+        generation: 3
+      },
+      {
+        id: "invalid",
+        target: "arrived",
+        delta: 1,
+        generation: 3
+      }
+    ],
+    resetOperations: [{
+      id: "550e8400-e29b-41d4-a716-446655440002",
+      clearCountedNumbers: true
+    }]
+  });
+
+  assert.deepEqual(snapshot.adjustmentOperations, [
+    {
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      target: "arrived",
+      delta: -2,
+      generation: 3
+    },
+    {
+      id: "550e8400-e29b-41d4-a716-446655440001",
+      target: "destination:remote-1",
+      delta: 4,
+      generation: 3
+    }
+  ]);
+  assert.deepEqual(snapshot.resetOperations, [{
+    id: "550e8400-e29b-41d4-a716-446655440002",
+    clearCountedNumbers: true
+  }]);
+});
+
+test("merges stale contact-flow snapshots without changing server totals", () => {
   const now = Date.now();
   const countedAtTwoDaysAgo = now - 2 * 24 * 60 * 60 * 1000;
   const current = {
@@ -184,9 +237,9 @@ test("merges concurrent contact-flow snapshots without double-counting duplicate
   const afterFirst = mergeContactFlowCounterSnapshots(current, first, now);
   const merged = mergeContactFlowCounterSnapshots(afterFirst, concurrent, now);
 
-  assert.equal(merged.arrived, 12);
-  assert.equal(merged.derived["remote-1"], 6);
-  assert.equal(merged.panels[0].count, 6);
+  assert.equal(merged.arrived, 10);
+  assert.equal(merged.derived["remote-1"], 4);
+  assert.equal(merged.panels[0].count, 4);
   assert.deepEqual(
     merged.countedNumbers.map(({ number }) => number).sort(),
     ["5491111111111", "5491333333333", "5491555555555"].sort()
@@ -212,6 +265,64 @@ test("merges concurrent contact-flow snapshots without double-counting duplicate
   assert.equal(repeatedNumber.arrived, merged.arrived);
   assert.equal(repeatedNumber.derived["remote-1"], merged.derived["remote-1"]);
   assert.equal(repeatedNumber.panels[0].count, merged.panels[0].count);
+});
+
+test("ignores pre-reset markers from stale snapshots and honors a clear-all reset", () => {
+  const now = Date.now();
+  const current = {
+    arrived: 12,
+    generation: 2,
+    generationStartedAt: now - 1000,
+    countedNumbers: [{ number: "5491111111111", countedAt: now - 500 }],
+    panels: [{
+      id: "panel-1",
+      keyword: "sale",
+      destinationId: "remote-1",
+      count: 4,
+      countedNumbers: [{ number: "5491222222222", countedAt: now - 500 }]
+    }]
+  };
+  const stale = {
+    arrived: 11,
+    generation: 1,
+    generationStartedAt: 0,
+    countedNumbers: [
+      { number: "5491333333333", countedAt: now - 2000 },
+      { number: "5491444444444", countedAt: now - 250 }
+    ],
+    panels: [{
+      ...current.panels[0],
+      countedNumbers: [
+        { number: "5491555555555", countedAt: now - 2000 },
+        { number: "5491666666666", countedAt: now - 250 }
+      ]
+    }]
+  };
+  const merged = mergeContactFlowCounterSnapshots(current, stale, now);
+  assert.deepEqual(
+    merged.countedNumbers.map(({ number }) => number).sort(),
+    ["5491111111111", "5491444444444"].sort()
+  );
+  assert.deepEqual(
+    merged.panels[0].countedNumbers.map(({ number }) => number).sort(),
+    ["5491222222222", "5491666666666"].sort()
+  );
+
+  const reset = mergeContactFlowCounterSnapshots(
+    current,
+    {
+      ...stale,
+      countedNumbers: [],
+      panels: [{ ...stale.panels[0], countedNumbers: [] }],
+      resetOperations: [{
+        id: "550e8400-e29b-41d4-a716-446655440003",
+        clearCountedNumbers: true
+      }]
+    },
+    now
+  );
+  assert.deepEqual(reset.countedNumbers, []);
+  assert.deepEqual(reset.panels[0].countedNumbers, []);
 });
 
 test("API permits only explicit private interface binding", () => {

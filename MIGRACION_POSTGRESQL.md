@@ -104,7 +104,7 @@ deban ser visibles para todos. La nueva API debe aplicar un ámbito explícito:
 | Dato | Ámbito recomendado | Regla |
 |---|---|---|
 | Destinos `remoteCreateDestinations` | Perfil Chrome | Cada perfil administra su propia lista; las pestañas de WhatsApp de ese perfil usan esa lista y los demás perfiles no la heredan. Cada perfil Chrome solicita por separado los permisos de host de Chrome. |
-| Movimientos `agentMovement:*` | Espacio de trabajo compartido | Se consultan desde las PC autorizadas; se conserva el perfil/instalación que originó cada movimiento para auditoría e idempotencia. |
+| Movimientos `agentMovement:*` | Espacio de trabajo compartido | Se consultan desde las PC autorizadas; se conserva el perfil/instalación de origen para auditoría e idempotencia. El panel de depósitos y retiros filtra por el perfil Chrome autenticado. |
 | Contadores y paneles `contactFlowCounters` | Espacio de trabajo compartido | Incrementos/deduplicación deben ser atómicos en el servidor para impedir doble conteo entre PC. |
 | Bono activo | Espacio de trabajo compartido | La revisión/publicación existente se conserva; una actualización remota no se vuelve a publicar como local. |
 | `bridgeRole`, `bridgeToken`, ID de agente, sufijos y vista del panel | Perfil Chrome | No se propagan automáticamente a otros perfiles. |
@@ -166,6 +166,8 @@ El objeto contiene:
 - `arrived`: contador de chats individuales entrantes.
 - `derived`: mapa de `destinationId` a contador de derivados.
 - `countedNumbers`: números telefónicos ya contados como llegados.
+- `generation` y `generationStartedAt`: generación de conteo vigente y su
+  comienzo.
 - `panels`: arreglo de paneles. Cada panel contiene:
   - `id`;
   - `title`;
@@ -173,11 +175,16 @@ El objeto contiene:
   - `destinationId`;
   - `count`;
   - `countedNumbers`, la lista de números ya contados para ese panel.
+- `adjustmentOperations` y `resetOperations`: operaciones transitorias con UUID
+  para correcciones manuales y reinicios idempotentes; la respuesta confirmada
+  del servidor las elimina del snapshot.
 
-Las listas de números son parte de la lógica de deduplicación, no simples datos
-de presentación. No se deben omitir ni limpiar durante la importación. El
-reinicio de valores conserva paneles; la opción “Reiniciar valores” conserva
-además las listas de números, mientras que “Reiniciar todo” las vacía.
+Las listas de números son marcas temporales de deduplicación, no el historial
+que alimenta los totales. No se deben omitir durante una importación. Los
+totales automáticos provienen de `contact_flow_count_events`; los UUID de
+ajustes/reinicios protegen las acciones manuales contra reintentos. El reinicio
+de valores conserva paneles y marcas activas, mientras que “Reiniciar todo”
+también vacía esas marcas.
 
 ### Estructura de movimientos
 
@@ -197,12 +204,28 @@ creó:
 - `status`: por ejemplo `pending-verification` o estados de intercambio.
 - `verification`: objeto de verificación del depósito, que puede incluir
   estado, saldo inicial/final, aumento esperado y error.
+- `depositType`: `advertising` para depósitos hechos desde el botón de carga de
+  publicidad; su operación sigue siendo `deposit`. Los registros anteriores o
+  sin esa marca no se atribuyen a publicidad.
 
 Los movimientos históricos pueden no tener todos los campos. En particular,
 hay depósitos antiguos cuyo monto original y bono no fueron guardados por
 separado. Esa ausencia se muestra expresamente en la interfaz y afecta los
 totales. No se debe inventar el dato faltante ni completar con cero un campo que
 está ausente.
+
+El tablero de estadísticas de publicidad agrega depósitos marcados de todos los
+perfiles del workspace, con filtros para hoy, ayer, semana actual o anterior
+(lunes a domingo), mes actual o anterior, un rango personalizado y todo el
+historial. También ofrece desglose por perfil Chrome y plataforma. Suma por
+separado la carga original, el bono y el total acreditado. Las operaciones pendientes de
+verificación se cuentan aparte y no se incluyen en esos importes. La retención
+se calcula sobre contactos con una carga de publicidad confirmada en el período
+y depósitos confirmados posteriores, distinguiendo cualquier depósito de otra
+carga publicitaria y las vueltas a 7/30 días. La identidad usa el `contactKey`
+guardado; si cambian los alias o la clave del contacto, una persona puede
+aparecer separada. No se reconstruye el origen publicitario de movimientos
+anteriores a esta marca.
 
 `contactKey` se construye con los nombres de usuario detectados y/o el teléfono
 del chat. Es una clave opaca de asociación histórica: no se debe volver a
@@ -308,6 +331,15 @@ PowerShell como administrador, usando la misma cuenta que posee
 ```powershell
 Set-Location 'C:\ruta\al\repositorio\bridgewpp'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\data-api\install-windows-tasks.ps1
+```
+
+Al aplicar una versión nueva del servicio, ejecutar también el actualizador
+desde la carpeta del repositorio, como administrador con la misma cuenta. Este
+aplica las migraciones PostgreSQL, reinicia únicamente el proceso que ejecuta
+el `server.js` configurado y confirma `/health` con el esquema requerido:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\data-api\update-windows-api.ps1
 ```
 
 El instalador configura `BridgeWpp Data API` para iniciar al arrancar Windows
@@ -678,6 +710,12 @@ guardan por perfil en `extension_state_values` cifrado y se normalizan en
 `remote_destinations` con `workspace_id` y `profile_id`; no mantener una copia
 editable adicional del arreglo en `workspace_settings`.
 
+`hiddenAdvertisingProfiles` también se guarda por perfil principal. Contiene los
+IDs internos de perfiles Chrome minimizados en **P/Panel**; el bridge local
+distribuye esa lista a los secundarios emparejados. La API excluye esos perfiles
+del resumen, de **P/Plataforma**, de **P/Panel** y de los cálculos de retorno.
+La interfaz muestra el nombre del dispositivo, no el ID usado para filtrar.
+
 La contraseña, tokens, sesión MultiPanel y tokens de destinos son secretos. Se
 deben separar en una tabla de secretos, o cifrar antes de almacenarlos, sin
 incluirlos en logs, errores, respuestas de diagnóstico ni exportes legibles:
@@ -805,33 +843,29 @@ CREATE TABLE applied_workspace_operations (
 );
 ```
 
-Las tablas se actualizan en una sola transacción. La operación compartida debe
-comprobar revisión e incrementar/deduplicar en el servidor; no aceptar
-`replace(snapshot)` sin control de versión, porque dos PC podrían sobrescribirse
-mutuamente. Para preservar el comportamiento existente, el servicio no debe
-reinterpretar palabras clave ni reglas de contabilización; esas reglas
-permanecen en la extensión. Las filas con `destination_id` que ya no esté
-configurado se conservan: quitar un destino o panel no debe borrar conteos
-históricos automáticamente.
+Las tablas de contadores se actualizan en una transacción por workspace. Las
+filas de `contact_flow_counted_numbers` y
+`contact_flow_panel_counted_numbers` conservan la deduplicación durante el plazo
+actual; su inserción con clave única es la que autoriza crear un evento en
+`contact_flow_count_events`. Los eventos guardan llegados o derivados con su
+teléfono, panel, destino, hora y generación. Los totales se leen contando esos
+eventos de la generación activa; no se acepta el total enviado por una PC como
+fuente de verdad. El servidor también vuelve a calcularlos durante cada lectura
+compartida.
 
-Cada llamada que incrementa contadores, incluso un incremento manual que no
-tenga teléfono para deduplicar, lleva un UUID `operation_id` generado una vez
-por intención del usuario/evento. En la misma transacción, la API inserta el ID
-con `operation_type`, hash de la petición y resultado en
-`applied_workspace_operations`, y aplica el incremento. Un reintento con el
-mismo ID/hash devuelve el resultado original sin volver a incrementar; el mismo
-ID con otro hash/tipo se rechaza como conflicto. El cliente conserva ID y
-payload hasta respuesta definitiva (en IndexedDB solo como outbox pendiente,
-no como copia del estado funcional), de modo que suspender/reiniciar el service
-worker no genere un ID nuevo para el mismo intento. Los IDs nuevos se generan
-solo para nuevas acciones explícitas.
+Las correcciones manuales se guardan en `contact_flow_adjustment_events` como
+deltas con UUID único. Repetir el mismo UUID y contenido no vuelve a aplicar el
+cambio; usarlo con un contenido distinto se rechaza como conflicto. Los valores
+existentes al aplicar la migración se conservan como ajustes iniciales, ya que
+el historial anterior de eventos no está disponible. Reiniciar los valores
+inicia una generación nueva y conserva las marcas activas; **Reiniciar todo**
+también las borra. Los eventos de generaciones anteriores se conservan, pero
+no cuentan en los totales actuales. Cada pestaña vuelve a leer el conteo cada
+cinco segundos.
 
-Para las acciones automáticas vinculadas a un teléfono, la unicidad de
-`(workspace_id, phone)` y `(workspace_id, panel_id, phone)` es además la
-deduplicación de negocio. El ID de intento y el payload pendiente en IndexedDB
-para acciones manuales contienen únicamente la operación de contador, no datos
-de contacto. El cliente elimina el registro pendiente solo tras recibir un
-resultado definitivo o recuperar el mismo resultado por idempotency key.
+La extensión mantiene las reglas actuales de detección y antigüedad de mensajes.
+La deduplicación única del servidor cubre mensajes que varias PCs procesen a la
+vez; la extensión no suma localmente los contadores al observar un mensaje.
 
 ### Movimientos
 
@@ -1097,6 +1131,17 @@ equivalentes a las actuales. No basta con que “los datos estén en tablas”.
 - Los secundarios actualizan el indicador tras recibir un cambio confirmado de
   su principal por el bridge local. Las actualizaciones recibidas se guardan en
   el perfil del secundario y no se republican como cambios del principal.
+
+### Paneles minimizados de estadísticas publicitarias
+
+- El perfil principal guarda la lista de perfiles Chrome minimizados en
+  `hiddenAdvertisingProfiles`. El bridge local la hereda a sus perfiles
+  secundarios, en forma equivalente a `activeBonusConfig`.
+- La identidad interna de cada línea es `profile_id`; en la interfaz se muestra
+  `display_name`, sin exponer el código.
+- La API aplica la exclusión al Resumen, **P/Plataforma**, **P/Panel**, totales y
+  búsquedas de depósitos posteriores usadas para calcular Retorno. Restaurar un
+  perfil vuelve a incluir todos sus movimientos sin modificar el historial.
 
 ### Contadores de llegados y derivados
 

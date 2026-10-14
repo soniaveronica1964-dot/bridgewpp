@@ -34,9 +34,12 @@ let primaryLastSeen = 0;
 let remoteCreateActive = false;
 let activeBonusConfig = null;
 let activeBonusRevision = 0;
+let hiddenAdvertisingProfiles = [];
+let hiddenAdvertisingProfilesRevision = 0;
 const queuedRequests = [];
 const waitingPolls = [];
 const waitingBonusConfigPolls = [];
+const waitingHiddenAdvertisingProfilesPolls = [];
 const pendingRequests = new Map();
 const remoteNonces = new Map();
 
@@ -218,6 +221,16 @@ function validateActiveBonusConfig(config) {
   return totalWeight > 0;
 }
 
+function validateHiddenAdvertisingProfiles(profileIds) {
+  return Array.isArray(profileIds) &&
+    profileIds.length <= 1000 &&
+    profileIds.every((profileId) =>
+      typeof profileId === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(profileId)) &&
+    new Set(profileIds).size === profileIds.length;
+}
+
 function getActiveBonusConfigUpdate() {
   return { ok: true, changed: true, revision: activeBonusRevision, config: activeBonusConfig };
 }
@@ -244,6 +257,40 @@ function waitForActiveBonusConfig(response, origin, revision) {
     clearTimeout(poll.timer);
     const index = waitingBonusConfigPolls.indexOf(poll);
     if (index !== -1) waitingBonusConfigPolls.splice(index, 1);
+  });
+}
+
+function getHiddenAdvertisingProfilesUpdate() {
+  return {
+    ok: true,
+    changed: true,
+    revision: hiddenAdvertisingProfilesRevision,
+    profileIds: hiddenAdvertisingProfiles
+  };
+}
+
+function waitForHiddenAdvertisingProfiles(response, origin, revision) {
+  if (revision !== hiddenAdvertisingProfilesRevision) {
+    sendJson(response, 200, getHiddenAdvertisingProfilesUpdate(), origin);
+    return;
+  }
+  const poll = {
+    finish: () => sendJson(response, 200, getHiddenAdvertisingProfilesUpdate(), origin),
+    timer: setTimeout(() => {
+      const index = waitingHiddenAdvertisingProfilesPolls.indexOf(poll);
+      if (index !== -1) waitingHiddenAdvertisingProfilesPolls.splice(index, 1);
+      sendJson(response, 200, {
+        ok: true,
+        changed: false,
+        revision: hiddenAdvertisingProfilesRevision
+      }, origin);
+    }, POLL_TIMEOUT_MS)
+  };
+  waitingHiddenAdvertisingProfilesPolls.push(poll);
+  response.on("close", () => {
+    clearTimeout(poll.timer);
+    const index = waitingHiddenAdvertisingProfilesPolls.indexOf(poll);
+    if (index !== -1) waitingHiddenAdvertisingProfilesPolls.splice(index, 1);
   });
 }
 
@@ -334,6 +381,50 @@ async function handleRequest(request, response) {
       }
     }
     sendJson(response, 200, { ok: true, revision: activeBonusRevision }, origin);
+    return;
+  }
+
+  if (url.pathname === "/v1/advertising-hidden-profiles" && request.method === "GET") {
+    if (role !== "client") {
+      sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden recibir esta configuración." }, origin);
+      return;
+    }
+    const revision = Number(url.searchParams.get("revision") || 0);
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+      sendJson(response, 400, { ok: false, error: "Versión de paneles minimizados no válida." }, origin);
+      return;
+    }
+    waitForHiddenAdvertisingProfiles(response, origin, revision);
+    return;
+  }
+
+  if (url.pathname === "/v1/advertising-hidden-profiles" && request.method === "POST") {
+    if (role !== "primary") {
+      sendJson(response, 403, { ok: false, error: "Solo el perfil principal puede publicar esta configuración." }, origin);
+      return;
+    }
+    let body;
+    try {
+      body = await readJson(request);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message }, origin);
+      return;
+    }
+    if (!Object.hasOwn(body || {}, "profileIds") ||
+      !validateHiddenAdvertisingProfiles(body.profileIds)) {
+      sendJson(response, 400, { ok: false, error: "La lista de paneles minimizados no es válida." }, origin);
+      return;
+    }
+    const serializedProfileIds = JSON.stringify(body.profileIds);
+    if (serializedProfileIds !== JSON.stringify(hiddenAdvertisingProfiles)) {
+      hiddenAdvertisingProfiles = JSON.parse(serializedProfileIds);
+      hiddenAdvertisingProfilesRevision += 1;
+      for (const poll of waitingHiddenAdvertisingProfilesPolls.splice(0)) {
+        clearTimeout(poll.timer);
+        poll.finish();
+      }
+    }
+    sendJson(response, 200, { ok: true, revision: hiddenAdvertisingProfilesRevision }, origin);
     return;
   }
 

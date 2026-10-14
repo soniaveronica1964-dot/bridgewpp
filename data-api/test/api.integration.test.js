@@ -249,7 +249,7 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     await migrate(pool, migrations);
     const health = await request(port, "GET", "/health", undefined, null, extensionId);
     assert.equal(health.status, 200);
-    assert.equal(health.body.schemaVersion, 6);
+    assert.equal(health.body.schemaVersion, 8);
     const migratedBonus = await pool.query(`
       SELECT value_json FROM app_settings
       WHERE profile_id = $1 AND setting_key = 'activeBonusConfig'
@@ -459,6 +459,177 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(movementHistory.body.movements.length, 1);
     assert.equal(movementHistory.body.movements[0].username, "user-a");
     assert.match(movementHistory.body.movements[0].recordKey, /^agentMovement:/);
+    const profileMovementHistory = await request(
+      port,
+      "GET",
+      "/v1/movements?source=profile",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(profileMovementHistory.status, 200, JSON.stringify(profileMovementHistory.body));
+    assert.equal(profileMovementHistory.body.movements.length, 1);
+    assert.equal(profileMovementHistory.body.movements[0].username, "user-a");
+    const advertisingTimestamp = Date.now() - 10 * 24 * 60 * 60 * 1000;
+    const advertisingMovements = {
+      [`agentMovement:${advertisingTimestamp}:ad-1`]: {
+        contactKey: "advertising-customer-1",
+        operation: "deposit",
+        amount: 30.5,
+        transactionAmount: 20,
+        bonusAmount: 10.5,
+        platform: "ganamos",
+        timestamp: advertisingTimestamp,
+        depositType: "advertising"
+      },
+      [`agentMovement:${advertisingTimestamp + 86_400_000}:return-1`]: {
+        contactKey: "advertising-customer-1",
+        operation: "deposit",
+        amount: 10,
+        transactionAmount: 10,
+        bonusAmount: 0,
+        platform: "ganamos",
+        timestamp: advertisingTimestamp + 86_400_000
+      },
+      [`agentMovement:${advertisingTimestamp + 2 * 86_400_000}:ad-2`]: {
+        contactKey: "advertising-customer-1",
+        operation: "deposit",
+        amount: 15,
+        transactionAmount: 15,
+        bonusAmount: 0,
+        platform: "multipanel",
+        timestamp: advertisingTimestamp + 2 * 86_400_000,
+        depositType: "advertising"
+      },
+      [`agentMovement:${advertisingTimestamp}:ad-3`]: {
+        contactKey: "advertising-customer-2",
+        operation: "deposit",
+        amount: 22.5,
+        transactionAmount: 20,
+        bonusAmount: 2.5,
+        platform: "multipanel",
+        timestamp: advertisingTimestamp,
+        depositType: "advertising"
+      },
+      [`agentMovement:${advertisingTimestamp}:ad-pending`]: {
+        contactKey: "advertising-customer-3",
+        operation: "deposit",
+        amount: 11,
+        transactionAmount: 10,
+        bonusAmount: 1,
+        platform: "ganamos",
+        timestamp: advertisingTimestamp,
+        status: "pending-verification",
+        depositType: "advertising"
+      }
+    };
+    const advertisingWrite = await request(port, "POST", "/v1/state", {
+      changes: advertisingMovements,
+      removes: []
+    }, main.credential, extensionId);
+    assert.equal(advertisingWrite.status, 200, JSON.stringify(advertisingWrite.body));
+    const advertisingStatsWithoutPeriod = await request(
+      port,
+      "GET",
+      "/v1/advertising-stats",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(
+      advertisingStatsWithoutPeriod.status,
+      200,
+      JSON.stringify(advertisingStatsWithoutPeriod.body)
+    );
+    const advertisingStats = await request(
+      port,
+      "GET",
+      "/v1/advertising-stats?days=30",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(advertisingStats.status, 200, JSON.stringify(advertisingStats.body));
+    assert.equal(advertisingStats.body.summary.deposits, "3");
+    assert.equal(advertisingStats.body.summary.customers, "2");
+    assert.equal(advertisingStats.body.summary.transaction_minor, "5500");
+    assert.equal(advertisingStats.body.summary.bonus_minor, "1300");
+    assert.equal(advertisingStats.body.summary.pending_deposits, "1");
+    assert.equal(advertisingStats.body.summary.cohort_customers, "2");
+    assert.equal(advertisingStats.body.summary.eligible_7_day_cohort, "2");
+    assert.equal(advertisingStats.body.summary.eligible_30_day_cohort, "0");
+    assert.equal(advertisingStats.body.summary.customers_with_later_deposit, "1");
+    assert.equal(advertisingStats.body.summary.customers_with_later_advertising, "1");
+    assert.equal(advertisingStats.body.summary.customers_returned_within_7_days, "1");
+    assert.equal(advertisingStats.body.summary.customers_returned_within_30_days, "0");
+    const ganamosAdvertisingStats = advertisingStats.body.platforms.find(
+      (row) => row.platform === "ganamos"
+    );
+    assert.equal(ganamosAdvertisingStats.customers, "1");
+    assert.equal(ganamosAdvertisingStats.returning_customers, "1");
+    const multiPanelAdvertisingStats = advertisingStats.body.platforms.find(
+      (row) => row.platform === "multipanel"
+    );
+    assert.equal(multiPanelAdvertisingStats.customers, "2");
+    assert.equal(multiPanelAdvertisingStats.returning_customers, "0");
+    const advertisingStatsLastSevenDays = await request(
+      port,
+      "GET",
+      "/v1/advertising-stats?days=7",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(advertisingStatsLastSevenDays.status, 200);
+    assert.equal(advertisingStatsLastSevenDays.body.summary.deposits, "0");
+    const customAdvertisingStats = await request(
+      port,
+      "GET",
+      `/v1/advertising-stats?from=${advertisingTimestamp}&to=${advertisingTimestamp + 1}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(customAdvertisingStats.status, 200, JSON.stringify(customAdvertisingStats.body));
+    assert.equal(customAdvertisingStats.body.summary.deposits, "2");
+    const excludedProfileStats = await request(
+      port,
+      "GET",
+      `/v1/advertising-stats?days=30&excludedProfiles=${encodeURIComponent(
+        JSON.stringify([main.identity.profileId])
+      )}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(excludedProfileStats.status, 200, JSON.stringify(excludedProfileStats.body));
+    assert.equal(excludedProfileStats.body.summary.deposits, "0");
+    assert.equal(excludedProfileStats.body.platforms.length, 0);
+    assert.equal(excludedProfileStats.body.profiles.length, 0);
+    assert.deepEqual(excludedProfileStats.body.hiddenProfiles, [{
+      profile_id: main.identity.profileId,
+      display_name: "Main Device"
+    }]);
+    const invalidCustomAdvertisingStats = await request(
+      port,
+      "GET",
+      `/v1/advertising-stats?from=${advertisingTimestamp}&to=${advertisingTimestamp}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(invalidCustomAdvertisingStats.status, 400);
+    assert.equal(invalidCustomAdvertisingStats.body.code, "invalid_advertising_stats_query");
+    const invalidAdvertisingStats = await request(
+      port,
+      "GET",
+      "/v1/advertising-stats?days=365",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(invalidAdvertisingStats.status, 400);
+    assert.equal(invalidAdvertisingStats.body.code, "invalid_advertising_stats_query");
     const invalidMovementQuery = await request(
       port,
       "GET",
@@ -650,7 +821,7 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       expectedRevision: counterBaseRevision
     }, main.credential, extensionId);
     assert.equal(concurrentCounterWrite.status, 200, JSON.stringify(concurrentCounterWrite.body));
-    assert.equal(concurrentCounterWrite.body.contactFlowCounters.arrived, 10);
+    assert.equal(concurrentCounterWrite.body.contactFlowCounters.arrived, 7);
     assert.equal(concurrentCounterWrite.body.contactFlowCounters.countedNumbers.length, 3);
     const mergedCounters = await request(
       port,
@@ -660,10 +831,135 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       main.credential,
       extensionId
     );
-    assert.equal(mergedCounters.body.values.contactFlowCounters.arrived, 10);
-    assert.equal(mergedCounters.body.values.contactFlowCounters.derived["remote-1"], 6);
-    assert.equal(mergedCounters.body.values.contactFlowCounters.panels[0].count, 6);
+    assert.equal(mergedCounters.body.values.contactFlowCounters.arrived, 7);
+    assert.equal(mergedCounters.body.values.contactFlowCounters.derived["remote-1"], 5);
+    assert.equal(mergedCounters.body.values.contactFlowCounters.panels[0].count, 3);
     assert.equal(mergedCounters.body.values.contactFlowCounters.countedNumbers.length, 3);
+    const eventTotals = await pool.query(`
+      SELECT event_type, count(*)::int AS count
+      FROM contact_flow_count_events
+      GROUP BY event_type
+    `);
+    assert.deepEqual(
+      Object.fromEntries(eventTotals.rows.map(({ event_type, count }) => [event_type, count])),
+      { arrived: 2, derived: 3 }
+    );
+    const duplicateSnapshotWrite = await request(port, "POST", "/v1/state", {
+      changes: {
+        contactFlowCounters: {
+          ...mergedCounters.body.values.contactFlowCounters,
+          arrived: 500,
+          derived: { "remote-1": 500 },
+          panels: mergedCounters.body.values.contactFlowCounters.panels.map((panel) => ({
+            ...panel,
+            count: 500
+          }))
+        }
+      },
+      removes: [],
+      expectedRevision: concurrentCounterWrite.body.revision
+    }, main.credential, extensionId);
+    assert.equal(duplicateSnapshotWrite.status, 200, JSON.stringify(duplicateSnapshotWrite.body));
+    assert.equal(duplicateSnapshotWrite.body.contactFlowCounters.arrived, 7);
+    assert.equal(duplicateSnapshotWrite.body.contactFlowCounters.derived["remote-1"], 5);
+    const adjustmentId = "550e8400-e29b-41d4-a716-446655440010";
+    const adjustedCounterWrite = await request(port, "POST", "/v1/state", {
+      changes: {
+        contactFlowCounters: {
+          ...duplicateSnapshotWrite.body.contactFlowCounters,
+          arrived: 6,
+          adjustmentOperations: [{
+            id: adjustmentId,
+            target: "arrived",
+            delta: -1,
+            generation: duplicateSnapshotWrite.body.contactFlowCounters.generation
+          }]
+        }
+      },
+      removes: [],
+      expectedRevision: duplicateSnapshotWrite.body.revision
+    }, main.credential, extensionId);
+    assert.equal(adjustedCounterWrite.status, 200, JSON.stringify(adjustedCounterWrite.body));
+    assert.equal(adjustedCounterWrite.body.contactFlowCounters.arrived, 6);
+    const repeatedAdjustment = await request(port, "POST", "/v1/state", {
+      changes: {
+        contactFlowCounters: {
+          ...adjustedCounterWrite.body.contactFlowCounters,
+          adjustmentOperations: [{
+            id: adjustmentId,
+            target: "arrived",
+            delta: -1,
+            generation: adjustedCounterWrite.body.contactFlowCounters.generation
+          }]
+        }
+      },
+      removes: [],
+      expectedRevision: adjustedCounterWrite.body.revision
+    }, main.credential, extensionId);
+    assert.equal(repeatedAdjustment.status, 200, JSON.stringify(repeatedAdjustment.body));
+    assert.equal(repeatedAdjustment.body.contactFlowCounters.arrived, 6);
+    const conflictingAdjustmentReplay = await request(port, "POST", "/v1/state", {
+      changes: {
+        contactFlowCounters: {
+          ...repeatedAdjustment.body.contactFlowCounters,
+          adjustmentOperations: [{
+            id: adjustmentId,
+            target: "arrived",
+            delta: -2,
+            generation: repeatedAdjustment.body.contactFlowCounters.generation
+          }]
+        }
+      },
+      removes: [],
+      expectedRevision: repeatedAdjustment.body.revision
+    }, main.credential, extensionId);
+    assert.equal(conflictingAdjustmentReplay.status, 409);
+    assert.equal(conflictingAdjustmentReplay.body.code, "contact_flow_operation_conflict");
+    const adjustmentEventCount = await pool.query(`
+      SELECT count(*)::int AS count FROM contact_flow_adjustment_events
+      WHERE workspace_id = $1 AND target_type = 'arrived'
+    `, [initialized.workspaceId]);
+    assert.equal(adjustmentEventCount.rows[0].count, 1);
+    const resetCounterWrite = await request(port, "POST", "/v1/state", {
+      changes: {
+        contactFlowCounters: {
+          ...repeatedAdjustment.body.contactFlowCounters,
+          resetOperations: [{
+            id: "550e8400-e29b-41d4-a716-446655440011",
+            clearCountedNumbers: false
+          }]
+        }
+      },
+      removes: [],
+      expectedRevision: repeatedAdjustment.body.revision
+    }, main.credential, extensionId);
+    assert.equal(resetCounterWrite.status, 200, JSON.stringify(resetCounterWrite.body));
+    assert.equal(resetCounterWrite.body.contactFlowCounters.arrived, 0);
+    assert.equal(resetCounterWrite.body.contactFlowCounters.derived["remote-1"], 0);
+    assert.equal(resetCounterWrite.body.contactFlowCounters.countedNumbers.length, 3);
+    const afterResetCounterWrite = await request(port, "POST", "/v1/state", {
+      changes: {
+        contactFlowCounters: {
+          ...resetCounterWrite.body.contactFlowCounters,
+          countedNumbers: [
+            ...resetCounterWrite.body.contactFlowCounters.countedNumbers,
+            { number: "5491777777777", countedAt: Date.now() }
+          ],
+          panels: resetCounterWrite.body.contactFlowCounters.panels.map((panel) => ({
+            ...panel,
+            countedNumbers: [
+              ...panel.countedNumbers,
+              { number: "5491888888888", countedAt: Date.now() }
+            ]
+          }))
+        }
+      },
+      removes: [],
+      expectedRevision: resetCounterWrite.body.revision
+    }, main.credential, extensionId);
+    assert.equal(afterResetCounterWrite.status, 200, JSON.stringify(afterResetCounterWrite.body));
+    assert.equal(afterResetCounterWrite.body.contactFlowCounters.arrived, 1);
+    assert.equal(afterResetCounterWrite.body.contactFlowCounters.derived["remote-1"], 1);
     const persistedCounterTimes = await pool.query(`
       SELECT counted_at_ms FROM contact_flow_counted_numbers
       WHERE phone IN ('5491111111111', '5491222222222', '5491444444444')
@@ -700,7 +996,7 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     const updatedCounters = await pool.query(`
       SELECT arrived FROM contact_flow_state
     `);
-    assert.equal(updatedCounters.rows[0].arrived, "8");
+    assert.equal(updatedCounters.rows[0].arrived, "1");
     const updatedBonus = await pool.query(`
       SELECT value_json FROM app_settings
       WHERE profile_id = $1 AND setting_key = 'activeBonusConfig'

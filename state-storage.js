@@ -58,6 +58,13 @@
       const response = await send("MOVEMENTS_GET", { filters });
       return response.movements;
     },
+    async getAdvertisingStats(filters = { days: 30 }, excludedProfiles = []) {
+      const response = await send("ADVERTISING_STATS_GET", {
+        ...filters,
+        ...(excludedProfiles.length ? { excludedProfiles } : {})
+      });
+      return response.stats;
+    },
     set(changes) {
       return send("STATE_SET", {
         changes,

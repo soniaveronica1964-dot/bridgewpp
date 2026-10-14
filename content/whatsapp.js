@@ -4,8 +4,11 @@
   const CONTACT_FLOW_COUNTER_HOST_ID = "ganamos-contact-flow-counters";
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
+  const HIDDEN_ADVERTISING_PROFILES_KEY = "hiddenAdvertisingProfiles";
+  const PROFILE_ID_PATTERN =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
-  const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 30_000;
+  const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 5_000;
   const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 15_000 * 60_000;
   const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
   const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS =
@@ -699,15 +702,24 @@
   }
 
   function normalizeContactFlowCounters(value) {
-    const counters = { arrived: 0, derived: {}, countedNumbers: [], panels: [] };
+    const counters = {
+      arrived: 0,
+      derived: {},
+      generation: 1,
+      generationStartedAt: 0,
+      countedNumbers: [],
+      panels: [],
+      adjustmentOperations: [],
+      resetOperations: []
+    };
     if (!value || typeof value !== "object") return counters;
     const now = Date.now();
     const normalizeCountedNumbers = (numbers) => {
       if (!Array.isArray(numbers)) return [];
       const normalizedByNumber = new Map();
       for (const entry of numbers) {
-        const number = typeof entry === "string" ? entry : entry?.number;
-        const countedAt = typeof entry === "string" ? now : entry?.countedAt;
+        const number = entry?.number;
+        const countedAt = entry?.countedAt;
         if (typeof number !== "string" || !/^\d{7,20}$/.test(number) ||
           !Number.isSafeInteger(countedAt) || countedAt <= 0 ||
           now - countedAt >= CONTACT_FLOW_COUNTED_NUMBER_TTL_MS) continue;
@@ -720,6 +732,12 @@
     };
     if (Number.isSafeInteger(value.arrived) && value.arrived >= 0) {
       counters.arrived = value.arrived;
+    }
+    if (Number.isSafeInteger(value.generation) && value.generation > 0) {
+      counters.generation = value.generation;
+    }
+    if (Number.isSafeInteger(value.generationStartedAt) && value.generationStartedAt >= 0) {
+      counters.generationStartedAt = value.generationStartedAt;
     }
     counters.countedNumbers = normalizeCountedNumbers(value.countedNumbers);
     if (Array.isArray(value.panels)) {
@@ -749,6 +767,28 @@
           counters.derived[destinationId] = count;
         }
       }
+    }
+    if (Array.isArray(value.adjustmentOperations)) {
+      counters.adjustmentOperations = value.adjustmentOperations.filter((operation) =>
+        operation && typeof operation === "object" &&
+        PROFILE_ID_PATTERN.test(operation.id) &&
+        (operation.target === "arrived" ||
+          typeof operation.target === "string" && operation.target.startsWith("destination:")) &&
+        Number.isSafeInteger(operation.delta) && operation.delta !== 0 &&
+        Number.isSafeInteger(operation.generation) && operation.generation > 0
+      ).map(({ id, target, delta, generation }) => ({
+        id,
+        target,
+        delta,
+        generation
+      }));
+    }
+    if (Array.isArray(value.resetOperations)) {
+      counters.resetOperations = value.resetOperations.filter((operation) =>
+        operation && typeof operation === "object" &&
+        PROFILE_ID_PATTERN.test(operation.id) &&
+        typeof operation.clearCountedNumbers === "boolean"
+      ).map(({ id, clearCountedNumbers }) => ({ id, clearCountedNumbers }));
     }
     return counters;
   }
@@ -903,8 +943,6 @@
     }
     processedIncomingMessages.add(metadataElement);
     contactFlowCounters.countedNumbers.push({ number: details.number, countedAt: now });
-    contactFlowCounters.arrived += 1;
-    contactFlowCounterRows.get("arrived")?.();
     saveContactFlowCounters();
   }
 
@@ -1014,23 +1052,10 @@
     if (!matchingPanels.length) return;
 
     processedOutgoingMessages.add(metadataElement);
-    let counted = false;
     for (const panel of matchingPanels) {
-      const derivedCount = getContactFlowCounterValue(panel.destinationId);
-      if (panel.count >= Number.MAX_SAFE_INTEGER ||
-        derivedCount >= Number.MAX_SAFE_INTEGER) {
-        console.error(
-          "[Ganamos balance extension] No se contó un derivado: uno de sus contadores llegó al límite seguro."
-        );
-        continue;
-      }
       panel.countedNumbers.push({ number: details.number, countedAt: now });
-      panel.count += 1;
-      contactFlowCounters.derived[panel.destinationId] = derivedCount + 1;
-      counted = true;
     }
-    if (!counted) return;
-    for (const updateRow of contactFlowCounterRows.values()) updateRow();
+    if (!matchingPanels.length) return;
     contactFlowPanelConfigRefresh?.();
     saveContactFlowCounters();
   }
@@ -1115,11 +1140,57 @@
       const stored = await stateStorage.get(CONTACT_FLOW_COUNTERS_KEY);
       if (contactFlowCountersVersion !== versionBeforeRead) return;
       const refreshed = normalizeContactFlowCounters(stored[CONTACT_FLOW_COUNTERS_KEY]);
-      if (JSON.stringify(refreshed) === JSON.stringify(contactFlowCounters)) return;
-      contactFlowCounters = refreshed;
+      const local = contactFlowCounters;
+      const mergePendingNumbers = (confirmed, pending, generationStartedAt) => {
+        const merged = new Map(confirmed.map((entry) => [entry.number, entry]));
+        for (const entry of pending) {
+          if (entry.countedAt < generationStartedAt || merged.has(entry.number)) continue;
+          merged.set(entry.number, entry);
+        }
+        return [...merged.values()];
+      };
+      const localPanels = new Map(local.panels.map((panel) => [panel.id, panel]));
+      const pendingOperations = (confirmed, pending) => {
+        const merged = new Map(confirmed.map((operation) => [operation.id, operation]));
+        for (const operation of pending) {
+          if (!merged.has(operation.id)) merged.set(operation.id, operation);
+        }
+        return [...merged.values()];
+      };
+      const reconciled = {
+        ...refreshed,
+        countedNumbers: mergePendingNumbers(
+          refreshed.countedNumbers,
+          local.countedNumbers,
+          refreshed.generationStartedAt
+        ),
+        panels: refreshed.panels.map((panel) => ({
+          ...panel,
+          countedNumbers: mergePendingNumbers(
+            panel.countedNumbers,
+            localPanels.get(panel.id)?.countedNumbers || [],
+            refreshed.generationStartedAt
+          )
+        })),
+        adjustmentOperations: pendingOperations(
+          refreshed.adjustmentOperations,
+          local.adjustmentOperations
+        ),
+        resetOperations: pendingOperations(
+          refreshed.resetOperations,
+          local.resetOperations
+        )
+      };
+      if (JSON.stringify(reconciled) === JSON.stringify(local)) return;
+      contactFlowCounters = reconciled;
       for (const updateRow of contactFlowCounterRows.values()) updateRow();
       contactFlowPanelConfigRefresh?.();
-      saveContactFlowCounters();
+      if (reconciled.adjustmentOperations.length || reconciled.resetOperations.length ||
+        reconciled.countedNumbers.length !== refreshed.countedNumbers.length ||
+        reconciled.panels.some((panel, index) =>
+          panel.countedNumbers.length !== refreshed.panels[index].countedNumbers.length)) {
+        saveContactFlowCounters();
+      }
     } catch (error) {
       console.error(
         "[Ganamos balance extension] No se pudieron refrescar los contadores compartidos.",
@@ -1134,11 +1205,15 @@
     return {
       arrived: counters.arrived,
       derived: { ...counters.derived },
+      generation: counters.generation,
+      generationStartedAt: counters.generationStartedAt,
       countedNumbers: counters.countedNumbers.map((entry) => ({ ...entry })),
       panels: counters.panels.map((panel) => ({
         ...panel,
         countedNumbers: panel.countedNumbers.map((entry) => ({ ...entry }))
-      }))
+      })),
+      adjustmentOperations: counters.adjustmentOperations.map((operation) => ({ ...operation })),
+      resetOperations: counters.resetOperations.map((operation) => ({ ...operation }))
     };
   }
 
@@ -1151,6 +1226,16 @@
         "[Ganamos balance extension] No se pudieron guardar los contadores de llegados y derivados.",
         error
       ));
+  }
+
+  function queueContactFlowCounterAdjustment(target, delta) {
+    if (!delta) return;
+    contactFlowCounters.adjustmentOperations.push({
+      id: crypto.randomUUID(),
+      target,
+      delta,
+      generation: contactFlowCounters.generation
+    });
   }
 
   function createContactFlowCounterRow(key, label) {
@@ -1187,32 +1272,32 @@
       decrement.disabled = count === 0;
       increment.disabled = count >= Number.MAX_SAFE_INTEGER;
     };
+    const adjustCounter = (delta) => {
+      const count = getContactFlowCounterValue(key);
+      const nextCount = count + delta;
+      if (!delta || !Number.isSafeInteger(nextCount) || nextCount < 0) return;
+      queueContactFlowCounterAdjustment(
+        key === "arrived" ? "arrived" : `destination:${key}`,
+        delta
+      );
+      if (key === "arrived") contactFlowCounters.arrived = nextCount;
+      else contactFlowCounters.derived[key] = nextCount;
+      updateRow();
+      saveContactFlowCounters();
+    };
     const commitValue = () => {
       const count = Number(input.value);
       if (!input.value || !Number.isSafeInteger(count) || count < 0) {
         updateRow();
         return;
       }
-      if (key === "arrived") contactFlowCounters.arrived = count;
-      else contactFlowCounters.derived[key] = count;
-      updateRow();
-      saveContactFlowCounters();
+      adjustCounter(count - getContactFlowCounterValue(key));
     };
     decrement.addEventListener("click", () => {
-      const count = getContactFlowCounterValue(key);
-      if (count === 0) return;
-      if (key === "arrived") contactFlowCounters.arrived = count - 1;
-      else contactFlowCounters.derived[key] = count - 1;
-      updateRow();
-      saveContactFlowCounters();
+      adjustCounter(-1);
     });
     increment.addEventListener("click", () => {
-      const count = getContactFlowCounterValue(key);
-      if (count >= Number.MAX_SAFE_INTEGER) return;
-      if (key === "arrived") contactFlowCounters.arrived = count + 1;
-      else contactFlowCounters.derived[key] = count + 1;
-      updateRow();
-      saveContactFlowCounters();
+      adjustCounter(1);
     });
     input.addEventListener("change", commitValue);
     controls.append(increment, input, decrement);
@@ -1253,15 +1338,24 @@
   }
 
   function resetContactFlowCounters(clearCountedNumbers = true) {
+    const generation = contactFlowCounters.generation + 1;
+    contactFlowCounters.resetOperations.push({
+      id: crypto.randomUUID(),
+      clearCountedNumbers
+    });
     contactFlowCounters = {
       arrived: 0,
       derived: {},
+      generation,
+      generationStartedAt: Date.now(),
       countedNumbers: clearCountedNumbers ? [] : contactFlowCounters.countedNumbers,
       panels: contactFlowCounters.panels.map((panel) => ({
         ...panel,
         count: 0,
         countedNumbers: clearCountedNumbers ? [] : panel.countedNumbers
-      }))
+      })),
+      adjustmentOperations: contactFlowCounters.adjustmentOperations,
+      resetOperations: contactFlowCounters.resetOperations
     };
     for (const updateRow of contactFlowCounterRows.values()) updateRow();
     contactFlowPanelConfigRefresh?.();
@@ -1647,10 +1741,16 @@
             error.hidden = false;
             return;
           }
-          contactFlowCounters.derived[editingPanel.destinationId] = Math.max(
-            0,
-            oldDerived - editingPanel.count
+          const adjustedOldDerived = Math.max(0, oldDerived - editingPanel.count);
+          queueContactFlowCounterAdjustment(
+            `destination:${editingPanel.destinationId}`,
+            adjustedOldDerived - oldDerived
           );
+          queueContactFlowCounterAdjustment(
+            `destination:${destinationId}`,
+            editingPanel.count
+          );
+          contactFlowCounters.derived[editingPanel.destinationId] = adjustedOldDerived;
           contactFlowCounters.derived[destinationId] = newDerived + editingPanel.count;
           editingPanel.destinationId = destinationId;
           for (const updateRow of contactFlowCounterRows.values()) updateRow();
@@ -2509,11 +2609,19 @@
     indicators.className = "active-bonus-indicators";
     indicators.setAttribute("aria-label", "Preferencias de bonos y publicidad");
     const createIndicator = (name, label, paths) => {
-      const indicator = document.createElement("span");
+      const indicator = document.createElement(name === "advertising" ? "button" : "span");
+      if (name === "advertising") {
+        indicator.type = "button";
+        indicator.addEventListener("click", () => createAdvertisingAnalyticsDialog(host));
+      }
       indicator.className = `active-bonus-indicator active-bonus-indicator--${name}`;
-      indicator.title = label;
-      indicator.setAttribute("aria-label", label);
-      indicator.setAttribute("role", "img");
+      indicator.title = name === "advertising"
+        ? "Publicidad activa: abrir estadísticas"
+        : label;
+      indicator.setAttribute("aria-label", name === "advertising"
+        ? `${label}: abrir estadísticas`
+        : label);
+      if (name !== "advertising") indicator.setAttribute("role", "img");
       const indicatorIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       indicatorIcon.setAttribute("viewBox", "0 0 24 24");
       indicatorIcon.setAttribute("aria-hidden", "true");
@@ -2736,6 +2844,7 @@
             ? new Date(now.getFullYear(), now.getMonth(), 1)
             : null;
       const storedMovements = await stateStorage.getMovements({
+        ownProfile: true,
         ...(contactKey ? { contactKey } : {}),
         ...(start ? { since: start.getTime() } : {})
       });
@@ -2805,7 +2914,8 @@
       if (contactKey !== agentBalanceContactKey || view !== agentBalanceView) return;
       const failure = document.createElement("div");
       failure.className = "agent-movement-empty agent-movement-error";
-      failure.textContent = "No se pudieron cargar los movimientos.";
+      failure.textContent =
+        `No se pudieron cargar los movimientos: ${error.message || "error desconocido."}`;
       list.append(failure);
     }
   }
@@ -2815,7 +2925,16 @@
     operation,
     amount,
     platform,
-    { username, transactionAmount, bonusAmount, fromPlatform, toPlatform, status, verification }
+    {
+      username,
+      transactionAmount,
+      bonusAmount,
+      fromPlatform,
+      toPlatform,
+      status,
+      verification,
+      depositType
+    }
   ) {
     const record = {
       contactKey,
@@ -2829,7 +2948,8 @@
       ...(fromPlatform ? { fromPlatform } : {}),
       ...(toPlatform ? { toPlatform } : {}),
       ...(status ? { status } : {}),
-      ...(verification ? { verification } : {})
+      ...(verification ? { verification } : {}),
+      ...(operation === "deposit" && depositType ? { depositType } : {})
     };
     const recordKey = `${AGENT_MOVEMENT_PREFIX}${record.timestamp}:${crypto.randomUUID()}`;
     await stateStorage.set({ [recordKey]: record });
@@ -3280,6 +3400,63 @@
         item.append(summary, details);
         if (typeof movement.recordKey === "string" &&
           movement.recordKey.startsWith(AGENT_MOVEMENT_PREFIX)) {
+          if (movement.operation === "deposit" && movement.status === "pending-verification") {
+            const confirmMovement = document.createElement("button");
+            confirmMovement.type = "button";
+            confirmMovement.className = "movement-history-confirm";
+            confirmMovement.textContent = "✓";
+            confirmMovement.title = "Confirmar depósito";
+            confirmMovement.setAttribute("aria-label", "Confirmar depósito pendiente");
+            confirmMovement.addEventListener("click", async () => {
+              if (!window.confirm(
+                "¿Confirmás que este depósito fue acreditado? Solo confirmalo después de verificarlo en la plataforma."
+              )) return;
+
+              confirmMovement.disabled = true;
+              try {
+                const { recordKey, ...record } = movement;
+                const verification = movement.verification &&
+                  typeof movement.verification === "object" &&
+                  !Array.isArray(movement.verification)
+                  ? movement.verification
+                  : {};
+                const confirmedMovement = {
+                  ...record,
+                  status: "confirmed",
+                  verification: {
+                    ...verification,
+                    status: "manually-confirmed",
+                    manuallyConfirmedAt: Date.now()
+                  }
+                };
+                await stateStorage.set({ [recordKey]: confirmedMovement });
+                storedMovements = storedMovements.map((candidate) =>
+                  candidate.recordKey === recordKey ? { ...confirmedMovement, recordKey } : candidate);
+                renderMovements();
+                const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+                if (balanceHost && agentBalanceContactKey === contactKey &&
+                  isAgentMovementView(agentBalanceView)) {
+                  void renderAgentMovements(balanceHost, agentBalanceView);
+                }
+                showToast(
+                  host,
+                  platformUsernames[movement.platform] || "Chat",
+                  "Depósito marcado como confirmado.",
+                  "success"
+                );
+              } catch (error) {
+                console.error("[Ganamos balance extension] No se pudo confirmar el depósito pendiente.", error);
+                confirmMovement.disabled = false;
+                showToast(
+                  host,
+                  platformUsernames[movement.platform] || "Chat",
+                  error.message || "No se pudo confirmar el depósito.",
+                  "error"
+                );
+              }
+            });
+            item.append(confirmMovement);
+          }
           const remove = document.createElement("button");
           remove.type = "button";
           remove.className = "movement-history-delete";
@@ -3375,6 +3552,531 @@
     });
     void loadMovements();
     close.focus();
+  }
+
+  function createAdvertisingAnalyticsDialog(host) {
+    const shadow = host.shadowRoot;
+    if (!shadow) return;
+    if (shadow.querySelector(".advertising-analytics-backdrop")) return;
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "advertising-analytics-backdrop";
+    let closeDialog = () => backdrop.remove();
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) closeDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "advertising-analytics-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "advertising-analytics-title");
+    registerModalEscapeHandler(dialog, () => closeDialog());
+
+    const header = document.createElement("header");
+    header.className = "advertising-analytics-header";
+    const heading = document.createElement("div");
+    const title = document.createElement("h2");
+    title.id = "advertising-analytics-title";
+    title.textContent = "Estadísticas de publicidad";
+    const subtitle = document.createElement("p");
+    subtitle.textContent = "Los paneles visibles de este espacio compartido";
+    heading.append(title, subtitle);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "advertising-analytics-close";
+    close.textContent = "×";
+    close.title = "Cerrar estadísticas";
+    close.setAttribute("aria-label", close.title);
+    close.addEventListener("click", () => closeDialog());
+    header.append(heading, close);
+
+    const tabs = document.createElement("div");
+    tabs.className = "advertising-analytics-tabs";
+    const periods = document.createElement("div");
+    periods.className = "advertising-analytics-periods";
+    const customRange = document.createElement("div");
+    customRange.className = "advertising-analytics-custom-range";
+    customRange.hidden = true;
+    const fromLabel = document.createElement("label");
+    fromLabel.textContent = "Desde";
+    const fromInput = document.createElement("input");
+    fromInput.type = "datetime-local";
+    fromInput.setAttribute("aria-label", "Fecha y hora desde");
+    fromLabel.append(fromInput);
+    const toLabel = document.createElement("label");
+    toLabel.textContent = "Hasta";
+    const toInput = document.createElement("input");
+    toInput.type = "datetime-local";
+    toInput.setAttribute("aria-label", "Fecha y hora hasta");
+    toLabel.append(toInput);
+    const rangeError = document.createElement("span");
+    rangeError.className = "advertising-analytics-range-error";
+    rangeError.setAttribute("role", "alert");
+    customRange.append(fromLabel, toLabel, rangeError);
+    const body = document.createElement("div");
+    body.className = "advertising-analytics-body";
+    const footnote = document.createElement("p");
+    footnote.className = "advertising-analytics-footnote";
+    footnote.textContent =
+      "Los contactos se identifican por la clave guardada en sus movimientos; si cambia, puede dividir las estadísticas de una misma persona.";
+
+    let requestSequence = 0;
+    let activeTab = "summary";
+    let loadedStats = null;
+    let activeFilters;
+    let activePeriod = "current-month";
+    let hiddenProfileIds = [];
+    let canManageHiddenProfiles = true;
+    let profileVisibilitySaveInProgress = false;
+    const tabButtons = new Map();
+    tabs.setAttribute("role", "group");
+    tabs.setAttribute("aria-label", "Sección de estadísticas");
+    const selectTab = (tab) => {
+      activeTab = tab;
+      for (const [name, button] of tabButtons) {
+        button.setAttribute("aria-pressed", String(name === activeTab));
+      }
+      if (loadedStats) {
+        renderAdvertisingAnalytics(
+          loadedStats,
+          body,
+          activeTab,
+          hiddenProfileIds,
+          canManageHiddenProfiles,
+          profileVisibilitySaveInProgress,
+          changeHiddenProfile
+        );
+      }
+    };
+    for (const [name, label] of [
+      ["summary", "Resumen"],
+      ["platform", "P/Plataforma"],
+      ["profile", "P/Panel"]
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.setAttribute("aria-pressed", String(name === activeTab));
+      button.addEventListener("click", () => selectTab(name));
+      tabButtons.set(name, button);
+      tabs.append(button);
+    }
+    const load = async (filters, period) => {
+      const currentRequest = ++requestSequence;
+      activeFilters = filters;
+      activePeriod = period;
+      loadedStats = null;
+      for (const button of periods.querySelectorAll("button")) {
+        button.setAttribute("aria-pressed", String(button.dataset.period === period));
+      }
+      rangeError.textContent = "";
+      body.replaceChildren();
+      const loading = document.createElement("p");
+      loading.className = "advertising-analytics-state advertising-analytics-loading";
+      loading.textContent = "Cargando estadísticas...";
+      body.append(loading);
+      try {
+        const settings = await stateStorage.get([
+          HIDDEN_ADVERTISING_PROFILES_KEY,
+          "bridgeRole"
+        ]);
+        const savedProfileIds = settings[HIDDEN_ADVERTISING_PROFILES_KEY] ?? [];
+        if (!Array.isArray(savedProfileIds) || savedProfileIds.length > 1000 ||
+          savedProfileIds.some((profileId) =>
+            typeof profileId !== "string" || !PROFILE_ID_PATTERN.test(profileId)) ||
+          new Set(savedProfileIds).size !== savedProfileIds.length) {
+          throw new Error("La configuración de paneles minimizados no es válida.");
+        }
+        hiddenProfileIds = savedProfileIds;
+        canManageHiddenProfiles = settings.bridgeRole !== "secondary";
+        const stats = await stateStorage.getAdvertisingStats(filters, hiddenProfileIds);
+        if (!backdrop.isConnected || currentRequest !== requestSequence) return;
+        loadedStats = stats;
+        renderAdvertisingAnalytics(
+          stats,
+          body,
+          activeTab,
+          hiddenProfileIds,
+          canManageHiddenProfiles,
+          profileVisibilitySaveInProgress,
+          changeHiddenProfile
+        );
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudieron cargar las estadísticas de publicidad.", error);
+        if (!backdrop.isConnected || currentRequest !== requestSequence) return;
+        const failure = document.createElement("p");
+        failure.className = "advertising-analytics-state advertising-analytics-error";
+        failure.textContent =
+          `No se pudieron cargar las estadísticas: ${error.message || "error desconocido."}`;
+        body.replaceChildren(failure);
+      }
+    };
+    const changeHiddenProfile = async (profileId) => {
+      if (!canManageHiddenProfiles || profileVisibilitySaveInProgress) return;
+      profileVisibilitySaveInProgress = true;
+      try {
+        const next = new Set(hiddenProfileIds);
+        if (next.has(profileId)) next.delete(profileId);
+        else next.add(profileId);
+        await stateStorage.set({
+          [HIDDEN_ADVERTISING_PROFILES_KEY]: [...next].sort()
+        });
+        profileVisibilitySaveInProgress = false;
+        await load(activeFilters, activePeriod);
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo guardar la configuración de paneles minimizados.", error);
+        const failure = document.createElement("p");
+        failure.className = "advertising-analytics-state advertising-analytics-error";
+        failure.textContent =
+          `No se pudo guardar la configuración: ${error.message || "error desconocido."}`;
+        body.replaceChildren(failure);
+      } finally {
+        profileVisibilitySaveInProgress = false;
+      }
+    };
+    const handleHiddenProfilesChanged = (changes, areaName) => {
+      if (areaName !== "local" || !changes[HIDDEN_ADVERTISING_PROFILES_KEY] ||
+        profileVisibilitySaveInProgress || !backdrop.isConnected) return;
+      void load(activeFilters, activePeriod);
+    };
+    stateStorage.onChanged.addListener(handleHiddenProfilesChanged);
+    closeDialog = () => {
+      stateStorage.onChanged.removeListener(handleHiddenProfilesChanged);
+      backdrop.remove();
+    };
+    const getCalendarDayFilter = (daysAgo) => {
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      start.setDate(start.getDate() - daysAgo);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+      return { from: start.getTime(), to: end.getTime() };
+    };
+    const getCalendarWeekFilter = (weeksAgo = 0) => {
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      const daysSinceMonday = (start.getDay() + 6) % 7;
+      start.setDate(start.getDate() - daysSinceMonday - weeksAgo * 7);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 7);
+      return { from: start.getTime(), to: end.getTime() };
+    };
+    const getCalendarMonthFilter = (monthsAgo = 0) => {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth() - monthsAgo, 1);
+      const end = new Date(now.getFullYear(), now.getMonth() - monthsAgo + 1, 1);
+      return { from: start.getTime(), to: end.getTime() };
+    };
+    const formatDateTime = (date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+    for (const [period, label, getFilter] of [
+      ["today", "Hoy", () => getCalendarDayFilter(0)],
+      ["yesterday", "Ayer", () => getCalendarDayFilter(1)],
+      ["current-week", "Sem. Act", () => getCalendarWeekFilter()],
+      ["previous-week", "Sem Pas", () => getCalendarWeekFilter(1)],
+      ["current-month", "Mes. Act", () => getCalendarMonthFilter()],
+      ["previous-month", "Mes. Pas", () => getCalendarMonthFilter(1)],
+      ["all", "Todo", () => ({ days: null })]
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.period = period;
+      button.textContent = label;
+      button.setAttribute("aria-pressed", String(period === "current-month"));
+      button.addEventListener("click", () => {
+        const filters = getFilter();
+        if (Number.isSafeInteger(filters.from) && Number.isSafeInteger(filters.to)) {
+          fromInput.value = formatDateTime(new Date(filters.from));
+          toInput.value = formatDateTime(new Date(filters.to - 60_000));
+        }
+        void load(filters, period);
+      });
+      periods.append(button);
+    }
+    const customButton = document.createElement("button");
+    customButton.type = "button";
+    customButton.dataset.period = "custom";
+    customButton.textContent = "Personalizado";
+    customButton.setAttribute("aria-expanded", "false");
+    customButton.setAttribute("aria-pressed", "false");
+    customButton.addEventListener("click", () => {
+      customRange.hidden = !customRange.hidden;
+      customButton.setAttribute("aria-expanded", String(!customRange.hidden));
+      customButton.setAttribute("aria-pressed", String(!customRange.hidden));
+      if (!customRange.hidden) fromInput.focus();
+    });
+    periods.append(customButton);
+    const parseDate = (value) => {
+      if (!value) return null;
+      const parts = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+      if (!parts) return null;
+      const [, year, month, day, hour, minute] = parts.map(Number);
+      const date = new Date(year, month - 1, day, hour, minute);
+      return date.getFullYear() === year &&
+        date.getMonth() === month - 1 &&
+        date.getDate() === day &&
+        date.getHours() === hour &&
+        date.getMinutes() === minute
+        ? date
+        : null;
+    };
+    const updateCustomRange = () => {
+      const start = parseDate(fromInput.value);
+      const selectedEnd = parseDate(toInput.value);
+      const showRangeError = (message) => {
+        requestSequence += 1;
+        rangeError.textContent = message;
+        if (body.querySelector(".advertising-analytics-loading")) {
+          const state = document.createElement("p");
+          state.className = "advertising-analytics-state";
+          state.textContent = "Completá un rango válido para cargar las estadísticas.";
+          body.replaceChildren(state);
+        }
+      };
+      if (!start || !selectedEnd) {
+        showRangeError("Seleccioná ambas fechas para ver las estadísticas.");
+        return;
+      }
+      if (start > selectedEnd) {
+        showRangeError("La fecha desde debe ser anterior o igual a la fecha hasta.");
+        return;
+      }
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const endOfToday = new Date(today);
+      endOfToday.setHours(23, 59, 0, 0);
+      if (selectedEnd > endOfToday) {
+        showRangeError("La fecha hasta no puede ser futura.");
+        return;
+      }
+      rangeError.textContent = "";
+      void load({
+        from: start.getTime(),
+        to: selectedEnd.getTime() + 60_000
+      }, "custom");
+    };
+    const today = new Date();
+    const maxToday = new Date(today);
+    maxToday.setHours(23, 59, 0, 0);
+    toInput.max = formatDateTime(maxToday);
+    const defaultFrom = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6);
+    fromInput.value = formatDateTime(defaultFrom);
+    toInput.value = formatDateTime(today);
+    fromInput.addEventListener("change", updateCustomRange);
+    toInput.addEventListener("change", updateCustomRange);
+    dialog.append(header, periods, customRange, tabs, body, footnote);
+    backdrop.append(dialog);
+    shadow.append(backdrop);
+    void load(getCalendarMonthFilter(), "current-month");
+  }
+
+  function renderAdvertisingAnalytics(
+    stats,
+    body,
+    activeTab,
+    hiddenProfileIds = [],
+    canManageHiddenProfiles = false,
+    profileVisibilitySaveInProgress = false,
+    onToggleProfile = () => {}
+  ) {
+    const summary = stats.summary;
+    const money = (minor) => `$${formatCurrency(Number(minor || 0) / 100)}`;
+    const count = (value) => new Intl.NumberFormat("es-AR").format(Number(value || 0));
+    const rate = (value, total) => total ? `${(Number(value) / Number(total) * 100).toFixed(1)}%` : "—";
+    body.replaceChildren();
+
+    if (activeTab === "summary") {
+      const cards = document.createElement("div");
+      cards.className = "advertising-analytics-kpis";
+      for (const [label, value] of [
+        ["Cargas confirmadas", count(summary.deposits)],
+        ["Importe cargado", money(summary.transaction_minor)],
+        ["Bonos otorgados", money(summary.bonus_minor)],
+        ["Total acreditado", money(summary.credited_minor)]
+      ]) {
+        const card = document.createElement("div");
+        card.className = "advertising-analytics-kpi";
+        const name = document.createElement("span");
+        name.textContent = label;
+        const amount = document.createElement("strong");
+        amount.textContent = value;
+        card.append(name, amount);
+        cards.append(card);
+      }
+      body.append(cards);
+
+      const pending = document.createElement("p");
+      pending.className = "advertising-analytics-pending";
+      pending.textContent =
+        `${count(summary.customers)} contactos identificados · ${count(summary.pending_deposits)} cargas pendientes excluidas de los importes.`;
+      body.append(pending);
+
+      const returns = document.createElement("section");
+      returns.className = "advertising-analytics-section";
+      const returnTitle = document.createElement("h3");
+      returnTitle.textContent = "Retorno de contactos";
+      const returnGrid = document.createElement("div");
+      returnGrid.className = "advertising-analytics-return-grid";
+      const cohort = summary.cohort_customers;
+      for (const [label, key, eligibleKey] of [
+        ["Volvieron a depositar", "customers_with_later_deposit"],
+        ["Volvieron con publicidad", "customers_with_later_advertising"],
+        ["Volvieron en 7 días", "customers_returned_within_7_days", "eligible_7_day_cohort"],
+        ["Volvieron en 30 días", "customers_returned_within_30_days", "eligible_30_day_cohort"]
+      ]) {
+        const item = document.createElement("div");
+        item.className = "advertising-analytics-return-item";
+        const value = document.createElement("strong");
+        const denominator = eligibleKey ? summary[eligibleKey] : cohort;
+        value.textContent = `${count(summary[key])} (${rate(summary[key], denominator)})`;
+        const name = document.createElement("span");
+        name.textContent = label;
+        item.append(value, name);
+        returnGrid.append(item);
+      }
+      const cohortNote = document.createElement("p");
+      cohortNote.className = "advertising-analytics-note";
+      cohortNote.textContent =
+        `Cohorte: ${count(cohort)} contactos identificados; las tasas de 7/30 días solo incluyen contactos con esa ventana completa de seguimiento.`;
+      returns.append(returnTitle, returnGrid, cohortNote);
+      body.append(returns);
+      return;
+    }
+
+    const tableConfig = activeTab === "platform"
+      ? {
+        title: "Por plataforma",
+        rows: stats.platforms,
+        getName: (row) => row.platform === "ganamos" ? "Ganamos" :
+          row.platform === "multipanel" ? "MultiPanel" : row.platform || "Sin plataforma",
+        profiles: false
+      }
+      : {
+        title: "Por perfil Chrome",
+        rows: stats.profiles,
+        getName: (row) => row.display_name,
+        profiles: true
+      };
+    const { title: titleText, rows, getName, profiles } = tableConfig;
+    const section = document.createElement("section");
+    section.className = "advertising-analytics-section";
+    const titleElement = document.createElement("h3");
+    titleElement.textContent = titleText;
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "advertising-analytics-table-wrap";
+    const table = document.createElement("table");
+    const headerRow = document.createElement("tr");
+    for (const label of [
+      "Origen",
+      "Cargas",
+      "Retorno",
+      "% de Retorno",
+      "Importe",
+      "Bonos",
+      ...(profiles ? ["Acción"] : [])
+    ]) {
+      const cell = document.createElement("th");
+      cell.textContent = label;
+      headerRow.append(cell);
+    }
+    const tableHead = document.createElement("thead");
+    tableHead.append(headerRow);
+    const tableBody = document.createElement("tbody");
+    const tableFoot = document.createElement("tfoot");
+    if (!rows.length) {
+      const emptyRow = document.createElement("tr");
+      const emptyCell = document.createElement("td");
+      emptyCell.colSpan = profiles ? 7 : 6;
+      emptyCell.textContent = "Sin cargas confirmadas en este período.";
+      emptyRow.append(emptyCell);
+      tableBody.append(emptyRow);
+    }
+    for (const row of rows) {
+      const tableRow = document.createElement("tr");
+      for (const value of [
+        getName(row),
+        count(row.deposits),
+        count(row.returning_customers),
+        rate(row.returning_customers, row.customers),
+        money(row.transaction_minor),
+        money(row.bonus_minor)
+      ]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        tableRow.append(cell);
+      }
+      if (profiles) {
+        const actionCell = document.createElement("td");
+        const minimize = document.createElement("button");
+        minimize.type = "button";
+        minimize.className = "advertising-analytics-profile-action";
+        minimize.textContent = "Minimizar";
+        minimize.disabled = !canManageHiddenProfiles || profileVisibilitySaveInProgress;
+        minimize.title = canManageHiddenProfiles
+          ? `Minimizar ${getName(row)}`
+          : "Solo el perfil principal puede cambiar los paneles minimizados.";
+        minimize.setAttribute("aria-label", minimize.title);
+        minimize.addEventListener("click", () => onToggleProfile(row.profile_id));
+        actionCell.append(minimize);
+        tableRow.append(actionCell);
+      }
+      tableBody.append(tableRow);
+    }
+    const totalRow = document.createElement("tr");
+    for (const value of [
+      "Total",
+      count(summary.deposits),
+      count(summary.customers_with_later_deposit),
+      rate(summary.customers_with_later_deposit, summary.customers),
+      money(summary.transaction_minor),
+      money(summary.bonus_minor)
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      totalRow.append(cell);
+    }
+    if (profiles) {
+      const actionCell = document.createElement("td");
+      totalRow.append(actionCell);
+    }
+    tableFoot.append(totalRow);
+    table.append(tableHead, tableBody, tableFoot);
+    tableWrap.append(table);
+    section.append(titleElement, tableWrap);
+    if (profiles && hiddenProfileIds.length) {
+      const minimized = document.createElement("div");
+      minimized.className = "advertising-analytics-minimized";
+      const minimizedTitle = document.createElement("h3");
+      minimizedTitle.textContent = "Paneles minimizados";
+      const minimizedButtons = document.createElement("div");
+      minimizedButtons.className = "advertising-analytics-minimized-buttons";
+      const hiddenNames = new Map(
+        (stats.hiddenProfiles || []).map((profile) => [profile.profile_id, profile.display_name])
+      );
+      for (const profileId of hiddenProfileIds) {
+        const profileName = hiddenNames.get(profileId) || "Panel no disponible";
+        const restore = document.createElement("button");
+        restore.type = "button";
+        restore.className = "advertising-analytics-profile-action";
+        restore.textContent = profileName;
+        restore.disabled = !canManageHiddenProfiles || profileVisibilitySaveInProgress;
+        restore.title = canManageHiddenProfiles
+          ? `Devolver ${profileName} a la lista`
+          : "Solo el perfil principal puede cambiar los paneles minimizados.";
+        restore.setAttribute("aria-label", restore.title);
+        restore.addEventListener("click", () => onToggleProfile(profileId));
+        minimizedButtons.append(restore);
+      }
+      minimized.append(minimizedTitle, minimizedButtons);
+      if (!canManageHiddenProfiles) {
+        const note = document.createElement("p");
+        note.className = "advertising-analytics-note";
+        note.textContent = "La configuración se hereda del perfil principal.";
+        minimized.append(note);
+      }
+      section.append(minimized);
+    }
+    body.append(section);
   }
 
   function createAgentBalancePanel() {
@@ -4309,6 +5011,7 @@
 
     const modal = document.createElement("div");
     modal.className = "modal";
+    if (advertisingDeposit) modal.dataset.advertisingDeposit = "true";
     registerModalEscapeHandler(modal, () => {
       root.replaceChildren();
     });
@@ -4319,7 +5022,7 @@
     dialog.setAttribute("aria-modal", "true");
     const title = document.createElement("h2");
     title.textContent = operation === "deposit"
-      ? "Depositar"
+      ? (advertisingDeposit ? "Depositar (Publi)" : "Depositar")
       : skipMovementRecord ? "Retirar (Excepción)" : "Retirar";
     const heading = document.createElement("div");
     heading.className = "transaction-heading";
@@ -4785,6 +5488,7 @@
               username,
               transactionAmount: amountValue,
               bonusAmount: operation === "deposit" ? bonusValue : 0,
+              ...(advertisingDeposit ? { depositType: "advertising" } : {}),
               status: pendingVerification ? "pending-verification" : undefined,
               verification: response.verification
             });
@@ -5424,6 +6128,9 @@
   function updateContact() {
     const zoomViewOpen = [...document.querySelectorAll('button[aria-label="Acercar"]')]
       .some(isRenderedVisible);
+    const messageActionMenuOpen = [...document.querySelectorAll(
+      'button[role="menuitem"][aria-label="Responder"]'
+    )].some(isRenderedVisible);
     const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
     const activeBonusHost = document.getElementById(ACTIVE_BONUS_HOST_ID);
     if (agentBalanceHost) {
@@ -5463,7 +6170,7 @@
     }
 
     const host = getOrCreateHost();
-    host.style.display = "block";
+    host.style.display = messageActionMenuOpen ? "none" : "block";
     if (!selectingContactUserText) positionHost(host, title);
     const accountsKey = JSON.stringify({
       usernames: usernames && {
