@@ -50,7 +50,7 @@
   let contactFlowCounterRefreshInProgress = false;
   let contactFlowCountersVersion = 0;
   const contactFlowChatNumbers = new WeakMap();
-  const processedIncomingMessages = new WeakSet();
+  const processedIncomingMessages = new WeakMap();
   const processedOutgoingMessages = new WeakSet();
   const agentBalanceErrors = {};
   const agentBalanceToastErrors = {};
@@ -921,29 +921,46 @@
   }
 
   function countIncomingMessageNumber(metadataElement) {
-    if (processedIncomingMessages.has(metadataElement)) return;
+    const messageIdentity = getIncomingMessageIdentity(metadataElement);
+    if (processedIncomingMessages.get(metadataElement) === messageIdentity) return;
     const details = getIncomingMessageDetails(metadataElement);
     if (!details) return;
     if (details.chat) contactFlowChatNumbers.set(details.chat, details.number);
     const now = Date.now();
     if (pruneExpiredContactFlowNumbers(now)) saveContactFlowCounters();
     if (contactFlowCounters.countedNumbers.some(({ number }) => number === details.number)) {
-      processedIncomingMessages.add(metadataElement);
+      processedIncomingMessages.set(metadataElement, messageIdentity);
       return;
     }
     if (now - details.timestamp > CONTACT_FLOW_MESSAGE_MAX_AGE_MS) {
-      processedIncomingMessages.add(metadataElement);
+      processedIncomingMessages.set(metadataElement, messageIdentity);
       return;
     }
     if (details.timestamp > now + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS) return;
     if (contactFlowCounters.arrived >= Number.MAX_SAFE_INTEGER) {
-      processedIncomingMessages.add(metadataElement);
+      processedIncomingMessages.set(metadataElement, messageIdentity);
       console.error("[Ganamos balance extension] No se contó un número nuevo: el contador llegó al límite seguro.");
       return;
     }
-    processedIncomingMessages.add(metadataElement);
+    processedIncomingMessages.set(metadataElement, messageIdentity);
     contactFlowCounters.countedNumbers.push({ number: details.number, countedAt: now });
     saveContactFlowCounters();
+  }
+
+  function getIncomingMessageIdentity(metadataElement) {
+    const messageContainer = metadataElement.closest(".message-in, .message-out");
+    const chat = metadataElement.closest("#main");
+    const chatTitle = chat?.querySelector('[data-testid="conversation-info-header-chat-title"]') ||
+      chat?.querySelector("header h1, header h2, header [role='heading']");
+    const messageIds = [
+      messageContainer?.getAttribute("data-id") || "",
+      messageContainer?.querySelector("[data-id]")?.getAttribute("data-id") || ""
+    ];
+    return JSON.stringify([
+      metadataElement.getAttribute("data-pre-plain-text") || "",
+      messageIds,
+      chatTitle?.textContent?.trim() || ""
+    ]);
   }
 
   function getOutgoingMessageDetails(metadataElement) {
@@ -1112,7 +1129,10 @@
       }
     });
     for (const metadataElement of document.querySelectorAll("[data-pre-plain-text]")) {
-      processedIncomingMessages.add(metadataElement);
+      processedIncomingMessages.set(
+        metadataElement,
+        getIncomingMessageIdentity(metadataElement)
+      );
       processedOutgoingMessages.add(metadataElement);
     }
     observer.observe(document.documentElement, {
