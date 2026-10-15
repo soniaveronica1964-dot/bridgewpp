@@ -157,15 +157,51 @@
     }
   }
 
+  async function runPrimaryPlatformOutagesBridge() {
+    while (true) {
+      try {
+        const result = await sendRuntimeMessage({ type: "BRIDGE_PLATFORM_OUTAGES_PUBLISH" });
+        if (!result?.ok) {
+          throw new Error(result?.error || "No se pudo publicar la configuración de plataformas caídas.");
+        }
+        await sleep(20_000);
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudieron sincronizar las plataformas caídas desde el perfil principal.", error);
+        await sleep(5000);
+      }
+    }
+  }
+
+  async function runSecondaryPlatformOutagesBridge() {
+    let revision = 0;
+    while (true) {
+      try {
+        const update = await sendRuntimeMessage({
+          type: "BRIDGE_PLATFORM_OUTAGES_POLL",
+          revision
+        });
+        if (!update?.ok) {
+          throw new Error(update?.error || "No se pudo consultar la configuración de plataformas caídas.");
+        }
+        revision = update.revision;
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudieron recibir las plataformas caídas del perfil principal.", error);
+        await sleep(5000);
+      }
+    }
+  }
+
   stateStorage.get(["bridgeRole", "bridgeToken"])
     .then(({ bridgeRole, bridgeToken }) => {
       if (bridgeRole === "primary" && typeof bridgeToken === "string" && bridgeToken) {
         void runPrimaryBridge();
         void runPrimaryBonusConfigBridge();
         void runPrimaryAdvertisingProfilesBridge();
+        void runPrimaryPlatformOutagesBridge();
       } else if (bridgeRole === "secondary" && typeof bridgeToken === "string" && bridgeToken) {
         void runSecondaryBonusConfigBridge();
         void runSecondaryAdvertisingProfilesBridge();
+        void runSecondaryPlatformOutagesBridge();
       }
     })
     .catch((error) => console.error("[Ganamos balance extension] No se pudo leer el modo del puente.", error));

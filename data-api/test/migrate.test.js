@@ -5,6 +5,7 @@ const {
   createDeviceAssertionNonceCleanup,
   getServerConfig,
   mergeContactFlowCounterSnapshots,
+  normalizeArgentinaPhone,
   validateCounterSnapshot
 } = require("../server");
 
@@ -91,7 +92,8 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
     { version: 5, name: "contact_flow_counted_at" },
     { version: 6, name: "profile_active_bonus" },
     { version: 7, name: "advertising_movements" },
-    { version: 8, name: "contact_flow_event_counts" }
+    { version: 8, name: "contact_flow_event_counts" },
+    { version: 9, name: "contact_flow_event_sources" }
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE agent_movements/);
   assert.match(migrations[0].sql, /value_ciphertext BYTEA NOT NULL/);
@@ -107,6 +109,14 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
   assert.match(migrations[6].sql, /ADD COLUMN is_advertising BOOLEAN NOT NULL DEFAULT FALSE/);
   assert.match(migrations[7].sql, /CREATE TABLE contact_flow_count_events/);
   assert.match(migrations[7].sql, /CREATE TABLE contact_flow_adjustment_events/);
+  assert.match(migrations[8].sql, /ADD COLUMN source_profile_id UUID REFERENCES extension_profiles/);
+});
+
+test("normalizes common Argentine mobile formats to one WhatsApp number", () => {
+  assert.equal(normalizeArgentinaPhone("+54 9 11 2345-6789"), "5491123456789");
+  assert.equal(normalizeArgentinaPhone("011 15 2345-6789"), "5491123456789");
+  assert.equal(normalizeArgentinaPhone("11 15 2345 6789"), "5491123456789");
+  assert.equal(normalizeArgentinaPhone("0111511111111"), "5491111111111");
 });
 
 test("validates timestamped contact-flow numbers and keeps legacy number strings usable", () => {
@@ -189,17 +199,17 @@ test("keeps manual counter operations and validates their target and generation"
 
 test("merges stale contact-flow snapshots without changing server totals", () => {
   const now = Date.now();
-  const countedAtTwoDaysAgo = now - 2 * 24 * 60 * 60 * 1000;
+  const countedAtElevenHoursAgo = now - 11 * 60 * 60 * 1000;
   const current = {
     arrived: 10,
     derived: { "remote-1": 4 },
-    countedNumbers: [{ number: "5491111111111", countedAt: countedAtTwoDaysAgo }],
+    countedNumbers: [{ number: "5491111111111", countedAt: countedAtElevenHoursAgo }],
     panels: [{
       id: "panel-1",
       keyword: "sale",
       destinationId: "remote-1",
       count: 4,
-      countedNumbers: [{ number: "5491222222222", countedAt: countedAtTwoDaysAgo }]
+      countedNumbers: [{ number: "5491222222222", countedAt: countedAtElevenHoursAgo }]
     }]
   };
   const first = {
@@ -265,6 +275,39 @@ test("merges stale contact-flow snapshots without changing server totals", () =>
   assert.equal(repeatedNumber.arrived, merged.arrived);
   assert.equal(repeatedNumber.derived["remote-1"], merged.derived["remote-1"]);
   assert.equal(repeatedNumber.panels[0].count, merged.panels[0].count);
+});
+
+test("expires arrival and panel deduplication markers after twelve hours", () => {
+  const now = Date.now();
+  const twelveHours = 12 * 60 * 60 * 1000;
+  const current = {
+    arrived: 2,
+    countedNumbers: [
+      { number: "5491111111111", countedAt: now - twelveHours + 1 },
+      { number: "5491222222222", countedAt: now - twelveHours }
+    ],
+    panels: [{
+      id: "panel-1",
+      keyword: "sale",
+      destinationId: "remote-1",
+      count: 2,
+      countedNumbers: [
+        { number: "5491333333333", countedAt: now - twelveHours + 1 },
+        { number: "5491444444444", countedAt: now - twelveHours }
+      ]
+    }]
+  };
+
+  const merged = mergeContactFlowCounterSnapshots(current, current, now);
+
+  assert.deepEqual(merged.countedNumbers, [{
+    number: "5491111111111",
+    countedAt: now - twelveHours + 1
+  }]);
+  assert.deepEqual(merged.panels[0].countedNumbers, [{
+    number: "5491333333333",
+    countedAt: now - twelveHours + 1
+  }]);
 });
 
 test("ignores pre-reset markers from stale snapshots and honors a clear-all reset", () => {

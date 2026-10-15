@@ -3,14 +3,14 @@ const fs = require("node:fs");
 const https = require("node:https");
 const net = require("node:net");
 const { isDeepStrictEqual } = require("node:util");
+const { parsePhoneNumberFromString } = require("libphonenumber-js");
 const { canonicalJson, decryptValue, encryptValue, sha256Hex, validatePayload } = require("./archive");
 
 const API_VERSION = 1;
-const SCHEMA_VERSION = 8;
-const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 15_000 * 60_000;
+const SCHEMA_VERSION = 9;
+const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 45 * 60_000;
 const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
-const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS =
-  CONTACT_FLOW_MESSAGE_MAX_AGE_MS + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS + 1;
+const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 12 * 60 * 60 * 1000;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_STATE_REQUEST_BYTES = 24 * 1024 * 1024 + 64 * 1024;
 const MAX_STAGING_REQUEST_BYTES = 24 * 1024 * 1024 + 64 * 1024;
@@ -204,7 +204,7 @@ function buildReport(payload) {
       "bridgeRole", "bridgeToken", "ganamosUserId", "ganamosSuffix",
       "multiPanelSuffix", "userCreationPassword", "remoteCreateDestinations",
       "multiPanelSession", "activeBonusConfig", "hiddenAdvertisingProfiles", "contactFlowCounters",
-      "agentBalanceView", "agentBalancesMinimized"
+      "agentBalanceView", "agentBalancesMinimized", "platformOutageConfig"
     ].includes(entry.key)) {
       unknownKeyCount++;
     }
@@ -320,6 +320,7 @@ const PROFILE_SETTING_KEYS = new Set([
   "multiPanelSuffix",
   "activeBonusConfig",
   "hiddenAdvertisingProfiles",
+  "platformOutageConfig",
   "agentBalanceView",
   "agentBalancesMinimized"
 ]);
@@ -633,6 +634,16 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
       new Set(hiddenAdvertisingProfiles).size !== hiddenAdvertisingProfiles.length)) {
     throw new ApiError(400, "invalid_state", "La lista de paneles minimizados no es válida.");
   }
+  const platformOutageConfig = changes.platformOutageConfig;
+  if (Object.hasOwn(changes, "platformOutageConfig") &&
+    (!platformOutageConfig || typeof platformOutageConfig !== "object" ||
+      Array.isArray(platformOutageConfig) ||
+      typeof platformOutageConfig.ganamos !== "boolean" ||
+      typeof platformOutageConfig.multipanel !== "boolean" ||
+      Object.keys(platformOutageConfig).some((key) =>
+        !["ganamos", "multipanel"].includes(key)))) {
+    throw new ApiError(400, "invalid_state", "La configuración de plataformas caídas no es válida.");
+  }
   if (sharedWrite && expectedRevision === undefined) {
     throw new ApiError(428, "state_revision_required", "Las escrituras compartidas requieren la revisión leída para evitar sobrescrituras.");
   }
@@ -754,6 +765,7 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
         const canonicalCounters = await persistContactFlowCounterSnapshot(
           client,
           identity.workspace_id,
+          identity.profile_id,
           value,
           timestamp
         );
@@ -1174,7 +1186,28 @@ function safeContactFlowCount(value) {
   return count;
 }
 
-async function persistContactFlowCounterSnapshot(client, workspaceId, value, timestamp) {
+function normalizeArgentinaPhone(value) {
+  const digits = value.replace(/\D/g, "");
+  const internationalDigits = digits.startsWith("00") ? digits.slice(2) : digits;
+  const international = internationalDigits.startsWith("54")
+    ? `+${internationalDigits}`
+    : null;
+  const parsed = parsePhoneNumberFromString(
+    international || digits,
+    international ? undefined : "AR"
+  );
+  return parsed?.country === "AR" && parsed.isPossible()
+    ? parsed.number.replace(/\D/g, "")
+    : digits;
+}
+
+async function persistContactFlowCounterSnapshot(
+  client,
+  workspaceId,
+  profileId,
+  value,
+  timestamp
+) {
   const counters = validateCounterSnapshot(value);
   await client.query(`
     INSERT INTO contact_flow_state (
@@ -1332,19 +1365,28 @@ async function persistContactFlowCounterSnapshot(client, workspaceId, value, tim
     countedAt <= timestamp + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS &&
     timestamp - countedAt < CONTACT_FLOW_COUNTED_NUMBER_TTL_MS &&
     countedAt >= generationStartedAt);
+  const existingArrivals = await client.query(`
+    SELECT phone FROM contact_flow_counted_numbers
+    WHERE workspace_id = $1 AND counted_at_ms > $2
+  `, [workspaceId, timestamp - CONTACT_FLOW_COUNTED_NUMBER_TTL_MS]);
+  const normalizedArrivals = new Set(existingArrivals.rows.map(({ phone }) =>
+    normalizeArgentinaPhone(phone)));
   for (const { number, countedAt } of activeNumbers) {
+    const normalizedNumber = normalizeArgentinaPhone(number);
+    if (normalizedArrivals.has(normalizedNumber)) continue;
     const marker = await client.query(`
       INSERT INTO contact_flow_counted_numbers (workspace_id, phone, counted_at_ms)
       VALUES ($1, $2, $3)
       ON CONFLICT (workspace_id, phone) DO NOTHING
       RETURNING phone
-    `, [workspaceId, number, timestamp]);
+    `, [workspaceId, normalizedNumber, timestamp]);
     if (marker.rowCount === 0) continue;
+    normalizedArrivals.add(normalizedNumber);
     await client.query(`
       INSERT INTO contact_flow_count_events (
-        workspace_id, generation, event_type, phone, counted_at_ms
-      ) VALUES ($1, $2, 'arrived', $3, $4)
-    `, [workspaceId, generation, number, timestamp]);
+        workspace_id, generation, event_type, phone, counted_at_ms, source_profile_id
+      ) VALUES ($1, $2, 'arrived', $3, $4, $5)
+    `, [workspaceId, generation, normalizedNumber, timestamp, profileId]);
   }
 
   for (const panel of counters.panels) {
@@ -1360,26 +1402,37 @@ async function persistContactFlowCounterSnapshot(client, workspaceId, value, tim
       countedAt <= timestamp + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS &&
       timestamp - countedAt < CONTACT_FLOW_COUNTED_NUMBER_TTL_MS &&
       countedAt >= generationStartedAt);
+    const existingPanelNumbers = await client.query(`
+      SELECT phone FROM contact_flow_panel_counted_numbers
+      WHERE workspace_id = $1 AND panel_id = $2 AND counted_at_ms > $3
+    `, [workspaceId, panel.id, timestamp - CONTACT_FLOW_COUNTED_NUMBER_TTL_MS]);
+    const normalizedPanelNumbers = new Set(existingPanelNumbers.rows.map(({ phone }) =>
+      normalizeArgentinaPhone(phone)));
     for (const { number, countedAt } of panelNumbers) {
+      const normalizedNumber = normalizeArgentinaPhone(number);
+      if (normalizedPanelNumbers.has(normalizedNumber)) continue;
       const marker = await client.query(`
         INSERT INTO contact_flow_panel_counted_numbers (
           workspace_id, panel_id, phone, counted_at_ms
         ) VALUES ($1, $2, $3, $4)
         ON CONFLICT (workspace_id, panel_id, phone) DO NOTHING
         RETURNING phone
-      `, [workspaceId, panel.id, number, timestamp]);
+      `, [workspaceId, panel.id, normalizedNumber, timestamp]);
       if (marker.rowCount === 0) continue;
+      normalizedPanelNumbers.add(normalizedNumber);
       await client.query(`
         INSERT INTO contact_flow_count_events (
-          workspace_id, generation, event_type, panel_id, destination_id, phone, counted_at_ms
-        ) VALUES ($1, $2, 'derived', $3, $4, $5, $6)
+          workspace_id, generation, event_type, panel_id, destination_id, phone,
+          counted_at_ms, source_profile_id
+        ) VALUES ($1, $2, 'derived', $3, $4, $5, $6, $7)
       `, [
         workspaceId,
         generation,
         panel.id,
         panel.destinationId,
-        number,
-        timestamp
+        normalizedNumber,
+        timestamp,
+        profileId
       ]);
     }
   }
@@ -2774,6 +2827,7 @@ module.exports = {
   createDeviceAssertionNonceCleanup,
   getServerConfig,
   mergeContactFlowCounterSnapshots,
+  normalizeArgentinaPhone,
   validateCounterSnapshot,
   validateDestinations
 };

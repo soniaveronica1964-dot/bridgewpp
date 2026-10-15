@@ -26,8 +26,8 @@ if (-not $config.ApiHost -or -not $config.ApiPort -or
 }
 $healthUri = "https://$($config.ApiHost):$($config.ApiPort)/health"
 $health = Invoke-RestMethod -Uri $healthUri -Method Get -TimeoutSec 8
-if ($health.status -ne 'healthy' -or $health.schemaVersion -ne 8) {
-  throw 'La API existente no está saludable con el esquema 8. No se reemplazaron las tareas.'
+if ($health.status -ne 'healthy' -or $health.schemaVersion -ne 9) {
+  throw 'La API existente no está saludable con el esquema 9. No se reemplazaron las tareas.'
 }
 
 Copy-Item -LiteralPath $launcherSourcePath -Destination $launcherPath -Force
@@ -90,11 +90,11 @@ do {
   } catch {
     $health = $null
   }
-} while (($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 8) -and
+} while (($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 9) -and
   (Get-Date) -lt $deadline)
 
-if ($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 8) {
-  throw 'Las tareas se instalaron, pero la API no confirmó salud con el esquema 8.'
+if ($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 9) {
+  throw 'Las tareas se instalaron, pero la API no confirmó salud con el esquema 9.'
 }
 
 Write-Output 'Tareas instaladas: BridgeWpp Data API (inicio del sistema/logon) y BridgeWpp Data API Keepalive (comprobación cada minuto).'

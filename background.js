@@ -19,6 +19,7 @@ const SHARED_STATE_KEYS = new Set([
   "contactFlowCounters",
   "activeBonusConfig"
 ]);
+const PLATFORM_OUTAGE_CONFIG_KEY = "platformOutageConfig";
 const stateChangedListeners = new Set();
 const loadedProfileStateKeys = new Set();
 let cachedStateRevision = null;
@@ -1391,6 +1392,54 @@ async function publishHiddenAdvertisingProfiles() {
   });
 }
 
+function isValidPlatformOutageConfig(config) {
+  return config !== null && typeof config === "object" && !Array.isArray(config) &&
+    typeof config.ganamos === "boolean" &&
+    typeof config.multipanel === "boolean" &&
+    Object.keys(config).every((key) => ["ganamos", "multipanel"].includes(key));
+}
+
+async function publishPlatformOutageConfig() {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "primary" || !token) {
+    throw new Error("Este perfil no está configurado como principal.");
+  }
+  const stored = await getExtensionState(PLATFORM_OUTAGE_CONFIG_KEY);
+  const config = stored[PLATFORM_OUTAGE_CONFIG_KEY] ?? { ganamos: false, multipanel: false };
+  if (!isValidPlatformOutageConfig(config)) {
+    throw new Error("La configuración de plataformas caídas no es válida y no se puede sincronizar.");
+  }
+  return bridgeFetch("/v1/platform-outages", token, {
+    method: "POST",
+    timeoutMs: 10_000,
+    body: { config }
+  });
+}
+
+async function syncPlatformOutageConfig(revision) {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "secondary" || !token) {
+    throw new Error("Este perfil no está configurado como secundario.");
+  }
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("La versión de configuración de plataformas caídas recibida no es válida.");
+  }
+  const update = await bridgeFetch(
+    `/v1/platform-outages?revision=${revision}`,
+    token,
+    { timeoutMs: 25_000 }
+  );
+  if (!update?.ok || !Number.isSafeInteger(update.revision) || update.revision < 0) {
+    throw new Error("El puente devolvió una versión de plataformas caídas no válida.");
+  }
+  if (!update.changed) return update;
+  if (!isValidPlatformOutageConfig(update.config)) {
+    throw new Error("El puente devolvió una configuración de plataformas caídas no válida.");
+  }
+  await setExtensionState({ [PLATFORM_OUTAGE_CONFIG_KEY]: update.config });
+  return update;
+}
+
 async function syncActiveBonusConfig(revision) {
   const { role, token } = await getBridgeSettings();
   if (role !== "secondary" || !token) {
@@ -1977,6 +2026,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "BRIDGE_PLATFORM_OUTAGES_PUBLISH") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de sincronización no válida." });
+      return;
+    }
+    publishPlatformOutageConfig()
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo sincronizar la configuración de plataformas caídas."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_PLATFORM_OUTAGES_POLL") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de sincronización no válida." });
+      return;
+    }
+    syncPlatformOutageConfig(message.revision)
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo recibir la configuración de plataformas caídas."
+      }));
+    return true;
+  }
+
   if (message?.type === "BRIDGE_POLL" || message?.type === "BRIDGE_COMPLETE") {
     if (!isWhatsAppSender(sender)) {
       sendResponse({ ok: false, error: "Solicitud de puente no válida." });
@@ -2072,7 +2149,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 extensionStateOnChanged.addListener((changes, areaName) => {
   if (areaName !== "local" ||
-    (!changes.activeBonusConfig && !changes[HIDDEN_ADVERTISING_PROFILES_KEY])) return;
+    (!changes.activeBonusConfig && !changes[HIDDEN_ADVERTISING_PROFILES_KEY] &&
+      !changes[PLATFORM_OUTAGE_CONFIG_KEY])) return;
   void getBridgeSettings()
     .then(({ role }) => {
       if (role !== "primary") return null;
@@ -2080,6 +2158,9 @@ extensionStateOnChanged.addListener((changes, areaName) => {
       if (changes.activeBonusConfig) publications.push(publishActiveBonusConfig());
       if (changes[HIDDEN_ADVERTISING_PROFILES_KEY]) {
         publications.push(publishHiddenAdvertisingProfiles());
+      }
+      if (changes[PLATFORM_OUTAGE_CONFIG_KEY]) {
+        publications.push(publishPlatformOutageConfig());
       }
       return Promise.all(publications);
     })

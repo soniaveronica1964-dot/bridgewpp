@@ -845,8 +845,8 @@ CREATE TABLE applied_workspace_operations (
 
 Las tablas de contadores se actualizan en una transacción por workspace. Las
 filas de `contact_flow_counted_numbers` y
-`contact_flow_panel_counted_numbers` conservan la deduplicación durante el plazo
-actual; su inserción con clave única es la que autoriza crear un evento en
+`contact_flow_panel_counted_numbers` conservan la deduplicación durante 12 horas;
+su inserción con clave única es la que autoriza crear un evento en
 `contact_flow_count_events`. Los eventos guardan llegados o derivados con su
 teléfono, panel, destino, hora y generación. Los totales se leen contando esos
 eventos de la generación activa; no se acepta el total enviado por una PC como
@@ -866,6 +866,11 @@ cinco segundos.
 La extensión mantiene las reglas actuales de detección y antigüedad de mensajes.
 La deduplicación única del servidor cubre mensajes que varias PCs procesen a la
 vez; la extensión no suma localmente los contadores al observar un mensaje.
+
+Los números argentinos se normalizan en el servidor a formato internacional
+cuando el formato de entrada es reconocible. Cada evento nuevo registra además
+el perfil que lo originó en `source_profile_id`; los eventos anteriores a la
+migración 009 conservan ese campo en `NULL`.
 
 ### Movimientos
 
@@ -1146,7 +1151,7 @@ equivalentes a las actuales. No basta con que “los datos estén en tablas”.
 ### Contadores de llegados y derivados
 
 - Persistir cada modificación manual y automática.
-- Mantener deduplicación por número y por panel usando las listas de números.
+- Mantener deduplicación por número durante 12 horas y, en derivados, por panel.
 - Mantener los límites seguros de conteo actuales y reportar si se llega a
   ellos.
 - Conservar el orden de paneles y destinos que determina la interfaz.

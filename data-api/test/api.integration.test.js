@@ -249,7 +249,7 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     await migrate(pool, migrations);
     const health = await request(port, "GET", "/health", undefined, null, extensionId);
     assert.equal(health.status, 200);
-    assert.equal(health.body.schemaVersion, 8);
+    assert.equal(health.body.schemaVersion, 9);
     const migratedBonus = await pool.query(`
       SELECT value_json FROM app_settings
       WHERE profile_id = $1 AND setting_key = 'activeBonusConfig'
@@ -722,6 +722,7 @@ test("HTTPS migration imports preserve private and shared data atomically", {
         userCreationPassword: "runtime-secret-password",
         futureRuntimeSecret: { token: "future-secret-value" },
         activeBonusConfig: { type: "simple", enabled: true, percent: 10 },
+        platformOutageConfig: { ganamos: true, multipanel: false },
         remoteCreateDestinations: [{
           id: "remote-1",
           name: "Updated Remote",
@@ -760,7 +761,17 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(stateChanges.status, 200);
     assert.equal(stateChanges.body.values.ganamosSuffix, "q");
     assert.equal(stateChanges.body.values.activeBonusConfig.percent, 10);
+    assert.deepEqual(stateChanges.body.values.platformOutageConfig, {
+      ganamos: true,
+      multipanel: false
+    });
     assert.ok(stateChanges.body.keys.includes("remoteCreateDestinations"));
+    const invalidPlatformOutageWrite = await request(port, "POST", "/v1/state", {
+      changes: { platformOutageConfig: { ganamos: true, multipanel: "false" } },
+      removes: []
+    }, main.credential, extensionId);
+    assert.equal(invalidPlatformOutageWrite.status, 400);
+    assert.equal(invalidPlatformOutageWrite.body.code, "invalid_state");
     const staleRuntimeWrite = await request(port, "POST", "/v1/state", {
       changes: { activeBonusConfig: { type: "simple", enabled: true, percent: 10 } },
       removes: [],
@@ -850,6 +861,10 @@ test("HTTPS migration imports preserve private and shared data atomically", {
           ...mergedCounters.body.values.contactFlowCounters,
           arrived: 500,
           derived: { "remote-1": 500 },
+          countedNumbers: [
+            ...mergedCounters.body.values.contactFlowCounters.countedNumbers,
+            { number: "0111511111111", countedAt: Date.now() }
+          ],
           panels: mergedCounters.body.values.contactFlowCounters.panels.map((panel) => ({
             ...panel,
             count: 500
@@ -862,6 +877,12 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(duplicateSnapshotWrite.status, 200, JSON.stringify(duplicateSnapshotWrite.body));
     assert.equal(duplicateSnapshotWrite.body.contactFlowCounters.arrived, 7);
     assert.equal(duplicateSnapshotWrite.body.contactFlowCounters.derived["remote-1"], 5);
+    const equivalentPhoneEvents = await pool.query(`
+      SELECT count(*)::int AS count FROM contact_flow_count_events
+      WHERE workspace_id = $1 AND generation = 1
+        AND event_type = 'arrived' AND phone = '5491111111111'
+    `, [initialized.workspaceId]);
+    assert.equal(equivalentPhoneEvents.rows[0].count, 1);
     const adjustmentId = "550e8400-e29b-41d4-a716-446655440010";
     const adjustedCounterWrite = await request(port, "POST", "/v1/state", {
       changes: {
@@ -964,7 +985,20 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       SELECT counted_at_ms FROM contact_flow_counted_numbers
       WHERE phone IN ('5491111111111', '5491222222222', '5491444444444')
     `);
-    assert.equal(persistedCounterTimes.rowCount, 3);
+    assert.equal(persistedCounterTimes.rowCount, 3    );
+    const eventSources = await pool.query(`
+      SELECT source_profile_id, count(*)::int AS count
+      FROM contact_flow_count_events
+      WHERE workspace_id = $1 AND generation = 1
+      GROUP BY source_profile_id
+    `, [initialized.workspaceId]);
+    assert.deepEqual(eventSources.rows.map(({ source_profile_id, count }) => ({
+      sourceProfileId: source_profile_id,
+      count
+    })), [{
+      sourceProfileId: main.identity.profileId,
+      count: 5
+    }]);
     assert.ok(persistedCounterTimes.rows.every(({ counted_at_ms }) =>
       Number(counted_at_ms) > 0));
     const runtimeSecret = await pool.query(`

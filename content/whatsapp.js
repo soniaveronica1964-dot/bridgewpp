@@ -4,15 +4,15 @@
   const CONTACT_FLOW_COUNTER_HOST_ID = "ganamos-contact-flow-counters";
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
+  const PLATFORM_OUTAGE_CONFIG_KEY = "platformOutageConfig";
   const HIDDEN_ADVERTISING_PROFILES_KEY = "hiddenAdvertisingProfiles";
   const PROFILE_ID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
   const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 5_000;
-  const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 15_000 * 60_000;
+  const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 45 * 60_000;
   const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
-  const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS =
-    CONTACT_FLOW_MESSAGE_MAX_AGE_MS + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS + 1;
+  const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 12 * 60 * 60 * 1000;
   const TOAST_HOST_ID = "ganamos-toast-host";
   const AGENT_MOVEMENT_PREFIX = "agentMovement:";
   const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "weekly", "monthly", "total"];
@@ -36,6 +36,7 @@
   let agentBalanceView = "balance";
   let agentBalanceContactKey = null;
   let platformSuffixes = { ganamos: "f", multipanel: "y" };
+  let platformOutageConfig = { ganamos: false, multipanel: false };
   let remoteCreateDestinations = [];
   let remoteCreateDestinationsLoaded = false;
   let remoteCreateDestinationsLoadPromise = null;
@@ -108,6 +109,20 @@
             "[Ganamos balance extension] No se pudo actualizar el indicador del bono activo.",
             error
           ));
+      }
+    }
+    if (areaName === "local" && changes[PLATFORM_OUTAGE_CONFIG_KEY]) {
+      try {
+        platformOutageConfig = validatePlatformOutageConfig(
+          changes[PLATFORM_OUTAGE_CONFIG_KEY].newValue
+        );
+        const outageHost = document.getElementById(ACTIVE_BONUS_HOST_ID);
+        if (outageHost) renderPlatformOutageConfig(outageHost);
+      } catch (error) {
+        console.error(
+          "[Ganamos balance extension] No se pudo aplicar la configuración de plataformas caídas.",
+          error
+        );
       }
     }
     if (areaName === "local" && changes.remoteCreateDestinations) {
@@ -2023,6 +2038,64 @@
     return host;
   }
 
+  function validatePlatformOutageConfig(config) {
+    if (!config || typeof config !== "object" || Array.isArray(config) ||
+      typeof config.ganamos !== "boolean" || typeof config.multipanel !== "boolean" ||
+      Object.keys(config).some((key) => !["ganamos", "multipanel"].includes(key))) {
+      throw new Error("La configuración de plataformas caídas no es válida.");
+    }
+    return { ganamos: config.ganamos, multipanel: config.multipanel };
+  }
+
+  async function readPlatformOutageConfig() {
+    const stored = await stateStorage.get(PLATFORM_OUTAGE_CONFIG_KEY);
+    const config = stored[PLATFORM_OUTAGE_CONFIG_KEY];
+    return config == null
+      ? { ganamos: false, multipanel: false }
+      : validatePlatformOutageConfig(config);
+  }
+
+  function renderPlatformOutageConfig(host) {
+    const label = host.shadowRoot?.querySelector(".platform-outage-label");
+    if (label) {
+      label.textContent = platformOutageConfig.ganamos && platformOutageConfig.multipanel
+        ? "Ambas\nCaídas"
+        : platformOutageConfig.ganamos
+          ? "Ganamos\nCaído"
+          : platformOutageConfig.multipanel
+            ? "MultiPanel\nCaído"
+            : "";
+    }
+    for (const button of host.shadowRoot?.querySelectorAll(".platform-outage-toggle") || []) {
+      const down = platformOutageConfig[button.dataset.platform];
+      button.setAttribute("aria-pressed", String(down));
+    }
+  }
+
+  async function togglePlatformOutage(host, platform, button) {
+    const buttons = [...(host.shadowRoot?.querySelectorAll(".platform-outage-toggle") || [])];
+    buttons.forEach((control) => { control.disabled = true; });
+    try {
+      const current = await readPlatformOutageConfig();
+      const next = { ...current, [platform]: !current[platform] };
+      await stateStorage.set({ [PLATFORM_OUTAGE_CONFIG_KEY]: next });
+      platformOutageConfig = next;
+      renderPlatformOutageConfig(host);
+    } catch (error) {
+      console.error("[Ganamos balance extension] No se pudo guardar la configuración de plataformas caídas.", error);
+      showToast(
+        host,
+        "Plataformas",
+        error.message || "No se pudo guardar la configuración.",
+        "error",
+        `platform-outage:${platform}`
+      );
+    } finally {
+      buttons.forEach((control) => { control.disabled = false; });
+      button.focus();
+    }
+  }
+
   function updateActiveBonusVisibility(zoomViewOpen = [...document.querySelectorAll('button[aria-label="Acercar"]')]
     .some(isRenderedVisible)) {
     const host = document.getElementById(ACTIVE_BONUS_HOST_ID);
@@ -2121,13 +2194,18 @@
 
   async function openActiveBonusDialog(host) {
     let savedConfig = null;
+    let savedOutageConfig;
     try {
-      savedConfig = await readActiveBonusConfig();
+      [savedConfig, savedOutageConfig] = await Promise.all([
+        readActiveBonusConfig(),
+        readPlatformOutageConfig()
+      ]);
     } catch (error) {
-      console.error("[Ganamos balance extension] No se pudo cargar la configuración del bono activo.", error);
-      showToast(host, "Bono activo", error.message || "No se pudo cargar la configuración.", "error");
+      console.error("[Ganamos balance extension] No se pudieron cargar las configuraciones del panel.", error);
+      showToast(host, "Configuración", error.message || "No se pudo cargar la configuración.", "error");
       return;
     }
+    platformOutageConfig = savedOutageConfig;
 
     const root = host.shadowRoot?.querySelector(".active-bonus-dialog-root");
     if (!root) return;
@@ -2439,6 +2517,28 @@
     updateAdvertisingPercentVisibility();
     advertisingSetting.append(activeAdvertisingLabel, advertisingPercentLabel);
     bonusSettings.append(copyBonusLabel, invertDepositButtonsLabel, advertisingSetting);
+    const outageSettings = document.createElement("div");
+    outageSettings.className = "platform-outage-settings";
+    const outageHeading = document.createElement("span");
+    outageHeading.className = "platform-outage-heading";
+    outageHeading.textContent = "Disponibilidad de plataformas";
+    const outageButtons = document.createElement("div");
+    outageButtons.className = "platform-outage-buttons";
+    for (const [platform, label] of [
+      ["ganamos", "Ganamos Caído"],
+      ["multipanel", "MultiPanel Caído"]
+    ]) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "platform-outage-toggle";
+      toggle.dataset.platform = platform;
+      toggle.textContent = label;
+      toggle.setAttribute("aria-pressed", String(savedOutageConfig[platform]));
+      toggle.addEventListener("click", () =>
+        void togglePlatformOutage(host, platform, toggle));
+      outageButtons.append(toggle);
+    }
+    outageSettings.append(outageHeading, outageButtons);
     const save = document.createElement("button");
     save.type = "submit";
     save.textContent = "Guardar";
@@ -2449,7 +2549,7 @@
     formLayout.className = "active-bonus-layout";
     formLayout.append(typeSelector, content);
     bonusPanel.append(formLayout);
-    settingsPanel.append(bonusSettings);
+    settingsPanel.append(bonusSettings, outageSettings);
     dialog.append(tabs, bonusPanel, settingsPanel, error, actions);
     modal.append(dialog);
     root.append(modal);
@@ -2628,6 +2728,10 @@
     const indicators = document.createElement("div");
     indicators.className = "active-bonus-indicators";
     indicators.setAttribute("aria-label", "Preferencias de bonos y publicidad");
+    const outageLabel = document.createElement("span");
+    outageLabel.className = "platform-outage-label";
+    outageLabel.setAttribute("role", "status");
+    outageLabel.setAttribute("aria-live", "polite");
     const createIndicator = (name, label, paths) => {
       const indicator = document.createElement(name === "advertising" ? "button" : "span");
       if (name === "advertising") {
@@ -2655,6 +2759,7 @@
       return indicator;
     };
     indicators.append(
+      outageLabel,
       createIndicator("advertising", "Publicidad activa", [
         "M3 11v2h3l11 5V6L6 11H3Z",
         "M6 13l2 6h4l-2.7-4.8",
@@ -2685,6 +2790,15 @@
     root.style.pointerEvents = "auto";
     document.documentElement.append(host);
     if (remoteCreateDestinationsLoaded) updateActiveBonusVisibility();
+    void readPlatformOutageConfig()
+      .then((config) => {
+        platformOutageConfig = config;
+        renderPlatformOutageConfig(host);
+      })
+      .catch((error) => console.error(
+        "[Ganamos balance extension] No se pudo cargar la configuración de plataformas caídas.",
+        error
+      ));
     void readActiveBonusConfig()
       .then((config) => updateActiveBonusButton(host, config))
       .catch((error) => console.error(
@@ -4172,7 +4286,7 @@
       amount.dataset.platform = platform;
       amount.setAttribute("aria-live", "polite");
       amount.textContent = "Cargando...";
-      amount.addEventListener("click", () => selectCurrencyAmount(amount));
+      amount.addEventListener("click", () => void copyAgentBalanceAmount(host, amount));
       const refresh = document.createElement("button");
       refresh.type = "button";
       refresh.className = "agent-balance-refresh";
@@ -4296,18 +4410,33 @@
     }
   }
 
+  async function copyAgentBalanceAmount(host, amount) {
+    const match = amount.textContent.match(/\$\s*([\d.,]+)/);
+    if (!match) return;
+    const platform = amount.dataset.platform;
+    const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
+    await copyContactValue(
+      host,
+      platformName,
+      match[1],
+      "el balance",
+      `copy-agent-balance:${platform}`
+    );
+  }
+
   function findPlatformUsernames(contactName) {
     const usernames = { ganamos: null, multipanel: null };
     const legacy = { ganamos: null, multipanel: null };
     let firstPlatform = null;
     const aliases = contactName.trim().split(/[\s/]+/)
       .map((part) => part.replace(/^[^\p{L}\p{N}._-]+/u, "").replace(/[./]+$/, ""))
-      .map((part) => part.match(/^([\p{L}\p{M}\p{N}._-]+?)([a-z])\2*$/iu))
+      .map((part) => part.match(/^([\p{L}\p{M}\p{N}._-]+?)([a-z])(\2*)$/iu))
       .filter(Boolean);
 
-    for (const [, base, suffix] of aliases) {
+    for (const [, base, suffix, repeatedSuffix] of aliases) {
       if (!/^(?=.*\p{L})(?=.*\d)[\p{L}\p{M}\p{N}._-]+$/u.test(base)) continue;
       const normalizedSuffix = suffix.toLowerCase();
+      const fullSuffix = `${suffix}${repeatedSuffix}`.toLowerCase();
       const platform = normalizedSuffix === platformSuffixes.ganamos
         ? "ganamos"
         : normalizedSuffix === platformSuffixes.multipanel
@@ -4315,7 +4444,7 @@
           : null;
       if (platform) {
         firstPlatform ||= platform;
-        usernames[platform] ||= `${base}${normalizedSuffix}`;
+        usernames[platform] ||= `${base}${fullSuffix}`;
         continue;
       }
       const legacyPlatform = ["n", "t"].includes(normalizedSuffix)
@@ -4324,7 +4453,7 @@
           ? "multipanel"
           : null;
       if (legacyPlatform && !legacy[legacyPlatform]) {
-        legacy[legacyPlatform] = { base, username: `${base}${normalizedSuffix}` };
+        legacy[legacyPlatform] = { base, username: `${base}${fullSuffix}` };
       }
     }
     return { ...usernames, legacy, firstPlatform };
@@ -4589,24 +4718,34 @@
     }));
   }
 
+  async function copyContactValue(host, platform, value, kind, toastKey) {
+    if (!value) return;
+    const message = `Copiado ${kind} ${value} al portapapeles.`;
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast(host, platform, message, "success", toastKey);
+    } catch (error) {
+      console.error(
+        `[Ganamos balance extension] No se pudo copiar ${kind} de ${platform}.`,
+        error
+      );
+      showToast(host, platform, `No se pudo copiar ${kind} al portapapeles.`, "error", toastKey);
+    }
+  }
+
   async function copyContactPlatformUsername(host, platform) {
     const username = host.dataset[
       platform === "ganamos" ? "username" : "multipanelUsername"
     ];
     if (!username) return;
     const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
-    try {
-      await navigator.clipboard.writeText(username);
-      showToast(host, platformName, `Copiado el usuario ${username} al portapapeles.`, "success",
-        `copy-balance:${platform}`);
-    } catch (error) {
-      console.error(
-        `[Ganamos balance extension] No se pudo copiar el usuario de ${platformName}.`,
-        error
-      );
-      showToast(host, platformName, "No se pudo copiar el usuario al portapapeles.", "error",
-        `copy-balance:${platform}`);
-    }
+    await copyContactValue(
+      host,
+      platformName,
+      username,
+      "el usuario",
+      `copy-balance:${platform}:username`
+    );
   }
 
   function renderBalanceRows(host, accounts) {
@@ -4993,8 +5132,20 @@
     const openedAccountsKey = host.dataset.accounts;
     const getPlatformUsername = (platform) =>
       platform === "ganamos" ? host.dataset.username : host.dataset.multipanelUsername;
-    let selectedPlatform = host.dataset.defaultPlatform ||
+    const contactPreferredPlatform = host.dataset.defaultPlatform ||
       (host.dataset.username ? "ganamos" : "multipanel");
+    const outagePreferredPlatform = platformOutageConfig.ganamos !== platformOutageConfig.multipanel
+      ? platformOutageConfig.ganamos
+        ? "multipanel"
+        : "ganamos"
+      : contactPreferredPlatform;
+    let selectedPlatform = getPlatformUsername(outagePreferredPlatform)
+      ? outagePreferredPlatform
+      : getPlatformUsername(contactPreferredPlatform)
+        ? contactPreferredPlatform
+        : host.dataset.username
+          ? "ganamos"
+          : "multipanel";
     let activeBonusConfig = null;
     let activeBonusConfigLoadFailed = false;
     if (operation === "deposit") {
@@ -6059,19 +6210,24 @@
         row.append(pcLabel);
         namesByPlatform.forEach(({ username, platform }, index) => {
           if (index) row.append(document.createTextNode(" / "));
-          const usernameLabel = document.createElement("textarea");
+          const usernameLabel = document.createElement("button");
+          usernameLabel.type = "button";
           usernameLabel.className = "contact-user-search-name";
-          usernameLabel.rows = 1;
-          usernameLabel.wrap = "soft";
-          usernameLabel.readOnly = true;
-          usernameLabel.value = username;
+          usernameLabel.textContent = username;
           usernameLabel.dataset.platform = platform;
           usernameLabel.setAttribute(
             "aria-label",
             `${platform === "ganamos" ? "Ganamos" : "MultiPanel"}: ${username}`
           );
           usernameLabel.title = username;
-          usernameLabel.addEventListener("click", () => usernameLabel.select());
+          usernameLabel.addEventListener("click", () =>
+            void copyContactValue(
+              host,
+              platform === "ganamos" ? "Ganamos" : "MultiPanel",
+              username,
+              "el usuario",
+              `copy-search:${destinationId || "local"}:${platform}:${username}`
+            ));
           row.append(usernameLabel);
         });
         resultsContainer.append(row);

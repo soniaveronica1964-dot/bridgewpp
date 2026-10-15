@@ -34,11 +34,14 @@ let primaryLastSeen = 0;
 let remoteCreateActive = false;
 let activeBonusConfig = null;
 let activeBonusRevision = 0;
+let platformOutageConfig = { ganamos: false, multipanel: false };
+let platformOutageRevision = 1;
 let hiddenAdvertisingProfiles = [];
 let hiddenAdvertisingProfilesRevision = 0;
 const queuedRequests = [];
 const waitingPolls = [];
 const waitingBonusConfigPolls = [];
+const waitingPlatformOutagePolls = [];
 const waitingHiddenAdvertisingProfilesPolls = [];
 const pendingRequests = new Map();
 const remoteNonces = new Map();
@@ -231,8 +234,49 @@ function validateHiddenAdvertisingProfiles(profileIds) {
     new Set(profileIds).size === profileIds.length;
 }
 
+function validatePlatformOutageConfig(config) {
+  return config !== null && typeof config === "object" && !Array.isArray(config) &&
+    typeof config.ganamos === "boolean" &&
+    typeof config.multipanel === "boolean" &&
+    Object.keys(config).every((key) => ["ganamos", "multipanel"].includes(key));
+}
+
 function getActiveBonusConfigUpdate() {
   return { ok: true, changed: true, revision: activeBonusRevision, config: activeBonusConfig };
+}
+
+function getPlatformOutageConfigUpdate() {
+  return {
+    ok: true,
+    changed: true,
+    revision: platformOutageRevision,
+    config: platformOutageConfig
+  };
+}
+
+function waitForPlatformOutageConfig(response, origin, revision) {
+  if (revision !== platformOutageRevision) {
+    sendJson(response, 200, getPlatformOutageConfigUpdate(), origin);
+    return;
+  }
+  const poll = {
+    finish: () => sendJson(response, 200, getPlatformOutageConfigUpdate(), origin),
+    timer: setTimeout(() => {
+      const index = waitingPlatformOutagePolls.indexOf(poll);
+      if (index !== -1) waitingPlatformOutagePolls.splice(index, 1);
+      sendJson(response, 200, {
+        ok: true,
+        changed: false,
+        revision: platformOutageRevision
+      }, origin);
+    }, POLL_TIMEOUT_MS)
+  };
+  waitingPlatformOutagePolls.push(poll);
+  response.on("close", () => {
+    clearTimeout(poll.timer);
+    const index = waitingPlatformOutagePolls.indexOf(poll);
+    if (index !== -1) waitingPlatformOutagePolls.splice(index, 1);
+  });
 }
 
 function waitForActiveBonusConfig(response, origin, revision) {
@@ -381,6 +425,49 @@ async function handleRequest(request, response) {
       }
     }
     sendJson(response, 200, { ok: true, revision: activeBonusRevision }, origin);
+    return;
+  }
+
+  if (url.pathname === "/v1/platform-outages" && request.method === "GET") {
+    if (role !== "client") {
+      sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden recibir la configuración." }, origin);
+      return;
+    }
+    const revision = Number(url.searchParams.get("revision") || 0);
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+      sendJson(response, 400, { ok: false, error: "Versión de configuración no válida." }, origin);
+      return;
+    }
+    waitForPlatformOutageConfig(response, origin, revision);
+    return;
+  }
+
+  if (url.pathname === "/v1/platform-outages" && request.method === "POST") {
+    if (role !== "primary") {
+      sendJson(response, 403, { ok: false, error: "Solo el perfil principal puede publicar la configuración." }, origin);
+      return;
+    }
+    let body;
+    try {
+      body = await readJson(request);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message }, origin);
+      return;
+    }
+    if (!Object.hasOwn(body || {}, "config") || !validatePlatformOutageConfig(body.config)) {
+      sendJson(response, 400, { ok: false, error: "La configuración de plataformas caídas no es válida." }, origin);
+      return;
+    }
+    const serializedConfig = JSON.stringify(body.config);
+    if (serializedConfig !== JSON.stringify(platformOutageConfig)) {
+      platformOutageConfig = JSON.parse(serializedConfig);
+      platformOutageRevision += 1;
+      for (const poll of waitingPlatformOutagePolls.splice(0)) {
+        clearTimeout(poll.timer);
+        poll.finish();
+      }
+    }
+    sendJson(response, 200, { ok: true, revision: platformOutageRevision }, origin);
     return;
   }
 

@@ -20,9 +20,12 @@ if (-not $config.Repo -or -not $config.DbHost -or -not $config.DbPort -or
 }
 
 $repoPath = [IO.Path]::GetFullPath($config.Repo)
+$apiDirectory = Join-Path $repoPath 'data-api'
+$packagePath = Join-Path $apiDirectory 'package.json'
+$lockPath = Join-Path $apiDirectory 'package-lock.json'
 $serverPath = Join-Path $repoPath 'data-api\server.js'
 $migrationPath = Join-Path $repoPath 'data-api\migrate.js'
-foreach ($requiredPath in @($serverPath, $migrationPath)) {
+foreach ($requiredPath in @($packagePath, $lockPath, $serverPath, $migrationPath)) {
   if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
     throw "No se encontró el archivo requerido para actualizar la API: $requiredPath"
   }
@@ -34,6 +37,13 @@ $env:PGDATABASE = $config.DbName
 $env:PGUSER = $config.DbUser
 $env:PGPASSWORD = $config.DbPassword
 $nodePath = (Get-Command node.exe -ErrorAction Stop).Source
+$npmPath = (Get-Command npm.cmd -ErrorAction Stop).Source
+
+Write-Output 'Instalando dependencias de la API...'
+& $npmPath ci --omit=dev --prefix $apiDirectory
+if ($LASTEXITCODE -ne 0) {
+  throw "La instalación de dependencias terminó con código $LASTEXITCODE. La API no se reinició."
+}
 
 Write-Output 'Aplicando migraciones PostgreSQL...'
 & $nodePath $migrationPath
@@ -89,10 +99,10 @@ do {
     $health = $null
   }
 } while (($null -eq $health -or $health.status -ne 'healthy' -or
-    $health.schemaVersion -ne 8) -and (Get-Date) -lt $deadline)
+    $health.schemaVersion -ne 9) -and (Get-Date) -lt $deadline)
 
-if ($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 8) {
-  throw "La API no confirmó salud con el esquema 8. Revisá $supportDirectory\api.log."
+if ($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 9) {
+  throw "La API no confirmó salud con el esquema 9. Revisá $supportDirectory\api.log."
 }
 
 Write-Output "API actualizada y saludable con esquema $($health.schemaVersion): $healthUri"

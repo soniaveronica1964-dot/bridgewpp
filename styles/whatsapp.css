@@ -565,6 +565,25 @@
   pointer-events: none;
 }
 
+.platform-outage-label {
+  position: absolute;
+  top: -28px;
+  left: 50%;
+  width: max-content;
+  max-width: calc(100vw - 30px);
+  transform: translateX(-50%);
+  color: #ff6262;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  white-space: pre-line;
+}
+
+.platform-outage-label:empty {
+  display: none;
+}
+
 .active-bonus-indicator {
   display: grid;
   place-items: center;
@@ -1033,6 +1052,53 @@
   min-width: 0;
 }
 
+.platform-outage-settings {
+  display: grid;
+  gap: 7px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bonus-border);
+}
+
+.platform-outage-heading {
+  color: #d5dddb;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.platform-outage-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.platform-outage-toggle {
+  flex: 1 1 150px;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid #596966;
+  border-radius: 6px;
+  color: #d6dfdc;
+  background: #263432;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.platform-outage-toggle:hover:not(:disabled) {
+  background: #344340;
+}
+
+.platform-outage-toggle[aria-pressed="true"],
+.platform-outage-toggle[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: #ff4545;
+  color: #ffffff;
+  background: #a91f2b;
+}
+
+.platform-outage-toggle:focus-visible {
+  outline: 2px solid #ff6262;
+  outline-offset: 2px;
+}
+
 .active-bonus-advertising-setting {
   position: relative;
   display: flex;
@@ -1415,11 +1481,10 @@
 
 .contact-user-search-row {
   line-height: 1.4;
-  cursor: text;
+  cursor: default;
 }
 
 .contact-user-search-name {
-  field-sizing: content;
   display: inline-block;
   box-sizing: content-box;
   max-width: 100%;
@@ -1428,19 +1493,27 @@
   padding: 1px 1px 2px;
   border: 0;
   border-radius: 0;
-  outline: none;
-  overflow-x: hidden;
-  overflow-y: hidden;
   overflow-wrap: anywhere;
-  resize: none;
   background: transparent;
   font: inherit;
   line-height: 1.4;
   text-align: center;
   vertical-align: middle;
   transition: none;
-  white-space: pre-wrap;
-  cursor: text;
+  white-space: normal;
+  cursor: pointer;
+  appearance: none;
+}
+
+.contact-user-search-name:hover:not(:disabled),
+.contact-user-search-name:active:not(:disabled) {
+  background: transparent;
+  transform: none;
+}
+
+.contact-user-search-name:focus-visible {
+  outline: 2px solid #00a884;
+  outline-offset: 1px;
 }
 
 .contact-user-search-pc {
@@ -1487,6 +1560,11 @@
 .balance-platform-copy:active:not(:disabled) {
   background: transparent;
   transform: none;
+}
+
+.balance-platform-copy:focus-visible {
+  outline: 2px solid #00a884;
+  outline-offset: 1px;
 }
 
 .refresh {
@@ -3497,7 +3575,7 @@ input::placeholder {
   white-space: nowrap;
   user-select: text;
   -webkit-user-select: text;
-  cursor: text;
+  cursor: pointer;
 }
 
 .agent-balance-amount[data-platform="ganamos"] {
