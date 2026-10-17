@@ -3815,9 +3815,7 @@
     const title = document.createElement("h2");
     title.id = "advertising-analytics-title";
     title.textContent = "Estadísticas de publicidad";
-    const subtitle = document.createElement("p");
-    subtitle.textContent = "Los paneles visibles de este espacio compartido";
-    heading.append(title, subtitle);
+    heading.append(title);
     const close = document.createElement("button");
     close.type = "button";
     close.className = "advertising-analytics-close";
@@ -3852,10 +3850,6 @@
     customRange.append(fromLabel, toLabel, rangeError);
     const body = document.createElement("div");
     body.className = "advertising-analytics-body";
-    const footnote = document.createElement("p");
-    footnote.className = "advertising-analytics-footnote";
-    footnote.textContent =
-      "Los contactos se identifican por la clave guardada en sus movimientos; si cambia, puede dividir las estadísticas de una misma persona.";
 
     let requestSequence = 0;
     let activeTab = "summary";
@@ -3881,7 +3875,8 @@
           hiddenProfileIds,
           canManageHiddenProfiles,
           profileVisibilitySaveInProgress,
-          changeHiddenProfile
+          changeHiddenProfile,
+          invertHiddenProfiles
         );
       }
     };
@@ -3936,7 +3931,8 @@
           hiddenProfileIds,
           canManageHiddenProfiles,
           profileVisibilitySaveInProgress,
-          changeHiddenProfile
+          changeHiddenProfile,
+          invertHiddenProfiles
         );
       } catch (error) {
         console.error("[Ganamos balance extension] No se pudieron cargar las estadísticas de publicidad.", error);
@@ -3966,6 +3962,28 @@
         failure.className = "advertising-analytics-state advertising-analytics-error";
         failure.textContent =
           `No se pudo guardar la configuración: ${error.message || "error desconocido."}`;
+        body.replaceChildren(failure);
+      } finally {
+        profileVisibilitySaveInProgress = false;
+      }
+    };
+    const invertHiddenProfiles = async () => {
+      if (!canManageHiddenProfiles || profileVisibilitySaveInProgress) return;
+      profileVisibilitySaveInProgress = true;
+      try {
+        const activeProfileIds = (loadedStats?.profiles || [])
+          .map((profile) => profile.profile_id);
+        await stateStorage.set({
+          [HIDDEN_ADVERTISING_PROFILES_KEY]: [...new Set(activeProfileIds)].sort()
+        });
+        profileVisibilitySaveInProgress = false;
+        await load(activeFilters, activePeriod);
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo invertir la selección de paneles.", error);
+        const failure = document.createElement("p");
+        failure.className = "advertising-analytics-state advertising-analytics-error";
+        failure.textContent =
+          `No se pudo invertir la selección: ${error.message || "error desconocido."}`;
         body.replaceChildren(failure);
       } finally {
         profileVisibilitySaveInProgress = false;
@@ -4101,7 +4119,7 @@
     toInput.value = formatDateTime(today);
     fromInput.addEventListener("change", updateCustomRange);
     toInput.addEventListener("change", updateCustomRange);
-    dialog.append(header, periods, customRange, tabs, body, footnote);
+    dialog.append(header, periods, customRange, tabs, body);
     backdrop.append(dialog);
     shadow.append(backdrop);
     void load(getCalendarMonthFilter(), "current-month");
@@ -4114,12 +4132,18 @@
     hiddenProfileIds = [],
     canManageHiddenProfiles = false,
     profileVisibilitySaveInProgress = false,
-    onToggleProfile = () => {}
+    onToggleProfile = () => {},
+    onInvertProfiles = () => {}
   ) {
     const summary = stats.summary;
     const money = (minor) => `$${formatCurrency(Number(minor || 0) / 100)}`;
     const count = (value) => new Intl.NumberFormat("es-AR").format(Number(value || 0));
-    const rate = (value, total) => total ? `${(Number(value) / Number(total) * 100).toFixed(1)}%` : "—";
+    const rate = (value, total) => {
+      const denominator = Number(total);
+      return Number.isFinite(denominator) && denominator > 0
+        ? `${(Number(value) / denominator * 100).toFixed(1)}%`
+        : "—";
+    };
     body.replaceChildren();
 
     if (activeTab === "summary") {
@@ -4163,27 +4187,23 @@
         returnTitle.textContent = title;
         const returnGrid = document.createElement("div");
         returnGrid.className = "advertising-analytics-return-grid";
-        for (const [label, key, eligibleKey] of [
-          ["Volvieron a depositar", "customers_with_later_deposit"],
-          ["Volvieron con publicidad", "customers_with_later_advertising"],
-          ["Volvieron en 7 días", "customers_returned_within_7_days", "eligible_7_day_cohort"],
-          ["Volvieron en 30 días", "customers_returned_within_30_days", "eligible_30_day_cohort"]
+        for (const [label, key] of [
+          ["Depósitos posteriores", "customers_with_later_deposit"],
+          ["Con publicidad", "customers_with_later_advertising"],
+          ["1–7 días", "customers_returned_within_7_days"],
+          ["8–30 días", "customers_returned_between_7_and_30_days"],
+          ["Más de 30 días", "customers_returned_after_30_days"]
         ]) {
           const item = document.createElement("div");
           item.className = "advertising-analytics-return-item";
           const value = document.createElement("strong");
-          const denominator = eligibleKey ? tier[eligibleKey] : tier.cohort_customers;
-          value.textContent = `${count(tier[key])} (${rate(tier[key], denominator)})`;
+          value.textContent = `${count(tier[key])} (${rate(tier[key], tier.cohort_customers)})`;
           const name = document.createElement("span");
           name.textContent = label;
           item.append(value, name);
           returnGrid.append(item);
         }
-        const cohortNote = document.createElement("p");
-        cohortNote.className = "advertising-analytics-note";
-        cohortNote.textContent =
-          `Cohorte: ${count(tier.cohort_customers)} contactos identificados; las categorías son acumulables. Las tasas de 7/30 días solo incluyen contactos con esa ventana completa de seguimiento.`;
-        returns.append(returnTitle, returnGrid, cohortNote);
+        returns.append(returnTitle, returnGrid);
         body.append(returns);
       }
       return;
@@ -4313,6 +4333,16 @@
         restore.addEventListener("click", () => onToggleProfile(profileId));
         minimizedButtons.append(restore);
       }
+      const invert = document.createElement("button");
+      invert.type = "button";
+      invert.className = "advertising-analytics-profile-action advertising-analytics-invert";
+      invert.textContent = "Invertir selección";
+      invert.disabled = !canManageHiddenProfiles || profileVisibilitySaveInProgress;
+      invert.title = canManageHiddenProfiles
+        ? "Restaurar los paneles minimizados y minimizar los activos."
+        : "Solo el perfil principal puede cambiar los paneles minimizados.";
+      invert.addEventListener("click", () => onInvertProfiles());
+      minimizedButtons.append(invert);
       minimized.append(minimizedTitle, minimizedButtons);
       if (!canManageHiddenProfiles) {
         const note = document.createElement("p");

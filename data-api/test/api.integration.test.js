@@ -530,7 +530,55 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(reorderedLegacyHistory.body.movements.length, 1);
     assert.equal(reorderedLegacyHistory.body.movements[0].username, "user-a");
     const advertisingTimestamp = Date.now() - 10 * 24 * 60 * 60 * 1000;
+    const olderAdvertisingTimestamp = Date.now() - 70 * 24 * 60 * 60 * 1000;
     const advertisingMovements = {
+      [`agentMovement:${olderAdvertisingTimestamp}:old-ad-1`]: {
+        contactKey: "advertising-customer-1",
+        operation: "deposit",
+        amount: 10,
+        transactionAmount: 10,
+        bonusAmount: 0,
+        platform: "ganamos",
+        timestamp: olderAdvertisingTimestamp,
+        depositType: "advertising"
+      },
+      [`agentMovement:${olderAdvertisingTimestamp + 15 * 86_400_000}:old-return-1-mid-window`]: {
+        contactKey: "advertising-customer-1",
+        operation: "deposit",
+        amount: 10,
+        transactionAmount: 10,
+        bonusAmount: 0,
+        platform: "ganamos",
+        timestamp: olderAdvertisingTimestamp + 15 * 86_400_000
+      },
+      [`agentMovement:${olderAdvertisingTimestamp + 31 * 86_400_000}:old-return-1`]: {
+        contactKey: "advertising-customer-1",
+        operation: "deposit",
+        amount: 10,
+        transactionAmount: 10,
+        bonusAmount: 0,
+        platform: "ganamos",
+        timestamp: olderAdvertisingTimestamp + 31 * 86_400_000
+      },
+      [`agentMovement:${olderAdvertisingTimestamp}:old-ad-2`]: {
+        contactKey: "advertising-customer-2",
+        operation: "deposit",
+        amount: 10,
+        transactionAmount: 10,
+        bonusAmount: 0,
+        platform: "ganamos",
+        timestamp: olderAdvertisingTimestamp,
+        depositType: "advertising"
+      },
+      [`agentMovement:${olderAdvertisingTimestamp + 31 * 86_400_000}:old-return-2`]: {
+        contactKey: "advertising-customer-2",
+        operation: "deposit",
+        amount: 10,
+        transactionAmount: 10,
+        bonusAmount: 0,
+        platform: "ganamos",
+        timestamp: olderAdvertisingTimestamp + 31 * 86_400_000
+      },
       [`agentMovement:${advertisingTimestamp}:ad-1`]: {
         contactKey: "advertising-customer-1",
         operation: "deposit",
@@ -654,6 +702,30 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       200,
       JSON.stringify(advertisingStatsWithoutPeriod.body)
     );
+    assert.deepEqual(
+      {
+        oneLoadBetween: advertisingStatsWithoutPeriod.body.summary.return_tiers.one_load
+          .customers_returned_between_7_and_30_days,
+        twoLoadsBetween: advertisingStatsWithoutPeriod.body.summary.return_tiers.two_loads
+          .customers_returned_between_7_and_30_days,
+        moreThanFiveLoadsBetween: advertisingStatsWithoutPeriod.body.summary.return_tiers
+          .more_than_five_loads.customers_returned_between_7_and_30_days,
+        oneLoad: advertisingStatsWithoutPeriod.body.summary.return_tiers.one_load
+          .customers_returned_after_30_days,
+        twoLoads: advertisingStatsWithoutPeriod.body.summary.return_tiers.two_loads
+          .customers_returned_after_30_days,
+        moreThanFiveLoads: advertisingStatsWithoutPeriod.body.summary.return_tiers
+          .more_than_five_loads.customers_returned_after_30_days
+      },
+      {
+        oneLoadBetween: "1",
+        twoLoadsBetween: "1",
+        moreThanFiveLoadsBetween: "1",
+        oneLoad: "2",
+        twoLoads: "2",
+        moreThanFiveLoads: "1"
+      }
+    );
     const advertisingStats = await request(
       port,
       "GET",
@@ -680,7 +752,8 @@ test("HTTPS migration imports preserve private and shared data atomically", {
         customers_with_later_deposit: "2",
         customers_with_later_advertising: "1",
         customers_returned_within_7_days: "2",
-        customers_returned_within_30_days: "2",
+        customers_returned_between_7_and_30_days: "0",
+        customers_returned_after_30_days: "0",
         cohort_customers: "2",
         eligible_7_day_cohort: "2",
         eligible_30_day_cohort: "0"
@@ -689,7 +762,8 @@ test("HTTPS migration imports preserve private and shared data atomically", {
         customers_with_later_deposit: "2",
         customers_with_later_advertising: "1",
         customers_returned_within_7_days: "2",
-        customers_returned_within_30_days: "2",
+        customers_returned_between_7_and_30_days: "0",
+        customers_returned_after_30_days: "0",
         cohort_customers: "2",
         eligible_7_day_cohort: "2",
         eligible_30_day_cohort: "0"
@@ -698,7 +772,8 @@ test("HTTPS migration imports preserve private and shared data atomically", {
         customers_with_later_deposit: "1",
         customers_with_later_advertising: "1",
         customers_returned_within_7_days: "1",
-        customers_returned_within_30_days: "1",
+        customers_returned_between_7_and_30_days: "0",
+        customers_returned_after_30_days: "0",
         cohort_customers: "2",
         eligible_7_day_cohort: "2",
         eligible_30_day_cohort: "0"

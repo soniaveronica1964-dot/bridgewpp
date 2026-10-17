@@ -3110,9 +3110,7 @@ input::placeholder {
   font-weight: 650;
 }
 
-.advertising-analytics-header p,
 .advertising-analytics-note,
-.advertising-analytics-footnote,
 .advertising-analytics-pending {
   margin: 4px 0 0;
   color: #aab6b5;
@@ -3285,7 +3283,7 @@ input::placeholder {
 
 .advertising-analytics-return-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -3370,6 +3368,17 @@ input::placeholder {
   opacity: 0.6;
 }
 
+.advertising-analytics-invert {
+  border-color: #27885f;
+  color: #e9fff6;
+  background: #176b49;
+  font-weight: 600;
+}
+
+.advertising-analytics-invert:hover:not(:disabled) {
+  background: #21865b;
+}
+
 .advertising-analytics-minimized {
   display: grid;
   gap: 8px;
@@ -3397,11 +3406,6 @@ input::placeholder {
 
 .advertising-analytics-error {
   color: #f15c6d;
-}
-
-.advertising-analytics-footnote {
-  padding-top: 10px;
-  border-top: 1px solid #303a39;
 }
 
 @media (max-width: 600px) {

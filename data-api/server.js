@@ -2361,8 +2361,12 @@ function createDataApiServer({ pool, config }) {
                        WHERE later.timestamp_ms <= cohort.first_advertising_at + 604800000
                      ) AS later_deposits_within_7_days,
                      count(later.legacy_storage_key) FILTER (
-                       WHERE later.timestamp_ms <= cohort.first_advertising_at + 2592000000
-                     ) AS later_deposits_within_30_days
+                       WHERE later.timestamp_ms > cohort.first_advertising_at + 604800000
+                         AND later.timestamp_ms <= cohort.first_advertising_at + 2592000000
+                     ) AS later_deposits_between_7_and_30_days,
+                     count(later.legacy_storage_key) FILTER (
+                       WHERE later.timestamp_ms > cohort.first_advertising_at + 2592000000
+                     ) AS later_deposits_after_30_days
               FROM cohort
               LEFT JOIN agent_movements AS later
                 ON later.workspace_id = $1
@@ -2386,9 +2390,13 @@ function createDataApiServer({ pool, config }) {
                     (count(*) FILTER (
                       WHERE later_deposits >= 1 AND later_deposits_within_7_days > 0
                     ))::text,
-                  'customers_returned_within_30_days',
+                  'customers_returned_between_7_and_30_days',
                     (count(*) FILTER (
-                      WHERE later_deposits >= 1 AND later_deposits_within_30_days > 0
+                      WHERE later_deposits >= 1 AND later_deposits_between_7_and_30_days > 0
+                    ))::text,
+                  'customers_returned_after_30_days',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 1 AND later_deposits_after_30_days > 0
                     ))::text,
                   'cohort_customers', (count(*))::text,
                   'eligible_7_day_cohort',
@@ -2413,9 +2421,13 @@ function createDataApiServer({ pool, config }) {
                     (count(*) FILTER (
                       WHERE later_deposits >= 2 AND later_deposits_within_7_days > 0
                     ))::text,
-                  'customers_returned_within_30_days',
+                  'customers_returned_between_7_and_30_days',
                     (count(*) FILTER (
-                      WHERE later_deposits >= 2 AND later_deposits_within_30_days > 0
+                      WHERE later_deposits >= 2 AND later_deposits_between_7_and_30_days > 0
+                    ))::text,
+                  'customers_returned_after_30_days',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 2 AND later_deposits_after_30_days > 0
                     ))::text,
                   'cohort_customers', (count(*))::text,
                   'eligible_7_day_cohort',
@@ -2440,9 +2452,13 @@ function createDataApiServer({ pool, config }) {
                     (count(*) FILTER (
                       WHERE later_deposits >= 6 AND later_deposits_within_7_days > 0
                     ))::text,
-                  'customers_returned_within_30_days',
+                  'customers_returned_between_7_and_30_days',
                     (count(*) FILTER (
-                      WHERE later_deposits >= 6 AND later_deposits_within_30_days > 0
+                      WHERE later_deposits >= 6 AND later_deposits_between_7_and_30_days > 0
+                    ))::text,
+                  'customers_returned_after_30_days',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 6 AND later_deposits_after_30_days > 0
                     ))::text,
                   'cohort_customers', (count(*))::text,
                   'eligible_7_day_cohort',
