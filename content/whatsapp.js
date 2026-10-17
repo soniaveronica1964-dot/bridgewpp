@@ -4148,35 +4148,44 @@
         `${count(summary.customers)} contactos identificados · ${count(summary.pending_deposits)} cargas pendientes excluidas de los importes.`;
       body.append(pending);
 
-      const returns = document.createElement("section");
-      returns.className = "advertising-analytics-section";
-      const returnTitle = document.createElement("h3");
-      returnTitle.textContent = "Retorno de contactos";
-      const returnGrid = document.createElement("div");
-      returnGrid.className = "advertising-analytics-return-grid";
-      const cohort = summary.cohort_customers;
-      for (const [label, key, eligibleKey] of [
-        ["Volvieron a depositar", "customers_with_later_deposit"],
-        ["Volvieron con publicidad", "customers_with_later_advertising"],
-        ["Volvieron en 7 días", "customers_returned_within_7_days", "eligible_7_day_cohort"],
-        ["Volvieron en 30 días", "customers_returned_within_30_days", "eligible_30_day_cohort"]
+      for (const [tierKey, title] of [
+        ["one_load", "Actual · retorno de 1 carga o más"],
+        ["two_loads", "Retorno de 2 cargas o más"],
+        ["more_than_five_loads", "Retorno de más de 5 cargas"]
       ]) {
-        const item = document.createElement("div");
-        item.className = "advertising-analytics-return-item";
-        const value = document.createElement("strong");
-        const denominator = eligibleKey ? summary[eligibleKey] : cohort;
-        value.textContent = `${count(summary[key])} (${rate(summary[key], denominator)})`;
-        const name = document.createElement("span");
-        name.textContent = label;
-        item.append(value, name);
-        returnGrid.append(item);
+        const tier = summary.return_tiers?.[tierKey];
+        if (!tier) {
+          throw new Error(`La API no devolvió los datos de retorno para «${title}».`);
+        }
+        const returns = document.createElement("section");
+        returns.className = "advertising-analytics-section";
+        const returnTitle = document.createElement("h3");
+        returnTitle.textContent = title;
+        const returnGrid = document.createElement("div");
+        returnGrid.className = "advertising-analytics-return-grid";
+        for (const [label, key, eligibleKey] of [
+          ["Volvieron a depositar", "customers_with_later_deposit"],
+          ["Volvieron con publicidad", "customers_with_later_advertising"],
+          ["Volvieron en 7 días", "customers_returned_within_7_days", "eligible_7_day_cohort"],
+          ["Volvieron en 30 días", "customers_returned_within_30_days", "eligible_30_day_cohort"]
+        ]) {
+          const item = document.createElement("div");
+          item.className = "advertising-analytics-return-item";
+          const value = document.createElement("strong");
+          const denominator = eligibleKey ? tier[eligibleKey] : tier.cohort_customers;
+          value.textContent = `${count(tier[key])} (${rate(tier[key], denominator)})`;
+          const name = document.createElement("span");
+          name.textContent = label;
+          item.append(value, name);
+          returnGrid.append(item);
+        }
+        const cohortNote = document.createElement("p");
+        cohortNote.className = "advertising-analytics-note";
+        cohortNote.textContent =
+          `Cohorte: ${count(tier.cohort_customers)} contactos identificados; las categorías son acumulables. Las tasas de 7/30 días solo incluyen contactos con esa ventana completa de seguimiento.`;
+        returns.append(returnTitle, returnGrid, cohortNote);
+        body.append(returns);
       }
-      const cohortNote = document.createElement("p");
-      cohortNote.className = "advertising-analytics-note";
-      cohortNote.textContent =
-        `Cohorte: ${count(cohort)} contactos identificados; las tasas de 7/30 días solo incluyen contactos con esa ventana completa de seguimiento.`;
-      returns.append(returnTitle, returnGrid, cohortNote);
-      body.append(returns);
       return;
     }
 

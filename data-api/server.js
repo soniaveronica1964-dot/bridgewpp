@@ -2347,6 +2347,117 @@ function createDataApiServer({ pool, config }) {
               FROM confirmed_advertising
               WHERE contact_key IS NOT NULL
               GROUP BY contact_key
+            ),
+            cohort_returns AS (
+              SELECT cohort.contact_key,
+                     cohort.first_advertising_at,
+                     count(later.legacy_storage_key) FILTER (
+                       WHERE later.operation = 'deposit'
+                     ) AS later_deposits,
+                     count(later.legacy_storage_key) FILTER (
+                       WHERE later.is_advertising
+                     ) AS later_advertising_deposits,
+                     count(later.legacy_storage_key) FILTER (
+                       WHERE later.timestamp_ms <= cohort.first_advertising_at + 604800000
+                     ) AS later_deposits_within_7_days,
+                     count(later.legacy_storage_key) FILTER (
+                       WHERE later.timestamp_ms <= cohort.first_advertising_at + 2592000000
+                     ) AS later_deposits_within_30_days
+              FROM cohort
+              LEFT JOIN agent_movements AS later
+                ON later.workspace_id = $1
+               AND later.contact_key = cohort.contact_key
+               AND later.operation = 'deposit'
+               AND later.status IS DISTINCT FROM 'pending-verification'
+               AND later.timestamp_ms > cohort.first_advertising_at
+               AND ($4::uuid[] IS NULL OR later.source_profile_id <> ALL($4::uuid[]))
+              GROUP BY cohort.contact_key, cohort.first_advertising_at
+            ),
+            return_tiers AS (
+              SELECT jsonb_build_object(
+                'one_load', jsonb_build_object(
+                  'customers_with_later_deposit',
+                    (count(*) FILTER (WHERE later_deposits >= 1))::text,
+                  'customers_with_later_advertising',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 1 AND later_advertising_deposits > 0
+                    ))::text,
+                  'customers_returned_within_7_days',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 1 AND later_deposits_within_7_days > 0
+                    ))::text,
+                  'customers_returned_within_30_days',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 1 AND later_deposits_within_30_days > 0
+                    ))::text,
+                  'cohort_customers', (count(*))::text,
+                  'eligible_7_day_cohort',
+                    (count(*) FILTER (
+                      WHERE first_advertising_at <=
+                        floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 604800000
+                    ))::text,
+                  'eligible_30_day_cohort',
+                    (count(*) FILTER (
+                      WHERE first_advertising_at <=
+                        floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 2592000000
+                    ))::text
+                ),
+                'two_loads', jsonb_build_object(
+                  'customers_with_later_deposit',
+                    (count(*) FILTER (WHERE later_deposits >= 2))::text,
+                  'customers_with_later_advertising',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 2 AND later_advertising_deposits > 0
+                    ))::text,
+                  'customers_returned_within_7_days',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 2 AND later_deposits_within_7_days > 0
+                    ))::text,
+                  'customers_returned_within_30_days',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 2 AND later_deposits_within_30_days > 0
+                    ))::text,
+                  'cohort_customers', (count(*))::text,
+                  'eligible_7_day_cohort',
+                    (count(*) FILTER (
+                      WHERE first_advertising_at <=
+                        floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 604800000
+                    ))::text,
+                  'eligible_30_day_cohort',
+                    (count(*) FILTER (
+                      WHERE first_advertising_at <=
+                        floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 2592000000
+                    ))::text
+                ),
+                'more_than_five_loads', jsonb_build_object(
+                  'customers_with_later_deposit',
+                    (count(*) FILTER (WHERE later_deposits >= 6))::text,
+                  'customers_with_later_advertising',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 6 AND later_advertising_deposits > 0
+                    ))::text,
+                  'customers_returned_within_7_days',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 6 AND later_deposits_within_7_days > 0
+                    ))::text,
+                  'customers_returned_within_30_days',
+                    (count(*) FILTER (
+                      WHERE later_deposits >= 6 AND later_deposits_within_30_days > 0
+                    ))::text,
+                  'cohort_customers', (count(*))::text,
+                  'eligible_7_day_cohort',
+                    (count(*) FILTER (
+                      WHERE first_advertising_at <=
+                        floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 604800000
+                    ))::text,
+                  'eligible_30_day_cohort',
+                    (count(*) FILTER (
+                      WHERE first_advertising_at <=
+                        floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 2592000000
+                    ))::text
+                )
+              ) AS tiers
+              FROM cohort_returns
             )
             SELECT
               (SELECT count(*)::text FROM confirmed_advertising) AS deposits,
@@ -2411,7 +2522,8 @@ function createDataApiServer({ pool, config }) {
                    AND later.status IS DISTINCT FROM 'pending-verification'
                    AND later.timestamp_ms > cohort.first_advertising_at
                    AND later.timestamp_ms <= cohort.first_advertising_at + 2592000000
-               )) AS customers_returned_within_30_days
+               )) AS customers_returned_within_30_days,
+              (SELECT tiers FROM return_tiers) AS return_tiers
           `, [identity.workspace_id, since, until, excludedProfiles]),
           pool.query(`
             SELECT movements.platform,
