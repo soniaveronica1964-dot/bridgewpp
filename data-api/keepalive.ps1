@@ -14,7 +14,7 @@ function Get-HealthResponse($healthUri) {
     $health = Invoke-RestMethod -Uri $healthUri -Method Get -TimeoutSec 5
     return @{
       Responded = $true
-      Healthy = $health.status -eq 'healthy' -and $health.schemaVersion -eq 9
+      Healthy = $health.status -eq 'healthy' -and $health.schemaVersion -eq 10
       Detail = "HTTP 200, schema $($health.schemaVersion)"
     }
   } catch {

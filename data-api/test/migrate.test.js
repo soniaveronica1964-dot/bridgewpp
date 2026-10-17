@@ -3,6 +3,7 @@ const test = require("node:test");
 const { getDatabaseConfig, loadMigrations } = require("../migrate");
 const {
   createDeviceAssertionNonceCleanup,
+  getMovementAccountIds,
   getServerConfig,
   mergeContactFlowCounterSnapshots,
   normalizeArgentinaPhone,
@@ -93,7 +94,8 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
     { version: 6, name: "profile_active_bonus" },
     { version: 7, name: "advertising_movements" },
     { version: 8, name: "contact_flow_event_counts" },
-    { version: 9, name: "contact_flow_event_sources" }
+    { version: 9, name: "contact_flow_event_sources" },
+    { version: 10, name: "stable_movement_accounts" }
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE agent_movements/);
   assert.match(migrations[0].sql, /value_ciphertext BYTEA NOT NULL/);
@@ -110,6 +112,8 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
   assert.match(migrations[7].sql, /CREATE TABLE contact_flow_count_events/);
   assert.match(migrations[7].sql, /CREATE TABLE contact_flow_adjustment_events/);
   assert.match(migrations[8].sql, /ADD COLUMN source_profile_id UUID REFERENCES extension_profiles/);
+  assert.match(migrations[9].sql, /ADD COLUMN account_ids TEXT\[\] NOT NULL DEFAULT '\{\}'/);
+  assert.match(migrations[9].sql, /jsonb_build_object\('accountIds'/);
 });
 
 test("normalizes common Argentine mobile formats to one WhatsApp number", () => {
@@ -117,6 +121,30 @@ test("normalizes common Argentine mobile formats to one WhatsApp number", () => 
   assert.equal(normalizeArgentinaPhone("011 15 2345-6789"), "5491123456789");
   assert.equal(normalizeArgentinaPhone("11 15 2345 6789"), "5491123456789");
   assert.equal(normalizeArgentinaPhone("0111511111111"), "5491111111111");
+});
+
+test("derives stable platform account IDs from a WhatsApp contact phone", () => {
+  const contactKey = JSON.stringify({
+    usernames: { ganamos: "old-name", multipanel: "another-name" },
+    phone: "5491112345678"
+  });
+
+  assert.deepEqual(getMovementAccountIds({
+    contactKey,
+    operation: "deposit",
+    platform: "ganamos"
+  }), ["ganamos:5491112345678"]);
+  assert.deepEqual(getMovementAccountIds({
+    contactKey,
+    operation: "exchange",
+    fromPlatform: "ganamos",
+    toPlatform: "multipanel"
+  }), ["ganamos:5491112345678", "multipanel:5491112345678"]);
+  assert.deepEqual(getMovementAccountIds({
+    contactKey: "legacy-without-phone",
+    operation: "deposit",
+    platform: "ganamos"
+  }), []);
 });
 
 test("validates timestamped contact-flow numbers and keeps legacy number strings usable", () => {

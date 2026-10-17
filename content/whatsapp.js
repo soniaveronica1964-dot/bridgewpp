@@ -283,6 +283,80 @@
     return digits.length >= 4 ? digits : null;
   }
 
+  function getPhoneFromWhatsAppChat(title) {
+    const titlePhone = getPhoneFromContactTitle(title);
+    const chat = title?.closest("#main");
+    if (!chat || chat.querySelector('[data-id*="@g.us"]')) return titlePhone;
+    const trackedPhone = contactFlowChatNumbers.get(chat);
+    if (trackedPhone && /^\d{7,20}$/.test(trackedPhone)) return trackedPhone;
+    const chatNumbers = new Set([...chat.querySelectorAll("[data-id]")]
+      .map((element) => element.getAttribute("data-id") || "")
+      .map((messageId) =>
+        messageId.match(/(?:^|_)(\d{7,20})@(?:c\.us|s\.whatsapp\.net)(?:_|$)/i)?.[1])
+      .filter(Boolean));
+    return chatNumbers.size === 1 ? [...chatNumbers][0] : titlePhone;
+  }
+
+  function getPlatformAccountIds(phone, platforms = ["ganamos", "multipanel"]) {
+    if (typeof phone !== "string" || !/^\d{4,20}$/.test(phone)) return [];
+    return [...new Set(platforms
+      .filter((platform) => platform === "ganamos" || platform === "multipanel")
+      .map((platform) => `${platform}:${phone}`))];
+  }
+
+  function getMovementAccountIds(contactKey, platforms) {
+    try {
+      const contact = JSON.parse(contactKey);
+      return getPlatformAccountIds(contact?.phone, platforms);
+    } catch {
+      return [];
+    }
+  }
+
+  function getLegacyMovementContactKeys(contactKey) {
+    try {
+      const contact = JSON.parse(contactKey);
+      if (!contact || typeof contact !== "object" || !contact.usernames) return [];
+      const usernames = [...new Set([
+        contact.usernames.ganamos,
+        contact.usernames.multipanel
+      ].filter((username) => typeof username === "string" && username))];
+      const assignments = [];
+      for (const username of usernames) {
+        assignments.push({ ganamos: username, multipanel: null });
+        assignments.push({ ganamos: null, multipanel: username });
+      }
+      if (usernames.length > 1) {
+        assignments.push({ ganamos: usernames[0], multipanel: usernames[1] });
+        assignments.push({ ganamos: usernames[1], multipanel: usernames[0] });
+      }
+      const phones = [...new Set([
+        typeof contact.phone === "string" && /^\d{4,20}$/.test(contact.phone)
+          ? contact.phone
+          : null,
+        null
+      ])];
+      return [...new Set(phones.flatMap((phone) =>
+        assignments.flatMap((assignment) =>
+          [null, "ganamos", "multipanel"].map((firstPlatform) => JSON.stringify({
+            usernames: { ...assignment, firstPlatform },
+            phone
+          })))))];
+    } catch {
+      return [];
+    }
+  }
+
+  function getMovementAccountFilter(contactKey) {
+    const accountIds = getMovementAccountIds(contactKey);
+    const legacyContactKeys = getLegacyMovementContactKeys(contactKey);
+    if (!legacyContactKeys.length) return { contactKey };
+    return {
+      ...(accountIds.length ? { accountIds } : {}),
+      legacyContactKeys
+    };
+  }
+
   function getUnscheduledContactDigits(contactName) {
     return contactName.replace(/[\u200e\u200f\u202a-\u202e]/g, "").match(/\d{4}/)?.[0] || null;
   }
@@ -2979,7 +3053,7 @@
             : null;
       const storedMovements = await stateStorage.getMovements({
         ownProfile: true,
-        ...(contactKey ? { contactKey } : {}),
+        ...(contactKey ? getMovementAccountFilter(contactKey) : {}),
         ...(start ? { since: start.getTime() } : {})
       });
       if (contactKey !== agentBalanceContactKey || view !== agentBalanceView) return;
@@ -3085,6 +3159,11 @@
       ...(verification ? { verification } : {}),
       ...(operation === "deposit" && depositType ? { depositType } : {})
     };
+    const accountIds = getMovementAccountIds(
+      contactKey,
+      operation === "exchange" ? [fromPlatform, toPlatform] : [platform]
+    );
+    if (accountIds.length) record.accountIds = accountIds;
     const recordKey = `${AGENT_MOVEMENT_PREFIX}${record.timestamp}:${crypto.randomUUID()}`;
     await stateStorage.set({ [recordKey]: record });
     if (operation === "withdrawal") {
@@ -3098,7 +3177,7 @@
   async function findRecentUserWithdrawal(contactKey) {
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
     const movements = await stateStorage.getMovements({
-      contactKey,
+      ...getMovementAccountFilter(contactKey),
       operation: "withdrawal",
       since: cutoff,
       limit: 1
@@ -3152,7 +3231,7 @@
     label.hidden = true;
     try {
       const [lastWithdrawal] = await stateStorage.getMovements({
-        contactKey,
+        ...getMovementAccountFilter(contactKey),
         operation: "withdrawal",
         limit: 1
       });
@@ -3646,15 +3725,39 @@
       loading.textContent = "Cargando movimientos...";
       list.append(loading);
       try {
-        const movements = await stateStorage.getMovements({ contactKey });
+        const movements = await stateStorage.getMovements(getMovementAccountFilter(contactKey));
         if (host.dataset.accounts !== contactKey || !root.contains(modal)) return;
+        const legacyUpdates = {};
+        for (const movement of movements) {
+          if (Array.isArray(movement.accountIds) || typeof movement.recordKey !== "string") continue;
+          const accountIds = getMovementAccountIds(
+            contactKey,
+            movement.operation === "exchange"
+              ? [movement.fromPlatform, movement.toPlatform]
+              : [movement.platform]
+          );
+          if (accountIds.length) {
+            const { recordKey, ...record } = movement;
+            legacyUpdates[recordKey] = { ...record, accountIds };
+          }
+        }
+        const legacyEntries = Object.entries(legacyUpdates);
+        try {
+          for (let index = 0; index < legacyEntries.length; index += 100) {
+            await stateStorage.set(Object.fromEntries(legacyEntries.slice(index, index + 100)));
+          }
+        } catch (error) {
+          console.error("[Ganamos balance extension] No se pudieron vincular movimientos heredados a las cuentas.", error);
+          showToast(
+            host,
+            platformUsernames[defaultPlatform] || "Chat",
+            `Se mostraron los movimientos anteriores, pero no se pudieron vincular para futuros cambios de nombre: ${error.message || "error desconocido."}`,
+            "error"
+          );
+        }
         storedMovements = movements
           .filter((record) =>
-            ["ganamos", "multipanel"].includes(record.platform) &&
-            (!record.username || (
-              typeof record.username === "string" &&
-              record.username.toLowerCase() === platformUsernames[record.platform]?.toLowerCase()
-            )))
+            ["ganamos", "multipanel"].includes(record.platform))
           .filter((record) =>
             Number.isFinite(record.timestamp) &&
             !Number.isNaN(new Date(record.timestamp).getTime()) &&
@@ -5277,6 +5380,8 @@
     let bonusPercentInput = null;
     let loadAmountInput = null;
     let recoveryPercentInput = null;
+    let lastAutomaticWithdrawalAdjustment = null;
+    let loadingLastDeposit = false;
     if (operation === "deposit") {
       const bonusFields = document.createElement("div");
       bonusFields.className = "bonus-fields";
@@ -5440,9 +5545,21 @@
       recoveryFields.append(loadLabel, recoveryPercentLabel);
       dialog.append(recoveryFields);
       dialog.append(createPercentageShortcuts(recoveryPercentInput).element);
-      amountInput.addEventListener("input", updateWithdrawalSummary);
-      loadAmountInput.addEventListener("input", updateWithdrawalSummary);
-      recoveryPercentInput.addEventListener("input", updateWithdrawalSummary);
+      const clearAutomaticWithdrawalAdjustment = () => {
+        if (!loadingLastDeposit) lastAutomaticWithdrawalAdjustment = null;
+      };
+      amountInput.addEventListener("input", () => {
+        clearAutomaticWithdrawalAdjustment();
+        updateWithdrawalSummary();
+      });
+      loadAmountInput.addEventListener("input", () => {
+        clearAutomaticWithdrawalAdjustment();
+        updateWithdrawalSummary();
+      });
+      recoveryPercentInput.addEventListener("input", () => {
+        clearAutomaticWithdrawalAdjustment();
+        updateWithdrawalSummary();
+      });
       updateWithdrawalSummary();
     }
 
@@ -5484,7 +5601,7 @@
         loadLastDepositButton.disabled = true;
         try {
           const movements = await stateStorage.getMovements({
-            contactKey: openedAccountsKey,
+            ...getMovementAccountFilter(openedAccountsKey),
             operation: "deposit",
           });
           if (host.dataset.accounts !== openedAccountsKey ||
@@ -5507,10 +5624,46 @@
           if (bonusPercent > 100) {
             throw new Error("El porcentaje del último bono supera el máximo permitido.");
           }
-          loadAmountInput.value = formatBalance(baseAmount);
-          recoveryPercentInput.value = formatBalance(bonusPercent);
-          loadAmountInput.dispatchEvent(new Event("input", { bubbles: true }));
-          recoveryPercentInput.dispatchEvent(new Event("input", { bubbles: true }));
+          const currentAmount = numericInputValue(amountInput);
+          const alreadyAdjusted = lastAutomaticWithdrawalAdjustment &&
+            currentAmount === lastAutomaticWithdrawalAdjustment.amount &&
+            baseAmount === lastAutomaticWithdrawalAdjustment.baseAmount &&
+            bonusPercent === lastAutomaticWithdrawalAdjustment.bonusPercent;
+
+          loadingLastDeposit = true;
+          try {
+            loadAmountInput.value = formatBalance(baseAmount);
+            recoveryPercentInput.value = formatBalance(bonusPercent);
+            loadAmountInput.dispatchEvent(new Event("input", { bubbles: true }));
+            recoveryPercentInput.dispatchEvent(new Event("input", { bubbles: true }));
+          } finally {
+            loadingLastDeposit = false;
+          }
+
+          if (alreadyAdjusted) return;
+          lastAutomaticWithdrawalAdjustment = null;
+          const recoveryBonus = Math.ceil(baseAmount * bonusPercent / 100);
+          if (currentAmount === null || currentAmount <= 0 || recoveryBonus <= 0) return;
+
+          let availableBalance;
+          try {
+            availableBalance = await loadWithdrawalBalance(balancePlatform);
+          } catch (error) {
+            throw new Error(
+              `Se cargaron la carga y el bono, pero no se ajustó el monto porque no se pudo validar el saldo: ${error.message || "error desconocido"}`
+            );
+          }
+          const adjustedAmount = currentAmount + recoveryBonus;
+          if (adjustedAmount <= availableBalance + Number.EPSILON) {
+            amountInput.value = formatBalance(adjustedAmount);
+            formatNumericInput(amountInput, amountInput.value.length);
+            amountInput.dispatchEvent(new Event("input", { bubbles: true }));
+            lastAutomaticWithdrawalAdjustment = {
+              amount: adjustedAmount,
+              baseAmount,
+              bonusPercent
+            };
+          }
         } catch (error) {
           console.error("[Ganamos balance extension] No se pudieron cargar los datos del último depósito.", error);
           showToast(
@@ -6325,7 +6478,7 @@
     const contactTitle = title?.textContent || "";
     const usernames = isNormalChat ? findPlatformUsernames(contactTitle) : null;
     const phone = isNormalChat
-      ? getPhoneFromContactTitle(title) ||
+      ? getPhoneFromWhatsAppChat(title) ||
         (!usernames?.ganamos && !usernames?.multipanel
           ? getUnscheduledContactDigits(contactTitle)
           : null)

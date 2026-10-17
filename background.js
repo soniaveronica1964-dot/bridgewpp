@@ -1872,9 +1872,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     const filters = message.filters && typeof message.filters === "object" &&
       !Array.isArray(message.filters) ? message.filters : {};
-    const allowedFilters = new Set(["contactKey", "operation", "since", "limit", "ownProfile"]);
+    const allowedFilters = new Set([
+      "accountIds", "contactKey", "legacyContactKeys", "operation", "since", "limit", "ownProfile"
+    ]);
     if (Object.keys(filters).some((key) => !allowedFilters.has(key)) ||
       (Object.hasOwn(filters, "ownProfile") && typeof filters.ownProfile !== "boolean") ||
+      (Object.hasOwn(filters, "accountIds") &&
+        (!Array.isArray(filters.accountIds) || filters.accountIds.length < 1 ||
+          filters.accountIds.length > 4 ||
+          filters.accountIds.some((accountId) =>
+            typeof accountId !== "string" ||
+            !/^(ganamos|multipanel):\d{4,20}$/.test(accountId)) ||
+          new Set(filters.accountIds).size !== filters.accountIds.length)) ||
+      (Object.hasOwn(filters, "legacyContactKeys") &&
+        (!Array.isArray(filters.legacyContactKeys) || filters.legacyContactKeys.length < 1 ||
+          filters.legacyContactKeys.length > 40 ||
+          filters.legacyContactKeys.some((contactKey) =>
+            typeof contactKey !== "string" || !contactKey || contactKey.length > 2048 ||
+            /[\u0000-\u001f\u007f]/.test(contactKey)) ||
+          new Set(filters.legacyContactKeys).size !== filters.legacyContactKeys.length ||
+          Object.hasOwn(filters, "accountIds") && !Array.isArray(filters.accountIds))) ||
       (Object.hasOwn(filters, "contactKey") &&
         (typeof filters.contactKey !== "string" || !filters.contactKey)) ||
       (Object.hasOwn(filters, "operation") &&
@@ -1888,6 +1905,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     const query = new URLSearchParams();
     if (filters.ownProfile === true) query.set("source", "profile");
+    if (Array.isArray(filters.accountIds)) {
+      for (const accountId of filters.accountIds) query.append("accountId", accountId);
+    }
+    if (Array.isArray(filters.legacyContactKeys)) {
+      for (const contactKey of filters.legacyContactKeys) {
+        query.append("legacyContactKey", contactKey);
+      }
+    }
     if (typeof filters.contactKey === "string") query.set("contactKey", filters.contactKey);
     if (typeof filters.operation === "string") query.set("operation", filters.operation);
     if (Number.isSafeInteger(filters.since)) query.set("since", String(filters.since));

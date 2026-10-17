@@ -10,6 +10,7 @@ test("extension storage adapter routes reads and revisioned writes through the s
   const responses = [
     { ok: true, values: { activeBonusConfig: { enabled: false } }, revision: 7 },
     { ok: true, movements: [{ operation: "withdrawal", amount: 10 }] },
+    { ok: true, movements: [{ operation: "deposit", amount: 20 }] },
     { ok: true, stats: { summary: { deposits: "2" }, platforms: [], profiles: [] } },
     { ok: true, stats: { summary: { deposits: "1" }, platforms: [], profiles: [] } },
     { ok: true, revision: 8, changeRevision: 12 },
@@ -46,6 +47,13 @@ test("extension storage adapter routes reads and revisioned writes through the s
   assert.deepEqual(JSON.parse(JSON.stringify(movements)), [
     { operation: "withdrawal", amount: 10 }
   ]);
+  const accountMovements = await context.stateStorage.getMovements({
+    accountIds: ["ganamos:5491112345678", "multipanel:5491112345678"],
+    legacyContactKeys: ["legacy-contact-1", "legacy-contact-2"]
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(accountMovements)), [
+    { operation: "deposit", amount: 20 }
+  ]);
   const advertisingStats = await context.stateStorage.getAdvertisingStats({ from: 1000, to: 2000 });
   assert.equal(advertisingStats.summary.deposits, "2");
   const filteredAdvertisingStats = await context.stateStorage.getAdvertisingStats(
@@ -57,7 +65,7 @@ test("extension storage adapter routes reads and revisioned writes through the s
   await context.stateStorage.remove("activeBonusConfig");
 
   assert.deepEqual(messages.map(({ type }) => type), [
-    "STATE_GET", "MOVEMENTS_GET", "ADVERTISING_STATS_GET", "ADVERTISING_STATS_GET",
+    "STATE_GET", "MOVEMENTS_GET", "MOVEMENTS_GET", "ADVERTISING_STATS_GET", "ADVERTISING_STATS_GET",
     "STATE_SET", "STATE_REMOVE"
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(messages[1].filters)), {
@@ -66,20 +74,24 @@ test("extension storage adapter routes reads and revisioned writes through the s
     limit: 1,
     ownProfile: true
   });
-  assert.deepEqual(JSON.parse(JSON.stringify(messages[2])), {
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[2].filters)), {
+    accountIds: ["ganamos:5491112345678", "multipanel:5491112345678"],
+    legacyContactKeys: ["legacy-contact-1", "legacy-contact-2"]
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[3])), {
     type: "ADVERTISING_STATS_GET",
     from: 1000,
     to: 2000
   });
-  assert.deepEqual(JSON.parse(JSON.stringify(messages[3])), {
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[4])), {
     type: "ADVERTISING_STATS_GET",
     from: 1000,
     to: 2000,
     excludedProfiles: ["33333333-3333-4333-8333-333333333333"]
   });
-  assert.equal(messages[4].expectedRevision, 7);
-  assert.equal(messages[5].expectedRevision, 8);
-  assert.deepEqual(JSON.parse(JSON.stringify(messages[5].removes)), ["activeBonusConfig"]);
+  assert.equal(messages[5].expectedRevision, 7);
+  assert.equal(messages[6].expectedRevision, 8);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[6].removes)), ["activeBonusConfig"]);
   listeners[0]({
     type: "STATE_CHANGED",
     changes: { activeBonusConfig: { oldValue: { enabled: true }, newValue: { enabled: false } } }

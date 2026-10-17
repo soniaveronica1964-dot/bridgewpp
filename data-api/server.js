@@ -7,7 +7,7 @@ const { parsePhoneNumberFromString } = require("libphonenumber-js");
 const { canonicalJson, decryptValue, encryptValue, sha256Hex, validatePayload } = require("./archive");
 
 const API_VERSION = 1;
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 45 * 60_000;
 const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
 const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 12 * 60 * 60 * 1000;
@@ -24,6 +24,41 @@ class ApiError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+function getMovementAccountIds(movement) {
+  let phone = null;
+  if (typeof movement.contactKey === "string") {
+    try {
+      const contact = JSON.parse(movement.contactKey);
+      if (typeof contact?.phone === "string" && /^\d{4,20}$/.test(contact.phone)) {
+        phone = contact.phone;
+      }
+    } catch {
+      phone = null;
+    }
+  }
+  if (phone) {
+    const platforms = movement.operation === "exchange"
+      ? [movement.fromPlatform, movement.toPlatform]
+      : [movement.platform];
+    return [...new Set(platforms
+      .filter((platform) => platform === "ganamos" || platform === "multipanel")
+      .map((platform) => `${platform}:${phone}`))];
+  }
+  return Array.isArray(movement.accountIds)
+    ? [...new Set(movement.accountIds.filter((accountId) =>
+      typeof accountId === "string" && /^(ganamos|multipanel):\d{4,20}$/.test(accountId)))]
+    : [];
+}
+
+function sameMovementRecord(left, right) {
+  const withoutAccountIds = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const { accountIds, ...record } = value;
+    return record;
+  };
+  return isDeepStrictEqual(withoutAccountIds(left), withoutAccountIds(right));
 }
 
 function createDeviceAssertionNonceCleanup(pool) {
@@ -280,7 +315,7 @@ async function buildConflictPreview(pool, identity, payload, encryptionKey) {
     if (secretByKey.has(key) && secretByKey.get(key) !== canonicalJson(value)) secretConflicts++;
   }
   for (const { key, value } of movementEntries) {
-    if (movementByKey.has(key) && !isDeepStrictEqual(movementByKey.get(key), value)) movementConflicts++;
+    if (movementByKey.has(key) && !sameMovementRecord(movementByKey.get(key), value)) movementConflicts++;
   }
   for (const { key, value } of legacyEntries) {
     const oldHash = legacyByKey.get(key);
@@ -724,15 +759,20 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
         }
       } else if (key.startsWith("agentMovement:")) {
         const movement = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+        const accountIds = getMovementAccountIds(movement);
+        const movementJson = JSON.stringify(accountIds.length
+          ? { ...movement, accountIds }
+          : movement);
         await client.query(`
           INSERT INTO agent_movements (
             workspace_id, source_profile_id, source_device_id, legacy_storage_key,
             timestamp_ms, contact_key, operation, amount_minor, platform, username,
             transaction_minor, bonus_minor, from_platform, to_platform, status,
-            verification_json, legacy_record_json, imported_at_ms, is_advertising
+            verification_json, legacy_record_json, imported_at_ms, is_advertising,
+            account_ids
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-            $16::jsonb, $17::jsonb, $18, $19
+            $16::jsonb, $17::jsonb, $18, $19, $20
           )
           ON CONFLICT (workspace_id, source_profile_id, legacy_storage_key) DO UPDATE SET
             timestamp_ms = EXCLUDED.timestamp_ms, contact_key = EXCLUDED.contact_key,
@@ -742,7 +782,8 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
             from_platform = EXCLUDED.from_platform, to_platform = EXCLUDED.to_platform,
             status = EXCLUDED.status, verification_json = EXCLUDED.verification_json,
             legacy_record_json = EXCLUDED.legacy_record_json,
-            is_advertising = EXCLUDED.is_advertising
+            is_advertising = EXCLUDED.is_advertising,
+            account_ids = EXCLUDED.account_ids
         `, [
           identity.workspace_id, identity.profile_id, identity.device_id, key,
           safeEpochMilliseconds(movement.timestamp),
@@ -757,9 +798,10 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
           typeof movement.toPlatform === "string" ? movement.toPlatform : null,
           typeof movement.status === "string" ? movement.status : null,
           movement.verification === undefined ? null : JSON.stringify(movement.verification),
-          valueJson,
+          movementJson,
           timestamp,
-          movement.depositType === "advertising"
+          movement.depositType === "advertising",
+          accountIds
         ]);
       } else if (key === "contactFlowCounters") {
         const canonicalCounters = await persistContactFlowCounterSnapshot(
@@ -1695,15 +1737,20 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
         }
       } else if (key.startsWith("agentMovement:")) {
         const movement = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+        const accountIds = getMovementAccountIds(movement);
+        const movementJson = accountIds.length
+          ? { ...movement, accountIds }
+          : value;
         const insertResult = await client.query(`
           INSERT INTO agent_movements (
             workspace_id, source_profile_id, source_device_id, legacy_storage_key,
             timestamp_ms, contact_key, operation, amount_minor, platform, username,
             transaction_minor, bonus_minor, from_platform, to_platform, status,
-            verification_json, legacy_record_json, imported_at_ms, is_advertising
+            verification_json, legacy_record_json, imported_at_ms, is_advertising,
+            account_ids
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-            $16::jsonb, $17::jsonb, $18, $19
+            $16::jsonb, $17::jsonb, $18, $19, $20
           )
           ON CONFLICT (workspace_id, source_profile_id, legacy_storage_key) DO NOTHING
           RETURNING legacy_storage_key
@@ -1721,15 +1768,15 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
           typeof movement.toPlatform === "string" ? movement.toPlatform : null,
           typeof movement.status === "string" ? movement.status : null,
           movement.verification === undefined ? null : jsonValue(movement.verification),
-          jsonValue(value), now,
-          movement.depositType === "advertising"
+          jsonValue(movementJson), now,
+          movement.depositType === "advertising", accountIds
         ]);
         if (insertResult.rowCount === 0) {
           const existing = await client.query(`
             SELECT legacy_record_json FROM agent_movements
             WHERE workspace_id = $1 AND source_profile_id = $2 AND legacy_storage_key = $3
           `, [identity.workspace_id, identity.profile_id, key]);
-          if (!isDeepStrictEqual(existing.rows[0]?.legacy_record_json, value)) {
+          if (!sameMovementRecord(existing.rows[0]?.legacy_record_json, value)) {
             throw new ApiError(409, "movement_conflict", "Un movimiento heredado existe con contenido diferente.");
           }
         }
@@ -2457,10 +2504,26 @@ function createDataApiServer({ pool, config }) {
       if (route === "/v1/movements" && request.method === "GET") {
         const identity = await authenticate(request);
         const query = new URL(request.url, "https://localhost").searchParams;
-        const allowedParameters = new Set(["contactKey", "operation", "since", "limit", "source"]);
+        const allowedParameters = new Set([
+          "accountId", "contactKey", "legacyContactKey", "operation", "since", "limit", "source"
+        ]);
         if ([...query.keys()].some((key) => !allowedParameters.has(key)) ||
-          [...allowedParameters].some((key) => query.getAll(key).length > 1)) {
+          [...allowedParameters].some((key) =>
+            !["accountId", "legacyContactKey"].includes(key) && query.getAll(key).length > 1) ||
+          query.getAll("accountId").length > 4 || query.getAll("legacyContactKey").length > 40) {
           throw new ApiError(400, "invalid_movement_query", "Los filtros de movimientos no son válidos.");
+        }
+        const accountIds = query.getAll("accountId");
+        const legacyContactKeys = query.getAll("legacyContactKey");
+        if (accountIds.some((accountId) =>
+          !/^(ganamos|multipanel):\d{4,20}$/.test(accountId)) ||
+          new Set(accountIds).size !== accountIds.length ||
+          legacyContactKeys.some((key) =>
+            !key || key.length > 2048 || /[\u0000-\u001f\u007f]/.test(key)) ||
+          new Set(legacyContactKeys).size !== legacyContactKeys.length ||
+          legacyContactKeys.length > 0 && accountIds.length === 0 &&
+            query.get("contactKey") !== null) {
+          throw new ApiError(400, "invalid_movement_query", "Las cuentas consultadas no son válidas.");
         }
         const source = query.get("source");
         if (source !== null && source !== "profile") {
@@ -2492,6 +2555,28 @@ function createDataApiServer({ pool, config }) {
         if (contactKey !== null) {
           parameters.push(contactKey);
           filters.push(`contact_key = $${parameters.length}`);
+        }
+        if (accountIds.length && legacyContactKeys.length) {
+          parameters.push(accountIds);
+          const accountParameter = parameters.length;
+          const legacyPhones = [...new Set(accountIds.map((accountId) =>
+            accountId.slice(accountId.indexOf(":") + 1)))];
+          parameters.push(legacyPhones.map((phone) =>
+            `"phone"\\s*:\\s*"${phone}"`));
+          const phonePatternParameter = parameters.length;
+          parameters.push(legacyContactKeys);
+          const legacyContactParameter = parameters.length;
+          filters.push(
+            `(account_ids && $${accountParameter}::text[] OR ` +
+            `legacy_record_json->>'contactKey' ~ ANY($${phonePatternParameter}::text[]) OR ` +
+            `contact_key = ANY($${legacyContactParameter}::text[]))`
+          );
+        } else if (accountIds.length) {
+          parameters.push(accountIds);
+          filters.push(`account_ids && $${parameters.length}::text[]`);
+        } else if (legacyContactKeys.length) {
+          parameters.push(legacyContactKeys);
+          filters.push(`contact_key = ANY($${parameters.length}::text[])`);
         }
         if (operation !== null) {
           parameters.push(operation);
@@ -2825,6 +2910,7 @@ module.exports = {
   commitMigration,
   createDataApiServer,
   createDeviceAssertionNonceCleanup,
+  getMovementAccountIds,
   getServerConfig,
   mergeContactFlowCounterSnapshots,
   normalizeArgentinaPhone,

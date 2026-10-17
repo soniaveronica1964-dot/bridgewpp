@@ -887,6 +887,7 @@ CREATE TABLE agent_movements (
   amount_minor           BIGINT,
   platform               TEXT,
   username               TEXT,
+  account_ids            TEXT[] NOT NULL DEFAULT '{}',
   transaction_minor      BIGINT,
   bonus_minor            BIGINT,
   from_platform          TEXT,
@@ -925,12 +926,27 @@ CREATE TABLE financial_operation_results (
 CREATE INDEX agent_movements_by_contact_time
   ON agent_movements(workspace_id, contact_key, timestamp_ms DESC);
 
+CREATE INDEX agent_movements_by_account
+  ON agent_movements USING GIN (account_ids);
+
 CREATE INDEX agent_movements_by_time
   ON agent_movements(workspace_id, timestamp_ms DESC);
 
 CREATE INDEX agent_movements_withdrawals
   ON agent_movements(workspace_id, contact_key, operation, timestamp_ms DESC);
 ```
+
+Los movimientos nuevos se asocian a una cuenta interna por plataforma y
+teléfono estable del chat (`ganamos:<teléfono>` o
+`multipanel:<teléfono>`). Cambiar el nombre de usuario o agregar el usuario de
+la otra plataforma no modifica esa asociación; en un intercambio se enlazan
+ambas cuentas. La migración 010 completa las asociaciones históricas cuando
+puede recuperar el teléfono de `contact_key`. Para los registros sin teléfono,
+al abrir el contacto la extensión intenta enlazar solo las variantes exactas
+de los nombres anteriores. Si el nombre ya se modificó antes de guardar una
+identidad estable y la clave antigua no contiene teléfono, no se reasigna por
+coincidencia aproximada. Esta versión todavía no incluye una pantalla para
+resolver manualmente esos casos.
 
 Reglas para esta tabla:
 

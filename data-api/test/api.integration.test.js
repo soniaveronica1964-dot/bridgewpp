@@ -249,7 +249,7 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     await migrate(pool, migrations);
     const health = await request(port, "GET", "/health", undefined, null, extensionId);
     assert.equal(health.status, 200);
-    assert.equal(health.body.schemaVersion, 9);
+    assert.equal(health.body.schemaVersion, 10);
     const migratedBonus = await pool.query(`
       SELECT value_json FROM app_settings
       WHERE profile_id = $1 AND setting_key = 'activeBonusConfig'
@@ -357,7 +357,10 @@ test("HTTPS migration imports preserve private and shared data atomically", {
         bonusAmount: 0.55,
         platform: "ganamos",
         timestamp: 1760000000000,
-        contactKey: "contact-key-1",
+        contactKey: JSON.stringify({
+          usernames: { ganamos: "user-a" },
+          phone: "5491112345678"
+        }),
         username: "user-a",
         verification: { status: "verified" }
       },
@@ -438,19 +441,49 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(leftoverStaging.rows[0].count, 0);
 
     const movement = await pool.query(`
-      SELECT amount_minor, transaction_minor, bonus_minor, contact_key
+      SELECT amount_minor, transaction_minor, bonus_minor, contact_key, account_ids
       FROM agent_movements
     `);
     assert.deepEqual(movement.rows[0], {
       amount_minor: "1055",
       transaction_minor: "1000",
       bonus_minor: "55",
-      contact_key: "contact-key-1"
+      contact_key: JSON.stringify({
+        usernames: { ganamos: "user-a" },
+        phone: "5491112345678"
+      }),
+      account_ids: ["ganamos:5491112345678"]
     });
+    const accountMovementHistory = await request(
+      port,
+      "GET",
+      "/v1/movements?accountId=ganamos%3A5491112345678&operation=deposit",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(accountMovementHistory.status, 200, JSON.stringify(accountMovementHistory.body));
+    assert.equal(accountMovementHistory.body.movements.length, 1);
+    assert.deepEqual(accountMovementHistory.body.movements[0].accountIds, ["ganamos:5491112345678"]);
+    await pool.query(`
+      UPDATE agent_movements SET account_ids = '{}'
+      WHERE legacy_storage_key = 'agentMovement:1760000000000:uuid-1'
+    `);
+    const legacyAccountMovementHistory = await request(
+      port,
+      "GET",
+      "/v1/movements?accountId=ganamos%3A5491112345678&operation=deposit",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(legacyAccountMovementHistory.status, 200, JSON.stringify(legacyAccountMovementHistory.body));
+    assert.equal(legacyAccountMovementHistory.body.movements.length, 1);
+    assert.equal(legacyAccountMovementHistory.body.movements[0].username, "user-a");
     const movementHistory = await request(
       port,
       "GET",
-      "/v1/movements?contactKey=contact-key-1&operation=deposit&since=1759999999000&limit=1",
+      "/v1/movements?contactKey=%7B%22usernames%22%3A%7B%22ganamos%22%3A%22user-a%22%7D%2C%22phone%22%3A%225491112345678%22%7D&operation=deposit&since=1759999999000&limit=1",
       undefined,
       main.credential,
       extensionId
@@ -470,6 +503,32 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(profileMovementHistory.status, 200, JSON.stringify(profileMovementHistory.body));
     assert.equal(profileMovementHistory.body.movements.length, 1);
     assert.equal(profileMovementHistory.body.movements[0].username, "user-a");
+    const legacyReorderedContactKey = JSON.stringify({
+      usernames: { ganamos: "user-b", multipanel: "user-a", firstPlatform: "multipanel" },
+      phone: null
+    });
+    await pool.query(`
+      UPDATE agent_movements
+      SET account_ids = '{}',
+          contact_key = $1,
+          legacy_record_json = jsonb_set(
+            legacy_record_json, '{contactKey}', to_jsonb($1::text)
+          )
+      WHERE legacy_storage_key = 'agentMovement:1760000000000:uuid-1'
+    `, [legacyReorderedContactKey]);
+    const reorderedLegacyHistory = await request(
+      port,
+      "GET",
+      `/v1/movements?${new URLSearchParams({
+        legacyContactKey: legacyReorderedContactKey
+      })}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(reorderedLegacyHistory.status, 200, JSON.stringify(reorderedLegacyHistory.body));
+    assert.equal(reorderedLegacyHistory.body.movements.length, 1);
+    assert.equal(reorderedLegacyHistory.body.movements[0].username, "user-a");
     const advertisingTimestamp = Date.now() - 10 * 24 * 60 * 60 * 1000;
     const advertisingMovements = {
       [`agentMovement:${advertisingTimestamp}:ad-1`]: {
