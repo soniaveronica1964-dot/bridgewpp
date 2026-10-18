@@ -636,6 +636,75 @@ async function getGanamosActiveSportBets(data) {
   };
 }
 
+async function getMultiPanelActiveSportBets(data) {
+  const username = data.nombre.trim();
+  const now = new Date();
+  const rangeStart = new Date(now);
+  rangeStart.setFullYear(rangeStart.getFullYear() - 1);
+  rangeStart.setHours(0, 0, 0, 0);
+  const rangeEnd = new Date(now);
+  rangeEnd.setFullYear(rangeEnd.getFullYear() + 1);
+  rangeEnd.setHours(23, 59, 59, 0);
+  const formatDateTime = (date) => {
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+      ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  };
+  const pageSize = 200;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const user = await findMultiPanelUser(username);
+      const records = new Map();
+      for (let offset = 0; ; offset += pageSize) {
+        const report = await requestMultiPanelForm("/api/admin_reports/getReport", {
+          session: user.session,
+          company: "MULT",
+          report: "agents_user_last_bets",
+          filter: JSON.stringify([{
+            field: "t.created_date",
+            type: "time_range",
+            value: [formatDateTime(rangeStart), formatDateTime(rangeEnd)]
+          }]),
+          user: user.user,
+          db: user.db,
+          limit: `limit ${offset},${pageSize}`,
+          sort: "",
+          callFilter: ""
+        });
+        const pageRecords = report?.data?.data;
+        if (!Array.isArray(pageRecords)) {
+          throw new Error("MultiPanel devolvió las apuestas deportivas con un formato inesperado.");
+        }
+        let newRecords = 0;
+        for (const record of pageRecords) {
+          if (!record || typeof record !== "object" ||
+            (typeof record.operation !== "string" && typeof record.operation !== "number") ||
+            typeof record.status !== "string") {
+            throw new Error("MultiPanel devolvió una apuesta deportiva con un formato inesperado.");
+          }
+          if (!records.has(String(record.operation))) newRecords += 1;
+          records.set(String(record.operation), record);
+        }
+        if (pageRecords.length < pageSize) break;
+        if (newRecords === 0) {
+          throw new Error("MultiPanel no avanzó a la siguiente página de apuestas deportivas.");
+        }
+      }
+      const bets = [...records.values()];
+      return {
+        ok: true,
+        count: bets.filter((bet) => bet.status.toUpperCase() === "OPEN").length,
+        hasBets: bets.length > 0
+      };
+    } catch (error) {
+      if (!isInvalidMultiPanelSession(error) || attempt > 0) throw error;
+      await getMultiPanelSessionFromOpenTab();
+    }
+  }
+  throw new Error("No se pudieron consultar las apuestas deportivas de MultiPanel.");
+}
+
 async function createGanamosUser(data) {
   const { ganamos: ganamosSuffix } = await getPlatformSuffixes();
   if (!isValidUsername(data?.username, ganamosSuffix)) {
@@ -1819,7 +1888,9 @@ function validateApiMessage(message, suffixes) {
 
   const platform = message.data?.platform || "ganamos";
   if (message.type === "SPORT_BETS_REQUEST") {
-    return isValidUsername(message.data?.nombre, suffixes.ganamos);
+    return platform === "multipanel"
+      ? isValidMultiPanelUsername(message.data?.nombre, suffixes.multipanel)
+      : platform === "ganamos" && isValidUsername(message.data?.nombre, suffixes.ganamos);
   }
   if (message.type === "CREATE_USER_REQUEST") {
     return platform === "multipanel"
@@ -1859,7 +1930,11 @@ async function executeApiMessage(message) {
   if (message.type === "AGENT_BALANCE_REQUEST") return getGanamosAgentBalance();
   if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return getMultiPanelAgentBalance();
   if (message.type === "USER_SEARCH_REQUEST") return searchUsersByDigits(message.data.digits);
-  if (message.type === "SPORT_BETS_REQUEST") return getGanamosActiveSportBets(message.data);
+  if (message.type === "SPORT_BETS_REQUEST") {
+    return message.data.platform === "multipanel"
+      ? getMultiPanelActiveSportBets(message.data)
+      : getGanamosActiveSportBets(message.data);
+  }
   if (message.type === "WITHDRAWAL_HISTORY_REQUEST") {
     return {
       ok: false,

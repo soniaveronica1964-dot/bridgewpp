@@ -4934,14 +4934,16 @@
     for (const [platform] of accountsToFetch) {
       host.balanceStates[platform] = { loading: true };
     }
-    const ganamosUsername = host.dataset.username;
-    if (ganamosUsername) {
-      host.sportBetsState = {
-        ...host.sportBetsState,
+    const sportBetsAccounts = accountsToFetch.filter(([platform]) =>
+      platform === "ganamos" || platform === "multipanel");
+    host.sportBetsStates ||= {};
+    for (const [platform] of sportBetsAccounts) {
+      host.sportBetsStates[platform] = {
+        ...host.sportBetsStates[platform],
         loading: true
       };
-      renderSportBetsCount(host);
     }
+    if (sportBetsAccounts.length) renderSportBetsCount(host);
     renderBalanceRows(host, accounts);
 
     const balanceRequests = accountsToFetch.map(async ([platform, username]) => {
@@ -4964,56 +4966,63 @@
         renderBalanceRows(host, accounts);
       }
     });
-    const sportBetsRequest = ganamosUsername
-      ? refreshSportBetsCount(host, ganamosUsername, requestAccountsKey, accounts)
+    const sportBetsRequest = sportBetsAccounts.length
+      ? refreshSportBetsCounts(host, sportBetsAccounts, requestAccountsKey, accounts)
       : Promise.resolve();
     await Promise.all([...balanceRequests, sportBetsRequest]);
   }
 
-  async function refreshSportBetsCount(host, username, requestAccountsKey, accounts) {
-    const toastKey = `sport-bets:${requestAccountsKey}`;
+  async function refreshSportBetsCounts(host, accountsToFetch, requestAccountsKey, accounts) {
     const isCurrentRequest = () =>
       document.getElementById(HOST_ID) === host &&
       host.dataset.accounts === requestAccountsKey &&
       activeAccountsKey === requestAccountsKey;
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: "SPORT_BETS_REQUEST",
-        data: { nombre: username }
-      });
-      if (!response?.ok || !Number.isSafeInteger(response.count) || response.count < 0 ||
-        typeof response.hasBets !== "boolean") {
-        throw new Error(response?.error || "La respuesta de apuestas deportivas no es válida.");
+    await Promise.all(accountsToFetch.map(async ([platform, username]) => {
+      const toastKey = `sport-bets:${requestAccountsKey}:${platform}`;
+      const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: "SPORT_BETS_REQUEST",
+          data: { nombre: username, platform }
+        });
+        if (!response?.ok || !Number.isSafeInteger(response.count) || response.count < 0 ||
+          typeof response.hasBets !== "boolean") {
+          throw new Error(response?.error || "La respuesta de apuestas deportivas no es válida.");
+        }
+        if (!isCurrentRequest()) return;
+        host.sportBetsStates[platform] = {
+          count: response.count,
+          hasBets: response.hasBets
+        };
+        dismissToast(toastKey);
+      } catch (error) {
+        if (!isCurrentRequest()) return;
+        host.sportBetsStates[platform] = {
+          ...host.sportBetsStates[platform],
+          error: error.message || `No se pudieron consultar las apuestas de ${platformName}.`,
+          loading: false
+        };
+        console.error(
+          `[Ganamos balance extension] No se pudieron consultar las apuestas deportivas de ${platformName}.`,
+          error
+        );
+        showToast(
+          host,
+          username,
+          `${platformName}: ${host.sportBetsStates[platform].error}`,
+          "error",
+          toastKey
+        );
       }
-      if (!isCurrentRequest()) return;
-      host.sportBetsState = {
-        count: response.count,
-        hasBets: response.hasBets
-      };
-      dismissToast(toastKey);
-    } catch (error) {
-      if (!isCurrentRequest()) return;
-      host.sportBetsState = {
-        ...host.sportBetsState,
-        error: error.message || "No se pudieron consultar las apuestas deportivas."
-      };
-      console.error(
-        "[Ganamos balance extension] No se pudieron consultar las apuestas deportivas.",
-        error
-      );
-      showToast(
-        host,
-        username,
-        host.sportBetsState.error,
-        "error",
-        toastKey
-      );
-    }
+    }));
     if (isCurrentRequest()) {
       renderSportBetsCount(host);
       renderBalanceRows(host, accounts);
       const title = findContactTitle();
-      updateSportBetsIndicator(title, host.sportBetsState?.hasBets === true);
+      updateSportBetsIndicator(
+        title,
+        Object.values(host.sportBetsStates).some((state) => state?.hasBets === true)
+      );
     }
   }
 
@@ -5078,17 +5087,27 @@
       } else balanceText = "pendiente";
       label.append(document.createTextNode(`: ${balanceText}`));
     });
-    refresh.disabled = Boolean(host.sportBetsState?.loading) ||
+    refresh.disabled = Object.values(host.sportBetsStates || {})
+      .some((state) => state?.loading) ||
       accounts.some(([platform, username]) => username && host.balanceStates?.[platform]?.loading);
   }
 
   function renderSportBetsCount(host) {
     const label = host.shadowRoot?.querySelector(".sport-bets-label");
     if (!label) return;
-    const state = host.sportBetsState;
-    if (state?.count > 0) {
-      const plural = state.count === 1 ? "" : "s";
-      label.textContent = `${state.count} apuesta${plural} deportiva${plural} activa${plural}`;
+    const counts = ["ganamos", "multipanel"]
+      .map((platform) => ({
+        platform,
+        count: host.sportBetsStates?.[platform]?.count
+      }))
+      .filter(({ count }) => Number.isSafeInteger(count) && count > 0)
+      .map(({ platform, count }) => {
+        const plural = count === 1 ? "" : "s";
+        const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
+        return `${platformName}: ${count} apuesta${plural} deportiva${plural} activa${plural}`;
+      });
+    if (counts.length) {
+      label.textContent = counts.join(" | ");
       label.hidden = false;
     } else {
       label.textContent = "";
@@ -6772,7 +6791,11 @@
       phone
     });
     if (host.dataset.accounts === accountsKey && activeAccountsKey === accountsKey) {
-      updateSportBetsIndicator(title, host.sportBetsState?.hasBets === true);
+      updateSportBetsIndicator(
+        title,
+        Object.values(host.sportBetsStates || {})
+          .some((state) => state?.hasBets === true)
+      );
       return;
     }
     updateSportBetsIndicator(title, false);
@@ -6865,7 +6888,7 @@
     createUserButton.setAttribute("aria-label", createUserLabel);
     host.dataset.createPlatform = missingPlatform || "";
     host.balanceStates = {};
-    host.sportBetsState = null;
+    host.sportBetsStates = {};
     activeAccountsKey = accountsKey;
     agentBalanceContactKey = accountsKey;
     if (hasPlatformUsers) void updateWithdrawalButtonState(host, accountsKey);
