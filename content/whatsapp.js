@@ -1,6 +1,7 @@
 (() => {
   const HOST_ID = "ganamos-balance-extension";
   const AGENT_BALANCE_HOST_ID = "ganamos-agent-balance";
+  const SPORT_BETS_INDICATOR_HOST_ID = "ganamos-sport-bets-indicator";
   const CONTACT_FLOW_COUNTER_HOST_ID = "ganamos-contact-flow-counters";
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
@@ -351,9 +352,21 @@
     const accountIds = getMovementAccountIds(contactKey);
     const legacyContactKeys = getLegacyMovementContactKeys(contactKey);
     if (!legacyContactKeys.length) return { contactKey };
+    let usernames;
+    try {
+      usernames = JSON.parse(contactKey)?.usernames;
+    } catch {
+      usernames = null;
+    }
     return {
       ...(accountIds.length ? { accountIds } : {}),
-      legacyContactKeys
+      legacyContactKeys,
+      ...(typeof usernames?.ganamos === "string" && usernames.ganamos
+        ? { ganamosUsername: usernames.ganamos }
+        : {}),
+      ...(typeof usernames?.multipanel === "string" && usernames.multipanel
+        ? { multipanelUsername: usernames.multipanel }
+        : {})
     };
   }
 
@@ -372,6 +385,54 @@
     host.style.left = `${chatRect.left + 8}px`;
     host.style.top = `${Math.max(chatRect.top + 8, (headerRect?.bottom ?? chatRect.top) + 40)}px`;
     host.style.width = `${width}px`;
+  }
+
+  function updateSportBetsIndicator(title, visible) {
+    let host = document.getElementById(SPORT_BETS_INDICATOR_HOST_ID);
+    if (!visible || !title) {
+      if (host) host.style.display = "none";
+      return;
+    }
+
+    const chat = title.closest("#main") || document.querySelector("#main");
+    const footer = chat?.querySelector("footer");
+    if (!footer || !isVisible(footer)) {
+      if (host) host.style.display = "none";
+      return;
+    }
+
+    const footerRect = footer.getBoundingClientRect();
+    if (footerRect.width <= 0 || footerRect.height <= 0) {
+      if (host) host.style.display = "none";
+      return;
+    }
+
+    if (!host) {
+      host = document.createElement("div");
+      host.id = SPORT_BETS_INDICATOR_HOST_ID;
+      host.style.position = "fixed";
+      host.style.zIndex = "2147483646";
+      host.style.pointerEvents = "none";
+      const shadow = host.attachShadow({ mode: "open" });
+      const stylesheet = document.createElement("link");
+      stylesheet.rel = "stylesheet";
+      stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
+      stylesheet.addEventListener("error", () => {
+        console.error("[Ganamos balance extension] No se pudo cargar styles/whatsapp.css para el indicador deportivo.");
+      }, { once: true });
+      const ball = document.createElement("span");
+      ball.className = "sport-bets-indicator";
+      ball.textContent = "⚽";
+      ball.setAttribute("role", "img");
+      ball.setAttribute("aria-label", "Este usuario usa apuestas deportivas");
+      ball.title = "Este usuario usa apuestas deportivas";
+      shadow.append(stylesheet, ball);
+      document.documentElement.append(host);
+    }
+
+    host.style.left = `${footerRect.left + 8}px`;
+    host.style.top = `${footerRect.top - 32}px`;
+    host.style.display = "";
   }
 
   function getToastStack() {
@@ -3057,11 +3118,14 @@
         ...(start ? { since: start.getTime() } : {})
       });
       if (contactKey !== agentBalanceContactKey || view !== agentBalanceView) return;
-      const movements = storedMovements
-        .filter((record) =>
-          ["deposit", "withdrawal"].includes(record?.operation) &&
-          record.status !== "pending-verification")
+      const allMovements = storedMovements
+        .filter((record) => ["deposit", "withdrawal"].includes(record?.operation))
         .sort((first, second) => second.timestamp - first.timestamp);
+      const movements = allMovements
+        .filter((record) => record.status !== "pending-verification");
+      const pendingDeposits = allMovements
+        .filter((record) =>
+          record.operation === "deposit" && record.status === "pending-verification");
 
       const end = view === "daily"
         ? new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1)
@@ -3074,6 +3138,10 @@
         ? movements.filter((movement) =>
           movement.timestamp >= start.getTime() && movement.timestamp < end.getTime())
         : movements;
+      const selectedPendingDeposits = start && end
+        ? pendingDeposits.filter((movement) =>
+          movement.timestamp >= start.getTime() && movement.timestamp < end.getTime())
+        : pendingDeposits;
       const periodName = {
         daily: "Hoy",
         weekly: "Sem.",
@@ -3081,7 +3149,7 @@
         total: "Total"
       }[view] || "Total";
 
-      if (!selectedMovements.length) {
+      if (!selectedMovements.length && !selectedPendingDeposits.length) {
         const empty = document.createElement("div");
         empty.className = "agent-movement-empty";
         empty.textContent = view === "daily"
@@ -3097,23 +3165,41 @@
         return;
       }
 
-      for (const [label, operation, className] of [
-        [`Depósitos ${periodName}`, "deposit", "agent-movement-deposits"],
-        [`Retiros ${periodName}`, "withdrawal", "agent-movement-withdrawals"]
-      ]) {
-        const total = selectedMovements
-          .filter((movement) => movement.operation === operation)
+      if (selectedMovements.length) {
+        for (const [label, operation, className] of [
+          [`Depósitos ${periodName}`, "deposit", "agent-movement-deposits"],
+          [`Retiros ${periodName}`, "withdrawal", "agent-movement-withdrawals"]
+        ]) {
+          const total = selectedMovements
+            .filter((movement) => movement.operation === operation)
+            .reduce((sum, movement) => sum + movement.amount, 0);
+          const row = document.createElement("div");
+          row.className = "agent-movement-total";
+          const name = document.createElement("span");
+          name.className = className;
+          name.textContent = label;
+          const amount = document.createElement("span");
+          amount.className = className;
+          amount.classList.add("agent-movement-copy-value");
+          amount.addEventListener("click", () => selectCurrencyAmount(amount));
+          amount.textContent = `$${formatCurrency(total)}`;
+          row.append(name, amount);
+          list.append(row);
+        }
+      }
+      if (selectedPendingDeposits.length) {
+        const pendingTotal = selectedPendingDeposits
           .reduce((sum, movement) => sum + movement.amount, 0);
         const row = document.createElement("div");
         row.className = "agent-movement-total";
         const name = document.createElement("span");
-        name.className = className;
-        name.textContent = label;
+        name.className = "agent-movement-pending";
+        name.textContent = `Cargas pendientes (${selectedPendingDeposits.length}) ${periodName}`;
         const amount = document.createElement("span");
-        amount.className = className;
+        amount.className = "agent-movement-pending";
         amount.classList.add("agent-movement-copy-value");
         amount.addEventListener("click", () => selectCurrencyAmount(amount));
-        amount.textContent = `$${formatCurrency(total)}`;
+        amount.textContent = `$${formatCurrency(pendingTotal)}`;
         row.append(name, amount);
         list.append(row);
       }
@@ -3553,6 +3639,9 @@
         item.className = "movement-history-item";
         item.dataset.platform = movement.fromPlatform || movement.platform;
         item.dataset.operation = movement.operation;
+        if (movement.operation === "deposit" && movement.depositType === "advertising") {
+          item.dataset.depositType = "advertising";
+        }
         if (movement.status) item.dataset.status = movement.status;
         const platformName = (platform) => platform === "ganamos" ? "Ganamos" : "MultiPanel";
         item.setAttribute("aria-label", movement.operation === "exchange"
@@ -4670,7 +4759,16 @@
     refresh.title = "Actualizar saldos";
     refresh.setAttribute("aria-label", "Actualizar saldos");
     refresh.addEventListener("click", () => void refreshBalance(host));
-    status.append(balanceLabel, refresh);
+    const balanceLine = document.createElement("div");
+    balanceLine.className = "balance-line";
+    balanceLine.append(balanceLabel, refresh);
+    const balanceContent = document.createElement("div");
+    balanceContent.className = "balance-content";
+    const sportBetsLabel = document.createElement("span");
+    sportBetsLabel.className = "sport-bets-label";
+    sportBetsLabel.hidden = true;
+    balanceContent.append(balanceLine, sportBetsLabel);
+    status.append(balanceContent);
     const actions = document.createElement("div");
     actions.className = "actions";
     const depositGroup = document.createElement("div");
@@ -4836,9 +4934,17 @@
     for (const [platform] of accountsToFetch) {
       host.balanceStates[platform] = { loading: true };
     }
+    const ganamosUsername = host.dataset.username;
+    if (ganamosUsername) {
+      host.sportBetsState = {
+        ...host.sportBetsState,
+        loading: true
+      };
+      renderSportBetsCount(host);
+    }
     renderBalanceRows(host, accounts);
 
-    await Promise.all(accountsToFetch.map(async ([platform, username]) => {
+    const balanceRequests = accountsToFetch.map(async ([platform, username]) => {
       try {
         const response = await chrome.runtime.sendMessage({
           type: "BALANCE_REQUEST",
@@ -4857,7 +4963,58 @@
       if (document.getElementById(HOST_ID) === host && host.dataset.accounts === requestAccountsKey) {
         renderBalanceRows(host, accounts);
       }
-    }));
+    });
+    const sportBetsRequest = ganamosUsername
+      ? refreshSportBetsCount(host, ganamosUsername, requestAccountsKey, accounts)
+      : Promise.resolve();
+    await Promise.all([...balanceRequests, sportBetsRequest]);
+  }
+
+  async function refreshSportBetsCount(host, username, requestAccountsKey, accounts) {
+    const toastKey = `sport-bets:${requestAccountsKey}`;
+    const isCurrentRequest = () =>
+      document.getElementById(HOST_ID) === host &&
+      host.dataset.accounts === requestAccountsKey &&
+      activeAccountsKey === requestAccountsKey;
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "SPORT_BETS_REQUEST",
+        data: { nombre: username }
+      });
+      if (!response?.ok || !Number.isSafeInteger(response.count) || response.count < 0 ||
+        typeof response.hasBets !== "boolean") {
+        throw new Error(response?.error || "La respuesta de apuestas deportivas no es válida.");
+      }
+      if (!isCurrentRequest()) return;
+      host.sportBetsState = {
+        count: response.count,
+        hasBets: response.hasBets
+      };
+      dismissToast(toastKey);
+    } catch (error) {
+      if (!isCurrentRequest()) return;
+      host.sportBetsState = {
+        ...host.sportBetsState,
+        error: error.message || "No se pudieron consultar las apuestas deportivas."
+      };
+      console.error(
+        "[Ganamos balance extension] No se pudieron consultar las apuestas deportivas.",
+        error
+      );
+      showToast(
+        host,
+        username,
+        host.sportBetsState.error,
+        "error",
+        toastKey
+      );
+    }
+    if (isCurrentRequest()) {
+      renderSportBetsCount(host);
+      renderBalanceRows(host, accounts);
+      const title = findContactTitle();
+      updateSportBetsIndicator(title, host.sportBetsState?.hasBets === true);
+    }
   }
 
   async function copyContactValue(host, platform, value, kind, toastKey) {
@@ -4921,7 +5078,22 @@
       } else balanceText = "pendiente";
       label.append(document.createTextNode(`: ${balanceText}`));
     });
-    refresh.disabled = accounts.some(([platform, username]) => username && host.balanceStates?.[platform]?.loading);
+    refresh.disabled = Boolean(host.sportBetsState?.loading) ||
+      accounts.some(([platform, username]) => username && host.balanceStates?.[platform]?.loading);
+  }
+
+  function renderSportBetsCount(host) {
+    const label = host.shadowRoot?.querySelector(".sport-bets-label");
+    if (!label) return;
+    const state = host.sportBetsState;
+    if (state?.count > 0) {
+      const plural = state.count === 1 ? "" : "s";
+      label.textContent = `${state.count} apuesta${plural} deportiva${plural} activa${plural}`;
+      label.hidden = false;
+    } else {
+      label.textContent = "";
+      label.hidden = true;
+    }
   }
 
   function parseBalance(value) {
@@ -5350,12 +5522,16 @@
 
     const selector = document.createElement("div");
     selector.className = "platform-selector";
+    const platformButtons = new Map();
     for (const [platform, label] of [["ganamos", "Ganamos"], ["multipanel", "MultiPanel"]]) {
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.platform = platform;
-      button.textContent = label;
       button.disabled = !getPlatformUsername(platform);
+      button.textContent = operation === "withdrawal"
+        ? button.disabled ? label : `${label} (consultando...)`
+        : label;
+      platformButtons.set(platform, button);
       button.setAttribute("aria-pressed", String(platform === selectedPlatform));
       button.addEventListener("click", () => {
         selectedPlatform = platform;
@@ -5631,6 +5807,49 @@
       return balance;
     };
 
+    const loadWithdrawalSelectorBalances = async () => {
+      const requests = [...platformButtons].filter(([platform, button]) =>
+        !button.disabled && getPlatformUsername(platform));
+      await Promise.all(requests.map(async ([platform, button]) => {
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: "BALANCE_REQUEST",
+            data: {
+              nombre: getPlatformUsername(platform),
+              platform,
+              force: true
+            }
+          });
+          if (!response?.ok) {
+            throw new Error(response?.error || `No se pudo consultar el saldo de ${platform}.`);
+          }
+          const balance = parseBalance(response.balance);
+          if (balance === null) throw new Error(`El saldo de ${platform} no es válido.`);
+          if (host.dataset.accounts !== openedAccountsKey || !root.contains(modal)) return;
+          button.textContent = `${platform === "ganamos" ? "Ganamos" : "MultiPanel"} ($${formatBalance(balance)})`;
+          button.title = `Saldo disponible: $${formatBalance(balance)}`;
+          button.setAttribute("aria-label", `${button.title}, ${platform === "ganamos" ? "Ganamos" : "MultiPanel"}`);
+        } catch (error) {
+          if (host.dataset.accounts !== openedAccountsKey || !root.contains(modal)) return;
+          const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
+          button.textContent = `${platformName} (sin saldo)`;
+          button.title = error.message || `No se pudo consultar el saldo de ${platformName}.`;
+          button.setAttribute("aria-label", `${platformName}: no se pudo consultar el saldo`);
+          console.error(
+            `[Ganamos balance extension] No se pudo consultar el saldo de ${platformName} para el selector de retiro.`,
+            error
+          );
+          showToast(
+            host,
+            getPlatformUsername(platform),
+            `${platformName}: ${button.title}`,
+            "error",
+            `withdrawal-selector-balance:${openedAccountsKey}:${platform}`
+          );
+        }
+      }));
+    };
+
     if (operation === "withdrawal") {
       const recoveryFields = dialog.querySelector(".bonus-fields--withdrawal");
       const loadLastDepositButton = recoveryFields?.querySelector(".load-last-deposit");
@@ -5904,6 +6123,7 @@
     root.append(modal);
     if (operation === "withdrawal") {
       void updateLastWithdrawalDisplay(host, openedAccountsKey);
+      void loadWithdrawalSelectorBalances();
     }
     amountInput.focus();
   }
@@ -6500,6 +6720,7 @@
       'button[role="menuitem"][aria-label="Responder"]'
     )].some(isRenderedVisible);
     const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+    const sportBetsIndicatorHost = document.getElementById(SPORT_BETS_INDICATOR_HOST_ID);
     const activeBonusHost = document.getElementById(ACTIVE_BONUS_HOST_ID);
     if (agentBalanceHost) {
       const display = zoomViewOpen ? "none" : "";
@@ -6509,6 +6730,7 @@
     if (zoomViewOpen) {
       const host = document.getElementById(HOST_ID);
       if (host && host.style.display !== "none") host.style.display = "none";
+      if (sportBetsIndicatorHost) sportBetsIndicatorHost.style.display = "none";
       return;
     }
 
@@ -6528,6 +6750,7 @@
     if (!usernames?.ganamos && !usernames?.multipanel && !hasLegacyUsername && !phone) {
       const host = document.getElementById(HOST_ID);
       if (host) host.style.display = "none";
+      if (sportBetsIndicatorHost) sportBetsIndicatorHost.style.display = "none";
       activeAccountsKey = null;
       const contactChanged = agentBalanceContactKey !== null;
       agentBalanceContactKey = null;
@@ -6548,7 +6771,11 @@
       },
       phone
     });
-    if (host.dataset.accounts === accountsKey && activeAccountsKey === accountsKey) return;
+    if (host.dataset.accounts === accountsKey && activeAccountsKey === accountsKey) {
+      updateSportBetsIndicator(title, host.sportBetsState?.hasBets === true);
+      return;
+    }
+    updateSportBetsIndicator(title, false);
     if (host.dataset.accounts && host.dataset.accounts !== accountsKey) {
       host.shadowRoot.querySelector(".dialog-root").replaceChildren();
     }
@@ -6638,6 +6865,7 @@
     createUserButton.setAttribute("aria-label", createUserLabel);
     host.dataset.createPlatform = missingPlatform || "";
     host.balanceStates = {};
+    host.sportBetsState = null;
     activeAccountsKey = accountsKey;
     agentBalanceContactKey = accountsKey;
     if (hasPlatformUsers) void updateWithdrawalButtonState(host, accountsKey);

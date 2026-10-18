@@ -2633,7 +2633,8 @@ function createDataApiServer({ pool, config }) {
         const identity = await authenticate(request);
         const query = new URL(request.url, "https://localhost").searchParams;
         const allowedParameters = new Set([
-          "accountId", "contactKey", "legacyContactKey", "operation", "since", "limit", "source"
+          "accountId", "contactKey", "ganamosUsername", "legacyContactKey", "multipanelUsername",
+          "operation", "since", "limit", "source"
         ]);
         if ([...query.keys()].some((key) => !allowedParameters.has(key)) ||
           [...allowedParameters].some((key) =>
@@ -2643,12 +2644,17 @@ function createDataApiServer({ pool, config }) {
         }
         const accountIds = query.getAll("accountId");
         const legacyContactKeys = query.getAll("legacyContactKey");
+        const ganamosUsername = query.get("ganamosUsername");
+        const multipanelUsername = query.get("multipanelUsername");
         if (accountIds.some((accountId) =>
           !/^(ganamos|multipanel):\d{4,20}$/.test(accountId)) ||
           new Set(accountIds).size !== accountIds.length ||
           legacyContactKeys.some((key) =>
             !key || key.length > 2048 || /[\u0000-\u001f\u007f]/.test(key)) ||
           new Set(legacyContactKeys).size !== legacyContactKeys.length ||
+          [ganamosUsername, multipanelUsername].some((username) =>
+            username !== null &&
+            (!username || username.length > 128 || /[\u0000-\u001f\u007f]/.test(username))) ||
           legacyContactKeys.length > 0 && accountIds.length === 0 &&
             query.get("contactKey") !== null) {
           throw new ApiError(400, "invalid_movement_query", "Las cuentas consultadas no son válidas.");
@@ -2684,6 +2690,7 @@ function createDataApiServer({ pool, config }) {
           parameters.push(contactKey);
           filters.push(`contact_key = $${parameters.length}`);
         }
+        const identityFilters = [];
         if (accountIds.length && legacyContactKeys.length) {
           parameters.push(accountIds);
           const accountParameter = parameters.length;
@@ -2694,17 +2701,28 @@ function createDataApiServer({ pool, config }) {
           const phonePatternParameter = parameters.length;
           parameters.push(legacyContactKeys);
           const legacyContactParameter = parameters.length;
-          filters.push(
+          identityFilters.push(
             `(account_ids && $${accountParameter}::text[] OR ` +
             `legacy_record_json->>'contactKey' ~ ANY($${phonePatternParameter}::text[]) OR ` +
             `contact_key = ANY($${legacyContactParameter}::text[]))`
           );
         } else if (accountIds.length) {
           parameters.push(accountIds);
-          filters.push(`account_ids && $${parameters.length}::text[]`);
+          identityFilters.push(`account_ids && $${parameters.length}::text[]`);
         } else if (legacyContactKeys.length) {
           parameters.push(legacyContactKeys);
-          filters.push(`contact_key = ANY($${parameters.length}::text[])`);
+          identityFilters.push(`contact_key = ANY($${parameters.length}::text[])`);
+        }
+        if (ganamosUsername !== null) {
+          parameters.push(ganamosUsername);
+          identityFilters.push(`(platform = 'ganamos' AND username = $${parameters.length})`);
+        }
+        if (multipanelUsername !== null) {
+          parameters.push(multipanelUsername);
+          identityFilters.push(`(platform = 'multipanel' AND username = $${parameters.length})`);
+        }
+        if (identityFilters.length) {
+          filters.push(`(${identityFilters.join(" OR ")})`);
         }
         if (operation !== null) {
           parameters.push(operation);

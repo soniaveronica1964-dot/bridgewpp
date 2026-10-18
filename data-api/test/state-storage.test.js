@@ -49,7 +49,9 @@ test("extension storage adapter routes reads and revisioned writes through the s
   ]);
   const accountMovements = await context.stateStorage.getMovements({
     accountIds: ["ganamos:5491112345678", "multipanel:5491112345678"],
-    legacyContactKeys: ["legacy-contact-1", "legacy-contact-2"]
+    legacyContactKeys: ["legacy-contact-1", "legacy-contact-2"],
+    ganamosUsername: "user-a",
+    multipanelUsername: "user-b"
   });
   assert.deepEqual(JSON.parse(JSON.stringify(accountMovements)), [
     { operation: "deposit", amount: 20 }
@@ -76,7 +78,9 @@ test("extension storage adapter routes reads and revisioned writes through the s
   });
   assert.deepEqual(JSON.parse(JSON.stringify(messages[2].filters)), {
     accountIds: ["ganamos:5491112345678", "multipanel:5491112345678"],
-    legacyContactKeys: ["legacy-contact-1", "legacy-contact-2"]
+    legacyContactKeys: ["legacy-contact-1", "legacy-contact-2"],
+    ganamosUsername: "user-a",
+    multipanelUsername: "user-b"
   });
   assert.deepEqual(JSON.parse(JSON.stringify(messages[3])), {
     type: "ADVERTISING_STATS_GET",

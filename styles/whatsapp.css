@@ -1438,7 +1438,8 @@
 .status {
   box-sizing: border-box;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   justify-content: center;
   gap: 4px;
   min-width: 0;
@@ -1447,6 +1448,37 @@
   border-radius: 5px;
   overflow-wrap: anywhere;
   background: rgb(0 0 0 / 80%);
+  text-align: center;
+}
+
+.balance-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+}
+
+.balance-line {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+}
+
+.sport-bets-label {
+  color: #f0c875;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.sport-bets-indicator {
+  display: block;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  font-size: 19px;
+  line-height: 20px;
   text-align: center;
 }
 
@@ -2618,6 +2650,10 @@ button:disabled {
   color: #e2c878;
 }
 
+.movement-history-item[data-deposit-type="advertising"]:not([data-status="pending-verification"]) .movement-history-amount {
+  color: #65cfff;
+}
+
 .movement-history-verification {
   flex: 0 1 auto;
   overflow: hidden;
@@ -3528,6 +3564,11 @@ input::placeholder {
 
 .agent-movement-withdrawals {
   border-bottom: 1px solid #ff8a5c;
+}
+
+.agent-movement-pending {
+  border-bottom: 1px solid #f5c451;
+  color: #f5c451;
 }
 
 .agent-movement-empty {

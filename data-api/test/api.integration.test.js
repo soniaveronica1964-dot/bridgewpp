@@ -529,6 +529,30 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(reorderedLegacyHistory.status, 200, JSON.stringify(reorderedLegacyHistory.body));
     assert.equal(reorderedLegacyHistory.body.movements.length, 1);
     assert.equal(reorderedLegacyHistory.body.movements[0].username, "user-a");
+    const unscheduledContactKey = JSON.stringify({
+      usernames: { ganamos: null, multipanel: null },
+      phone: "9450"
+    });
+    await pool.query(`
+      UPDATE agent_movements
+      SET account_ids = '{}',
+          contact_key = $1,
+          legacy_record_json = jsonb_set(
+            legacy_record_json, '{contactKey}', to_jsonb($1::text)
+          )
+      WHERE legacy_storage_key = 'agentMovement:1760000000000:uuid-1'
+    `, [unscheduledContactKey]);
+    const scheduledUsernameHistory = await request(
+      port,
+      "GET",
+      `/v1/movements?${new URLSearchParams({ ganamosUsername: "user-a" })}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(scheduledUsernameHistory.status, 200, JSON.stringify(scheduledUsernameHistory.body));
+    assert.equal(scheduledUsernameHistory.body.movements.length, 1);
+    assert.equal(scheduledUsernameHistory.body.movements[0].contactKey, unscheduledContactKey);
     const advertisingTimestamp = Date.now() - 10 * 24 * 60 * 60 * 1000;
     const olderAdvertisingTimestamp = Date.now() - 70 * 24 * 60 * 60 * 1000;
     const advertisingMovements = {

@@ -570,6 +570,72 @@ async function getGanamosAgentBalance() {
   };
 }
 
+async function getGanamosActiveSportBets(data) {
+  const username = data.nombre.trim();
+  const pageSize = 100;
+  const now = new Date();
+  const rangeStart = new Date(now);
+  rangeStart.setFullYear(rangeStart.getFullYear() - 1);
+  rangeStart.setHours(0, 0, 0, 0);
+  const rangeEnd = new Date(now);
+  rangeEnd.setFullYear(rangeEnd.getFullYear() + 1);
+  rangeEnd.setHours(23, 59, 59, 0);
+  const formatDateTime = (date) => {
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+      `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  };
+  let totalCount = null;
+  let receivedCount = 0;
+  let activeCount = 0;
+  const seenCouponIds = new Set();
+
+  for (let page = 0; totalCount === null || receivedCount < totalCount; page += 1) {
+    const params = new URLSearchParams({
+      username,
+      created_at__gte: formatDateTime(rangeStart),
+      created_at__lte: formatDateTime(rangeEnd),
+      count: String(pageSize),
+      page: String(page),
+      tz: String(-now.getTimezoneOffset() / 60)
+    });
+    const payload = await requestGanamosJson(
+      `/api/agent_admin/user/sport/coupon/?${params}`
+    );
+    if (payload?.status !== 0) {
+      throw new Error(payload?.error_message || "Ganamos no pudo consultar las apuestas deportivas.");
+    }
+    const result = payload?.result;
+    if (!Array.isArray(result?.items) || !Number.isSafeInteger(result.count) ||
+      result.count < 0) {
+      throw new Error("Ganamos devolvió las apuestas deportivas con un formato inesperado.");
+    }
+    if (totalCount === null) totalCount = result.count;
+    if (result.items.length === 0) break;
+
+    for (const coupon of result.items) {
+      if (!coupon || typeof coupon !== "object" || typeof coupon.status !== "string" ||
+        (typeof coupon.id !== "number" && typeof coupon.id !== "string")) {
+        throw new Error("Ganamos devolvió una apuesta deportiva con un formato inesperado.");
+      }
+      const couponId = String(coupon.id);
+      if (seenCouponIds.has(couponId)) continue;
+      seenCouponIds.add(couponId);
+      if (coupon.status.toUpperCase() === "ACCEPTED") activeCount += 1;
+    }
+    receivedCount += result.items.length;
+  }
+
+  if (seenCouponIds.size < totalCount) {
+    throw new Error("Ganamos no devolvió todas las páginas de apuestas deportivas.");
+  }
+  return {
+    ok: true,
+    count: activeCount,
+    hasBets: seenCouponIds.size > 0
+  };
+}
+
 async function createGanamosUser(data) {
   const { ganamos: ganamosSuffix } = await getPlatformSuffixes();
   if (!isValidUsername(data?.username, ganamosSuffix)) {
@@ -1273,6 +1339,7 @@ const API_MESSAGE_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
   "USER_SEARCH_REQUEST",
+  "SPORT_BETS_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
   "EXCHANGE_REQUEST",
@@ -1751,6 +1818,9 @@ function validateApiMessage(message, suffixes) {
   if (message.type === "USER_SEARCH_REQUEST") return /^\d{4}$/.test(message.data?.digits || "");
 
   const platform = message.data?.platform || "ganamos";
+  if (message.type === "SPORT_BETS_REQUEST") {
+    return isValidUsername(message.data?.nombre, suffixes.ganamos);
+  }
   if (message.type === "CREATE_USER_REQUEST") {
     return platform === "multipanel"
       ? isValidMultiPanelUsername(message.data?.username, suffixes.multipanel)
@@ -1789,6 +1859,7 @@ async function executeApiMessage(message) {
   if (message.type === "AGENT_BALANCE_REQUEST") return getGanamosAgentBalance();
   if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return getMultiPanelAgentBalance();
   if (message.type === "USER_SEARCH_REQUEST") return searchUsersByDigits(message.data.digits);
+  if (message.type === "SPORT_BETS_REQUEST") return getGanamosActiveSportBets(message.data);
   if (message.type === "WITHDRAWAL_HISTORY_REQUEST") {
     return {
       ok: false,
@@ -1873,7 +1944,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const filters = message.filters && typeof message.filters === "object" &&
       !Array.isArray(message.filters) ? message.filters : {};
     const allowedFilters = new Set([
-      "accountIds", "contactKey", "legacyContactKeys", "operation", "since", "limit", "ownProfile"
+      "accountIds", "contactKey", "ganamosUsername", "legacyContactKeys", "multipanelUsername",
+      "operation", "since", "limit", "ownProfile"
     ]);
     if (Object.keys(filters).some((key) => !allowedFilters.has(key)) ||
       (Object.hasOwn(filters, "ownProfile") && typeof filters.ownProfile !== "boolean") ||
@@ -1894,6 +1966,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           Object.hasOwn(filters, "accountIds") && !Array.isArray(filters.accountIds))) ||
       (Object.hasOwn(filters, "contactKey") &&
         (typeof filters.contactKey !== "string" || !filters.contactKey)) ||
+      (["ganamosUsername", "multipanelUsername"].some((key) =>
+        Object.hasOwn(filters, key) &&
+        (typeof filters[key] !== "string" || !filters[key] || filters[key].length > 128 ||
+          /[\u0000-\u001f\u007f]/.test(filters[key])))) ||
       (Object.hasOwn(filters, "operation") &&
         !["deposit", "withdrawal", "exchange"].includes(filters.operation)) ||
       (Object.hasOwn(filters, "since") &&
@@ -1914,20 +1990,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     }
     if (typeof filters.contactKey === "string") query.set("contactKey", filters.contactKey);
+    if (typeof filters.ganamosUsername === "string") {
+      query.set("ganamosUsername", filters.ganamosUsername);
+    }
+    if (typeof filters.multipanelUsername === "string") {
+      query.set("multipanelUsername", filters.multipanelUsername);
+    }
     if (typeof filters.operation === "string") query.set("operation", filters.operation);
     if (Number.isSafeInteger(filters.since)) query.set("since", String(filters.since));
     if (Number.isSafeInteger(filters.limit)) query.set("limit", String(filters.limit));
-    requestDataApi(`/v1/movements?${query}`)
-      .then((response) => {
-        if (!Array.isArray(response.movements)) {
-          throw new Error("La API PostgreSQL devolvió una lista de movimientos incompleta.");
-        }
-        sendResponse({ ok: true, movements: response.movements });
-      })
-      .catch((error) => sendResponse({
-        ok: false,
-        error: error.message || "No se pudieron consultar los movimientos."
-      }));
+    (async () => {
+      let response;
+      try {
+        response = await requestDataApi(`/v1/movements?${query}`);
+      } catch (error) {
+        const hasUsernameFilters = query.has("ganamosUsername") || query.has("multipanelUsername");
+        if (error.code !== "invalid_movement_query" || !hasUsernameFilters) throw error;
+        const compatibleQuery = new URLSearchParams(query);
+        compatibleQuery.delete("ganamosUsername");
+        compatibleQuery.delete("multipanelUsername");
+        console.warn(
+          "[Ganamos balance extension] La API de datos debe reiniciarse para habilitar la búsqueda por usuario; se reintenta con los filtros compatibles."
+        );
+        response = await requestDataApi(`/v1/movements?${compatibleQuery}`);
+      }
+      if (!Array.isArray(response.movements)) {
+        throw new Error("La API PostgreSQL devolvió una lista de movimientos incompleta.");
+      }
+      sendResponse({ ok: true, movements: response.movements });
+    })().catch((error) => sendResponse({
+      ok: false,
+      error: error.message || "No se pudieron consultar los movimientos."
+    }));
     return true;
   }
 

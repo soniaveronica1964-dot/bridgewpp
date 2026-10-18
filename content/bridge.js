@@ -19,6 +19,7 @@
       message.type === "CREATE_USER_REQUEST" || message.type === "PASSWORD_RESET_REQUEST") {
       return message.data?.platform === "multipanel" ? "multipanel" : "ganamos";
     }
+    if (message.type === "SPORT_BETS_REQUEST") return "ganamos";
     if (message.type === "WITHDRAWAL_HISTORY_REQUEST") return "ganamos";
     return null;
   }
