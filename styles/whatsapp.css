@@ -1473,13 +1473,19 @@
 }
 
 .sport-bets-indicator {
+  position: fixed;
   display: block;
   box-sizing: border-box;
-  width: 20px;
-  height: 20px;
-  font-size: 19px;
-  line-height: 20px;
+  width: 24px;
+  height: 24px;
+  font-size: 22px;
+  line-height: 24px;
+  pointer-events: none;
   text-align: center;
+}
+
+.sport-bets-indicator[hidden] {
+  display: none;
 }
 
 .contact-user-search {

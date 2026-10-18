@@ -1,7 +1,6 @@
 (() => {
   const HOST_ID = "ganamos-balance-extension";
   const AGENT_BALANCE_HOST_ID = "ganamos-agent-balance";
-  const SPORT_BETS_INDICATOR_HOST_ID = "ganamos-sport-bets-indicator";
   const CONTACT_FLOW_COUNTER_HOST_ID = "ganamos-contact-flow-counters";
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
@@ -388,51 +387,41 @@
   }
 
   function updateSportBetsIndicator(title, visible) {
-    let host = document.getElementById(SPORT_BETS_INDICATOR_HOST_ID);
+    const host = document.getElementById(HOST_ID);
+    const panel = host?.shadowRoot?.querySelector(".panel");
+    let ball = panel?.querySelector(".sport-bets-indicator");
     if (!visible || !title) {
-      if (host) host.style.display = "none";
+      if (ball) ball.hidden = true;
       return;
     }
 
     const chat = title.closest("#main") || document.querySelector("#main");
     const footer = chat?.querySelector("footer");
     if (!footer || !isVisible(footer)) {
-      if (host) host.style.display = "none";
+      if (ball) ball.hidden = true;
       return;
     }
 
     const footerRect = footer.getBoundingClientRect();
     if (footerRect.width <= 0 || footerRect.height <= 0) {
-      if (host) host.style.display = "none";
+      if (ball) ball.hidden = true;
       return;
     }
 
-    if (!host) {
-      host = document.createElement("div");
-      host.id = SPORT_BETS_INDICATOR_HOST_ID;
-      host.style.position = "fixed";
-      host.style.zIndex = "2147483646";
-      host.style.pointerEvents = "none";
-      const shadow = host.attachShadow({ mode: "open" });
-      const stylesheet = document.createElement("link");
-      stylesheet.rel = "stylesheet";
-      stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
-      stylesheet.addEventListener("error", () => {
-        console.error("[Ganamos balance extension] No se pudo cargar styles/whatsapp.css para el indicador deportivo.");
-      }, { once: true });
-      const ball = document.createElement("span");
+    if (!ball && panel) {
+      ball = document.createElement("span");
       ball.className = "sport-bets-indicator";
       ball.textContent = "⚽";
       ball.setAttribute("role", "img");
       ball.setAttribute("aria-label", "Este usuario usa apuestas deportivas");
       ball.title = "Este usuario usa apuestas deportivas";
-      shadow.append(stylesheet, ball);
-      document.documentElement.append(host);
+      panel.append(ball);
     }
+    if (!ball) return;
 
-    host.style.left = `${footerRect.left + 8}px`;
-    host.style.top = `${footerRect.top - 32}px`;
-    host.style.display = "";
+    ball.hidden = false;
+    ball.style.left = `${footerRect.left + 12}px`;
+    ball.style.top = `${footerRect.top - 36}px`;
   }
 
   function getToastStack() {
@@ -6739,7 +6728,6 @@
       'button[role="menuitem"][aria-label="Responder"]'
     )].some(isRenderedVisible);
     const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
-    const sportBetsIndicatorHost = document.getElementById(SPORT_BETS_INDICATOR_HOST_ID);
     const activeBonusHost = document.getElementById(ACTIVE_BONUS_HOST_ID);
     if (agentBalanceHost) {
       const display = zoomViewOpen ? "none" : "";
@@ -6749,7 +6737,6 @@
     if (zoomViewOpen) {
       const host = document.getElementById(HOST_ID);
       if (host && host.style.display !== "none") host.style.display = "none";
-      if (sportBetsIndicatorHost) sportBetsIndicatorHost.style.display = "none";
       return;
     }
 
@@ -6769,7 +6756,6 @@
     if (!usernames?.ganamos && !usernames?.multipanel && !hasLegacyUsername && !phone) {
       const host = document.getElementById(HOST_ID);
       if (host) host.style.display = "none";
-      if (sportBetsIndicatorHost) sportBetsIndicatorHost.style.display = "none";
       activeAccountsKey = null;
       const contactChanged = agentBalanceContactKey !== null;
       agentBalanceContactKey = null;
