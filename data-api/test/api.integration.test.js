@@ -1293,6 +1293,191 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       pool, initialized.workspaceId, "Secondary Device", false
     );
     const secondary = await enroll(port, extensionId, secondaryCode, "Secondary Device");
+    const legacyMainTags = {
+      "accounts:legacyf|legacyy": { scammer: true },
+      "accounts:sharedf|sharedy": { highDepositor: true }
+    };
+    const legacySecondaryTags = {
+      "accounts:secondaryf|secondaryy": { scammer: true },
+      "accounts:sharedf|sharedy": { scammer: true }
+    };
+    const mainTagsJson = canonicalJson(legacyMainTags);
+    await pool.query(`
+      INSERT INTO extension_state_values (
+        scope_type, scope_id, storage_key, value_json, value_ciphertext,
+        revision, updated_at_ms
+      ) VALUES ('profile', $1, 'contactVisualTags', NULL, $2, 1, $3)
+    `, [
+      main.identity.profileId,
+      encryptValue(mainTagsJson, encryptionKey),
+      Date.now()
+    ]);
+    const secondaryTagsJson = canonicalJson(legacySecondaryTags);
+    await pool.query(`
+      INSERT INTO legacy_extension_values (
+        profile_id, storage_key, value_ciphertext, imported_at_ms, source_sha256
+      ) VALUES ($1, 'contactVisualTags', $2, $3, $4)
+    `, [
+      secondary.identity.profileId,
+      encryptValue(secondaryTagsJson, encryptionKey),
+      Date.now(),
+      sha256Hex(Buffer.from(secondaryTagsJson, "utf8"))
+    ]);
+    const legacySharedTags = await request(
+      port,
+      "GET",
+      `/v1/state?keys=${encodeURIComponent(JSON.stringify(["contactVisualTags"]))}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(legacySharedTags.status, 200);
+    assert.deepEqual(legacySharedTags.body.values.contactVisualTags, {
+      ...legacyMainTags,
+      "accounts:secondaryf|secondaryy": { scammer: true },
+      "accounts:sharedf|sharedy": { highDepositor: true, scammer: true }
+    });
+    const persistedSharedTags = {
+      ...legacySharedTags.body.values.contactVisualTags
+    };
+    delete persistedSharedTags["accounts:legacyf|legacyy"];
+    const sharedTagsWrite = await request(port, "POST", "/v1/state", {
+      changes: { contactVisualTags: persistedSharedTags },
+      removes: [],
+      expectedRevision: legacySharedTags.body.revision
+    }, main.credential, extensionId);
+    assert.equal(sharedTagsWrite.status, 200, JSON.stringify(sharedTagsWrite.body));
+    const secondarySharedTags = await request(
+      port,
+      "GET",
+      `/v1/state?keys=${encodeURIComponent(JSON.stringify(["contactVisualTags"]))}`,
+      undefined,
+      secondary.credential,
+      extensionId
+    );
+    assert.equal(secondarySharedTags.status, 200);
+    assert.equal(
+      Object.hasOwn(secondarySharedTags.body.values.contactVisualTags, "accounts:legacyf|legacyy"),
+      false
+    );
+    assert.deepEqual(
+      secondarySharedTags.body.values.contactVisualTags["accounts:sharedf|sharedy"],
+      { highDepositor: true, scammer: true }
+    );
+    const legacyUserSettingKey =
+      `userWithdrawalLimit:${encodeURIComponent("phone:5491111111111")}`;
+    const legacyUserSettingValue = 125000;
+    const legacyUserSettingJson = canonicalJson(legacyUserSettingValue);
+    await pool.query(`
+      INSERT INTO legacy_extension_values (
+        profile_id, storage_key, value_ciphertext, imported_at_ms, source_sha256
+      ) VALUES ($1, $2, $3, $4, $5)
+    `, [
+      secondary.identity.profileId,
+      legacyUserSettingKey,
+      encryptValue(legacyUserSettingJson, encryptionKey),
+      Date.now(),
+      sha256Hex(Buffer.from(legacyUserSettingJson, "utf8"))
+    ]);
+    const migratedLegacyUserSetting = await request(
+      port,
+      "GET",
+      `/v1/state?keys=${encodeURIComponent(JSON.stringify([legacyUserSettingKey]))}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(migratedLegacyUserSetting.status, 200);
+    assert.equal(migratedLegacyUserSetting.body.values[legacyUserSettingKey], legacyUserSettingValue);
+    const accountSettingKeys = {
+      sportBetsDisabled: "userSetting:sportBetsDisabled:ganamos:nawe7500f",
+      userBonusDisabled: "userSetting:userBonusDisabled:ganamos:nawe7500f",
+      userAccumulatesBonuses: "userSetting:userAccumulatesBonuses:ganamos:nawe7500f",
+      userBlocked: "userSetting:userBlocked:ganamos:nawe7500f",
+      userWithdrawalLimit: "userSetting:userWithdrawalLimit:ganamos:nawe7500f",
+      userRelatedContacts: "userSetting:userRelatedContacts:ganamos:nawe7500f"
+    };
+    const accountSettingsWrite = await request(port, "POST", "/v1/state", {
+      changes: {
+        [accountSettingKeys.sportBetsDisabled]: true,
+        [accountSettingKeys.userBonusDisabled]: true,
+        [accountSettingKeys.userAccumulatesBonuses]: true,
+        [accountSettingKeys.userBlocked]: true,
+        [accountSettingKeys.userWithdrawalLimit]: 200000,
+        [accountSettingKeys.userRelatedContacts]: "nawe7500y"
+      },
+      removes: [],
+      expectedRevision: secondarySharedTags.body.revision
+    }, main.credential, extensionId);
+    assert.equal(accountSettingsWrite.status, 200, JSON.stringify(accountSettingsWrite.body));
+    const concurrentAccountSettingKey =
+      "userSetting:userRelatedContacts:multipanel:nawe7500y";
+    const concurrentAccountSettingWrite = await request(port, "POST", "/v1/state", {
+      changes: { [concurrentAccountSettingKey]: "nawe7500f" },
+      removes: [],
+      expectedRevision: secondarySharedTags.body.revision
+    }, secondary.credential, extensionId);
+    assert.equal(
+      concurrentAccountSettingWrite.status,
+      200,
+      JSON.stringify(concurrentAccountSettingWrite.body)
+    );
+    assert.equal(
+      Object.hasOwn(concurrentAccountSettingWrite.body, "contactFlowCounters"),
+      false
+    );
+    const secondaryAccountSettings = await request(
+      port,
+      "GET",
+      `/v1/state?keys=${encodeURIComponent(JSON.stringify(Object.values(accountSettingKeys)))}`,
+      undefined,
+      secondary.credential,
+      extensionId
+    );
+    assert.equal(secondaryAccountSettings.status, 200);
+    assert.deepEqual(secondaryAccountSettings.body.values, {
+      [accountSettingKeys.sportBetsDisabled]: true,
+      [accountSettingKeys.userBonusDisabled]: true,
+      [accountSettingKeys.userAccumulatesBonuses]: true,
+      [accountSettingKeys.userBlocked]: true,
+      [accountSettingKeys.userWithdrawalLimit]: 200000,
+      [accountSettingKeys.userRelatedContacts]: "nawe7500y",
+      [concurrentAccountSettingKey]: "nawe7500f"
+    });
+    const updatedAccountSetting = await request(port, "POST", "/v1/state", {
+      changes: { [accountSettingKeys.userWithdrawalLimit]: 250000 },
+      removes: [],
+      expectedRevision: secondaryAccountSettings.body.revision
+    }, secondary.credential, extensionId);
+    assert.equal(updatedAccountSetting.status, 200, JSON.stringify(updatedAccountSetting.body));
+    const mainUpdatedAccountSetting = await request(
+      port,
+      "GET",
+      `/v1/state?keys=${encodeURIComponent(JSON.stringify([accountSettingKeys.userWithdrawalLimit]))}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(mainUpdatedAccountSetting.body.values[accountSettingKeys.userWithdrawalLimit], 250000);
+    const fullWorkspaceState = await request(
+      port,
+      "GET",
+      "/v1/state",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(fullWorkspaceState.status, 200);
+    assert.equal(
+      fullWorkspaceState.body.values[accountSettingKeys.userWithdrawalLimit],
+      250000
+    );
+    const invalidAccountSetting = await request(port, "POST", "/v1/state", {
+      changes: { [accountSettingKeys.userBonusDisabled]: "yes" },
+      removes: []
+    }, main.credential, extensionId);
+    assert.equal(invalidAccountSetting.status, 400);
+    assert.equal(invalidAccountSetting.body.code, "invalid_state");
     const secondaryBonus = await request(
       port,
       "GET",

@@ -7,6 +7,8 @@ const {
   getServerConfig,
   mergeContactFlowCounterSnapshots,
   normalizeArgentinaPhone,
+  parseUserAccountSettingKey,
+  validateUserAccountSettingValue,
   validateCounterSnapshot
 } = require("../server");
 
@@ -145,6 +147,49 @@ test("derives stable platform account IDs from a WhatsApp contact phone", () => 
     operation: "deposit",
     platform: "ganamos"
   }), []);
+});
+
+test("validates workspace user-setting keys and values by platform account", () => {
+  const key = "userSetting:userWithdrawalLimit:ganamos:nawe7500f";
+  assert.deepEqual(parseUserAccountSettingKey(key), {
+    setting: "userWithdrawalLimit",
+    platform: "ganamos",
+    username: "nawe7500f"
+  });
+  assert.equal(validateUserAccountSettingValue(key, 150000), true);
+  assert.equal(validateUserAccountSettingValue(key, -1), false);
+  assert.equal(
+    validateUserAccountSettingValue(
+      "userSetting:userBonusDisabled:multipanel:nawe7500y",
+      true
+    ),
+    true
+  );
+  assert.equal(
+    validateUserAccountSettingValue(
+      "userSetting:userBonusDisabled:multipanel:nawe7500y",
+      "true"
+    ),
+    false
+  );
+  assert.equal(
+    validateUserAccountSettingValue(
+      "userSetting:userBlocked:multipanel:nawe7500y",
+      true
+    ),
+    true
+  );
+  assert.equal(
+    validateUserAccountSettingValue(
+      "userSetting:userBlocked:multipanel:nawe7500y",
+      "true"
+    ),
+    false
+  );
+  assert.equal(
+    parseUserAccountSettingKey("userSetting:unknown:ganamos:nawe7500f"),
+    null
+  );
 });
 
 test("validates timestamped contact-flow numbers and keeps legacy number strings usable", () => {

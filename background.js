@@ -17,8 +17,10 @@ const PROFILE_RUNTIME_STATE_KEYS = [
 const HIDDEN_ADVERTISING_PROFILES_KEY = "hiddenAdvertisingProfiles";
 const SHARED_STATE_KEYS = new Set([
   "contactFlowCounters",
+  "contactVisualTags",
   "activeBonusConfig"
 ]);
+const USER_ACCOUNT_SETTING_PREFIX = "userSetting:";
 const PLATFORM_OUTAGE_CONFIG_KEY = "platformOutageConfig";
 const stateChangedListeners = new Set();
 const loadedProfileStateKeys = new Set();
@@ -221,9 +223,11 @@ async function writeExtensionState(changes, removes = [], expectedRevision) {
     new Set(keys).size !== keys.length) {
     throw new Error("El cambio contiene claves inválidas o repetidas.");
   }
-  const sharedWrite = keys.some((key) => SHARED_STATE_KEYS.has(key));
+  const isSharedStateKey = (key) => SHARED_STATE_KEYS.has(key) ||
+    key.startsWith(USER_ACCOUNT_SETTING_PREFIX);
+  const sharedWrite = keys.some(isSharedStateKey);
   if (sharedWrite && expectedRevision === undefined) {
-    await getExtensionState(keys.filter((key) => SHARED_STATE_KEYS.has(key)));
+    await getExtensionState(keys.filter(isSharedStateKey));
   }
   const previous = Object.fromEntries(keys.map((key) => [key, extensionStateCache[key]]));
   const body = { changes, removes };

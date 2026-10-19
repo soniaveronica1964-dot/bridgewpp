@@ -2,13 +2,24 @@
   const HOST_ID = "ganamos-balance-extension";
   const AGENT_BALANCE_HOST_ID = "ganamos-agent-balance";
   const CONTACT_FLOW_COUNTER_HOST_ID = "ganamos-contact-flow-counters";
+  const PENDING_WITHDRAWALS_HOST_ID = "ganamos-pending-withdrawals";
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
   const PLATFORM_OUTAGE_CONFIG_KEY = "platformOutageConfig";
+  const SPORT_BETS_DISABLED_USERS_KEY = "sportBetsDisabledUsers";
+  const USER_BONUS_DISABLED_KEY = "userBonusDisabled";
+  const USER_ACCUMULATES_BONUSES_KEY = "userAccumulatesBonuses";
+  const USER_BLOCKED_KEY = "userBlocked";
+  const USER_WITHDRAWAL_LIMIT_KEY = "userWithdrawalLimit";
+  const USER_RELATED_CONTACTS_KEY = "userRelatedContacts";
+  const CONTACT_VISUAL_TAGS_KEY = "contactVisualTags";
+  const DEFAULT_WITHDRAWAL_LIMIT = 150000;
   const HIDDEN_ADVERTISING_PROFILES_KEY = "hiddenAdvertisingProfiles";
   const PROFILE_ID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
+  const PENDING_WITHDRAWALS_KEY = "pendingWithdrawals";
+  const PENDING_WITHDRAWAL_MESSAGE_MAX_AGE_MS = 60_000;
   const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 5_000;
   const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 45 * 60_000;
   const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
@@ -50,9 +61,24 @@
   let contactFlowCounterRefreshStarted = false;
   let contactFlowCounterRefreshInProgress = false;
   let contactFlowCountersVersion = 0;
+  let pendingWithdrawals = [];
+  let pendingWithdrawalsLoaded = false;
+  let pendingWithdrawalsExpanded = false;
+  let pendingWithdrawalSaveQueue = Promise.resolve();
+  let pendingWithdrawalsList = null;
+  let pendingWithdrawalsToggle = null;
+  let pendingWithdrawalsRenderedSignature = null;
+  let contactVisualTags = {};
+  const blockedUserAccountSettings = new Set();
+  const loadedBlockedUserAccountSettings = new Set();
+  const pendingBlockedUserAccountSettings = new Set();
+  let contactVisualTagsLoadPromise = null;
+  let contactVisualTagSaveQueue = Promise.resolve();
+  let contactTagScanScheduled = false;
   const contactFlowChatNumbers = new WeakMap();
   const processedIncomingMessages = new WeakMap();
   const processedOutgoingMessages = new WeakSet();
+  const reportedPendingWithdrawalMessages = new WeakSet();
   const agentBalanceErrors = {};
   const agentBalanceToastErrors = {};
   const withdrawalChecksInProgress = new WeakSet();
@@ -87,11 +113,19 @@
           multipanel: multiPanelSuffix.toLowerCase()
         };
         scheduleUpdate();
+        scheduleContactTagScan();
       }
     })
     .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar los sufijos de plataformas.", error));
 
   stateStorage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes[PENDING_WITHDRAWALS_KEY]) {
+      pendingWithdrawals = normalizePendingWithdrawals(
+        changes[PENDING_WITHDRAWALS_KEY].newValue
+      );
+      pendingWithdrawalsLoaded = true;
+      renderPendingWithdrawals();
+    }
     if (areaName === "local" && changes[CONTACT_FLOW_COUNTERS_KEY]) {
       contactFlowCountersVersion++;
       contactFlowCounters = normalizeContactFlowCounters(
@@ -125,6 +159,38 @@
         );
       }
     }
+    if (areaName === "local" && changes[CONTACT_VISUAL_TAGS_KEY]) {
+      contactVisualTags = normalizeContactVisualTags(
+        changes[CONTACT_VISUAL_TAGS_KEY].newValue
+      );
+      const host = document.getElementById(HOST_ID);
+      const identities = host ? getHostContactVisualTagIdentities(host) : [];
+      const tags = getContactVisualTags(identities);
+      const highDepositorInput = host?.shadowRoot?.querySelector(
+        'input[aria-label="Cargador alto"]'
+      );
+      const scammerInput = host?.shadowRoot?.querySelector('input[aria-label="Peligro"]');
+      if (highDepositorInput) highDepositorInput.checked = tags?.highDepositor === true;
+      if (scammerInput) scammerInput.checked = tags?.scammer === true;
+      scheduleContactTagScan();
+    }
+    if (areaName === "local" &&
+      Object.keys(changes).some((key) => key.startsWith("userSetting:"))) {
+      for (const [key, change] of Object.entries(changes)) {
+        if (!key.startsWith("userSetting:userBlocked:")) continue;
+        loadedBlockedUserAccountSettings.add(key);
+        if (change.newValue === true) blockedUserAccountSettings.add(key);
+        else blockedUserAccountSettings.delete(key);
+      }
+      updateContactUserSearchBlockedIndicators(
+        document.getElementById(HOST_ID)?.shadowRoot
+      );
+      scheduleContactTagScan();
+      void refreshActiveUserSettings(changes).catch((error) => console.error(
+        "[Ganamos balance extension] No se pudieron actualizar las preferencias compartidas del usuario.",
+        error
+      ));
+    }
     if (areaName === "local" && changes.remoteCreateDestinations) {
       remoteCreateDestinations = Array.isArray(changes.remoteCreateDestinations.newValue)
         ? changes.remoteCreateDestinations.newValue
@@ -151,6 +217,7 @@
       ganamos.toLowerCase() !== multipanel.toLowerCase()) {
       platformSuffixes = { ganamos: ganamos.toLowerCase(), multipanel: multipanel.toLowerCase() };
       scheduleUpdate();
+      scheduleContactTagScan();
     }
   });
 
@@ -189,13 +256,18 @@
       error
     ));
 
-  stateStorage.get(CONTACT_FLOW_COUNTERS_KEY)
+  stateStorage.get([CONTACT_FLOW_COUNTERS_KEY, PENDING_WITHDRAWALS_KEY])
     .then((stored) => {
       const storedCounters = stored[CONTACT_FLOW_COUNTERS_KEY];
       contactFlowCounters = normalizeContactFlowCounters(storedCounters);
       if (JSON.stringify(contactFlowCounters) !== JSON.stringify(storedCounters ?? null)) {
         saveContactFlowCounters();
       }
+      pendingWithdrawals = normalizePendingWithdrawals(
+        stored[PENDING_WITHDRAWALS_KEY]
+      );
+      pendingWithdrawalsLoaded = true;
+      renderPendingWithdrawals();
       contactFlowCountersLoaded = true;
       for (const updateRow of contactFlowCounterRows.values()) updateRow();
       startContactFlowMessageObserver();
@@ -203,8 +275,15 @@
     .catch((error) => {
       contactFlowCountersLoaded = true;
       console.error(
-        "[Ganamos balance extension] No se pudieron cargar los contadores de llegados y derivados.",
+        "[Ganamos balance extension] No se pudo cargar el estado necesario para los contadores y retiros pendientes.",
         error
+      );
+      showToast(
+        null,
+        "Retiros pendientes",
+        "No se pudo cargar el almacenamiento; no se registrarán retiros.",
+        "error",
+        "pending-withdrawals"
       );
       startContactFlowMessageObserver();
     });
@@ -257,23 +336,43 @@
   }
 
   function findContactTitle() {
-    const explicitTitles = [...document.querySelectorAll('[data-testid="conversation-info-header-chat-title"]')]
+    const chat = document.querySelector("#main");
+    const root = chat || document;
+    const explicitTitles = [...root.querySelectorAll('[data-testid="conversation-info-header-chat-title"]')]
       .filter(isVisible);
     if (explicitTitles.length) return explicitTitles.length === 1 ? explicitTitles[0] : null;
-    const matches = [...document.querySelectorAll("header h1, header h2, header [role='heading']")]
+    const matches = [...root.querySelectorAll("header h1, header h2, header [role='heading']")]
       .filter(isVisible);
-    return matches.length === 1 ? matches[0] : null;
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) return null;
+    const titledHeaderElements = [...root.querySelectorAll("header [title]")]
+      .filter(isVisible);
+    return titledHeaderElements.length === 1 ? titledHeaderElements[0] : null;
+  }
+
+  function findUnblockButton() {
+    return [...document.querySelectorAll("button")]
+      .find((button) => {
+        if (!isVisible(button) || button.getAttribute("aria-disabled") === "true") return false;
+        const label = button.textContent.trim().replace(/\s+/g, " ").toLowerCase();
+        const hasBlockIcon = [...button.querySelectorAll("svg title")]
+          .some((title) => title.textContent.trim().toLowerCase() === "ic-block");
+        return button.getAttribute("data-tab") === "10" &&
+          (label.includes("desbloquear") || hasBlockIcon);
+      }) || null;
   }
 
   function isNormalChatOpen(title) {
+    if (document.fullscreenElement) return false;
+    if (findUnblockButton()) return true;
     const chat = title?.closest("#main") || document.querySelector("#main");
-    if (!chat || !isVisible(chat) || !isVisible(title) || document.fullscreenElement) return false;
+    if (!chat || !isVisible(chat) || !isVisible(title)) return false;
     const host = document.getElementById(HOST_ID);
     if (host?.shadowRoot?.querySelector(".modal")) return true;
-    return [...chat.querySelectorAll('button[aria-label="Emojis, GIF, Stickers"]')]
-      .some((button) => {
-        return isActuallyVisible(button) && button.getAttribute("aria-disabled") !== "true";
-      });
+    const hasEmojiButton = [...chat.querySelectorAll('button[aria-label="Emojis, GIF, Stickers"]')]
+      .some((button) =>
+        isActuallyVisible(button) && button.getAttribute("aria-disabled") !== "true");
+    return hasEmojiButton;
   }
 
   function getPhoneFromContactTitle(title) {
@@ -285,7 +384,7 @@
 
   function getPhoneFromWhatsAppChat(title) {
     const titlePhone = getPhoneFromContactTitle(title);
-    const chat = title?.closest("#main");
+    const chat = title?.closest("#main") || document.querySelector("#main");
     if (!chat || chat.querySelector('[data-id*="@g.us"]')) return titlePhone;
     const trackedPhone = contactFlowChatNumbers.get(chat);
     if (trackedPhone && /^\d{7,20}$/.test(trackedPhone)) return trackedPhone;
@@ -311,6 +410,429 @@
     } catch {
       return [];
     }
+  }
+
+  function getSportBetsPreferenceId(host) {
+    const usernames = {
+      ganamos: host.dataset.username?.toLowerCase() || "",
+      multipanel: host.dataset.multipanelUsername?.toLowerCase() || ""
+    };
+    const firstPlatform = host.dataset.defaultPlatform === "multipanel"
+      ? "multipanel"
+      : "ganamos";
+    const accounts = [firstPlatform, firstPlatform === "ganamos" ? "multipanel" : "ganamos"]
+      .flatMap((platform) => usernames[platform]
+        ? [{ platform, username: usernames[platform] }]
+        : []);
+    return {
+      accounts,
+      legacyId: host.dataset.contactPhone
+        ? `phone:${host.dataset.contactPhone}`
+        : `accounts:${host.dataset.accounts}`
+    };
+  }
+
+  function getUserAccountSettingKey(setting, { platform, username }) {
+    return `userSetting:${setting}:${platform}:${encodeURIComponent(username)}`;
+  }
+
+  function getUserPreferenceKeys(preferenceId, setting, legacyKeyBuilder) {
+    const accounts = Array.isArray(preferenceId?.accounts) ? preferenceId.accounts : [];
+    return {
+      accountKeys: accounts.map((account) => getUserAccountSettingKey(setting, account)),
+      legacyKey: legacyKeyBuilder(preferenceId?.legacyId || preferenceId)
+    };
+  }
+
+  async function readUserPreference(preferenceId, setting, legacyKeyBuilder, isValid, fallback) {
+    const { accountKeys, legacyKey } = getUserPreferenceKeys(
+      preferenceId,
+      setting,
+      legacyKeyBuilder
+    );
+    const stored = await stateStorage.get([...accountKeys, legacyKey]);
+    for (const key of accountKeys) {
+      if (Object.hasOwn(stored, key) && isValid(stored[key])) return stored[key];
+    }
+    if (Object.hasOwn(stored, legacyKey) && isValid(stored[legacyKey])) {
+      const legacyValue = stored[legacyKey];
+      if (accountKeys.length) {
+        void stateStorage.set(Object.fromEntries(accountKeys.map((key) => [key, legacyValue])))
+          .catch((error) => console.error(
+            `[Ganamos balance extension] No se pudo trasladar ${setting} a la configuración del usuario.`,
+            error
+          ));
+      }
+      return legacyValue;
+    }
+    return fallback;
+  }
+
+  async function saveUserPreference(preferenceId, setting, legacyKeyBuilder, value) {
+    const { accountKeys, legacyKey } = getUserPreferenceKeys(
+      preferenceId,
+      setting,
+      legacyKeyBuilder
+    );
+    const keys = accountKeys.length ? accountKeys : [legacyKey];
+    await stateStorage.set(Object.fromEntries(keys.map((key) => [key, value])));
+  }
+
+  async function refreshActiveUserSettings(changes) {
+    const host = document.getElementById(HOST_ID);
+    if (!host || !activeAccountsKey || host.dataset.accounts !== activeAccountsKey) return;
+    const preferenceId = getSportBetsPreferenceId(host);
+    const settingNames = [
+      "sportBetsDisabled",
+      "userBonusDisabled",
+      "userAccumulatesBonuses",
+      "userBlocked",
+      "userWithdrawalLimit",
+      "userRelatedContacts"
+    ];
+    const relevantKeys = settingNames.flatMap((setting) =>
+      preferenceId.accounts.map((account) => getUserAccountSettingKey(setting, account))
+    );
+    if (!relevantKeys.some((key) => Object.hasOwn(changes, key))) return;
+
+    const accountsKey = host.dataset.accounts;
+    const [
+      sportBetsDisabled,
+      bonusDisabled,
+      accumulatesBonuses,
+      blocked,
+      withdrawalLimit,
+      relatedContacts
+    ] =
+      await Promise.all([
+        readSportBetsDisabled(preferenceId),
+        readUserBonusDisabled(preferenceId),
+        readUserAccumulatesBonuses(preferenceId),
+        readUserBlocked(preferenceId),
+        readUserWithdrawalLimit(preferenceId),
+        readUserRelatedContacts(preferenceId)
+      ]);
+    if (host.dataset.accounts !== accountsKey || activeAccountsKey !== accountsKey) return;
+
+    host.sportBetsDisabled = sportBetsDisabled;
+    host.dataset.bonusDisabled = String(bonusDisabled);
+    host.dataset.accumulatesBonuses = String(accumulatesBonuses);
+    host.dataset.withdrawalLimit = String(withdrawalLimit);
+    host.dataset.relatedContacts = relatedContacts;
+    updateUserBonusDisabledPresentation(host, bonusDisabled);
+    updateUserAccumulatesBonusesPresentation(host, accumulatesBonuses);
+    updateRelatedContactsIndicator(findContactTitle());
+    updateWithdrawalLimitIndicator(findContactTitle());
+
+    const root = host.shadowRoot;
+    const sportBetsInput = root.querySelector(
+      'input[aria-label="Desactivar detección de apuestas deportivas"]'
+    );
+    const bonusDisabledInput = root.querySelector('input[aria-label="Bono Desactivado"]');
+    const accumulatesBonusesInput = root.querySelector('input[aria-label="Acumula bonos"]');
+    const blockedInput = root.querySelector('input[aria-label="Bloqueado"]');
+    const withdrawalLimitInput = root.querySelector('input[aria-label="Monto máximo de retiro"]');
+    const relatedContactsInput = root.querySelector(
+      'textarea[aria-label="Contactos relacionados, separados por /"]'
+    );
+    if (sportBetsInput) sportBetsInput.checked = sportBetsDisabled;
+    if (bonusDisabledInput) bonusDisabledInput.checked = bonusDisabled;
+    if (accumulatesBonusesInput) accumulatesBonusesInput.checked = accumulatesBonuses;
+    if (blockedInput) blockedInput.checked = blocked;
+    if (withdrawalLimitInput) {
+      withdrawalLimitInput.value = formatBalance(withdrawalLimit);
+      withdrawalLimitInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    if (relatedContactsInput) relatedContactsInput.value = relatedContacts;
+
+    const userAccounts = [
+      ["ganamos", host.dataset.username],
+      ["multipanel", host.dataset.multipanelUsername]
+    ].filter(([, username]) => username);
+    if (sportBetsDisabled) {
+      host.sportBetsStates = {};
+      renderSportBetsCount(host);
+      renderBalanceRows(host, userAccounts);
+      updateSportBetsIndicator(findContactTitle(), false);
+    } else if (userAccounts.length) {
+      host.sportBetsStates ||= {};
+      for (const [platform] of userAccounts) {
+        host.sportBetsStates[platform] = {
+          ...host.sportBetsStates[platform],
+          loading: true
+        };
+      }
+      renderSportBetsCount(host);
+      renderBalanceRows(host, userAccounts);
+      await refreshSportBetsCounts(host, userAccounts, accountsKey, userAccounts);
+    }
+  }
+
+  function getSportBetsDisabledKey(preferenceId) {
+    return `${SPORT_BETS_DISABLED_USERS_KEY}:${encodeURIComponent(preferenceId)}`;
+  }
+
+  function getUserBonusDisabledKey(preferenceId) {
+    return `${USER_BONUS_DISABLED_KEY}:${encodeURIComponent(preferenceId)}`;
+  }
+
+  function getUserAccumulatesBonusesKey(preferenceId) {
+    return `${USER_ACCUMULATES_BONUSES_KEY}:${encodeURIComponent(preferenceId)}`;
+  }
+
+  function getUserWithdrawalLimitKey(preferenceId) {
+    return `${USER_WITHDRAWAL_LIMIT_KEY}:${encodeURIComponent(preferenceId)}`;
+  }
+
+  function getUserRelatedContactsKey(preferenceId) {
+    return `${USER_RELATED_CONTACTS_KEY}:${encodeURIComponent(preferenceId)}`;
+  }
+
+  async function readSportBetsDisabled(preferenceId) {
+    return readUserPreference(
+      preferenceId,
+      "sportBetsDisabled",
+      getSportBetsDisabledKey,
+      (value) => typeof value === "boolean",
+      false
+    );
+  }
+
+  async function saveSportBetsDisabled(preferenceId, disabled) {
+    await saveUserPreference(
+      preferenceId,
+      "sportBetsDisabled",
+      getSportBetsDisabledKey,
+      disabled
+    );
+  }
+
+  async function readUserBonusDisabled(preferenceId) {
+    return readUserPreference(
+      preferenceId,
+      "userBonusDisabled",
+      getUserBonusDisabledKey,
+      (value) => typeof value === "boolean",
+      false
+    );
+  }
+
+  async function saveUserBonusDisabled(preferenceId, disabled) {
+    await saveUserPreference(
+      preferenceId,
+      "userBonusDisabled",
+      getUserBonusDisabledKey,
+      disabled
+    );
+  }
+
+  function getUserAccumulatesBonusesKey(preferenceId) {
+    return `${USER_ACCUMULATES_BONUSES_KEY}:${encodeURIComponent(preferenceId)}`;
+  }
+
+  async function readUserAccumulatesBonuses(preferenceId) {
+    return readUserPreference(
+      preferenceId,
+      "userAccumulatesBonuses",
+      getUserAccumulatesBonusesKey,
+      (value) => typeof value === "boolean",
+      false
+    );
+  }
+
+  async function saveUserAccumulatesBonuses(preferenceId, enabled) {
+    await saveUserPreference(
+      preferenceId,
+      "userAccumulatesBonuses",
+      getUserAccumulatesBonusesKey,
+      enabled
+    );
+  }
+
+  function getUserBlockedKey(preferenceId) {
+    return `${USER_BLOCKED_KEY}:${encodeURIComponent(preferenceId)}`;
+  }
+
+  async function readUserBlocked(preferenceId) {
+    return readUserPreference(
+      preferenceId,
+      "userBlocked",
+      getUserBlockedKey,
+      (value) => typeof value === "boolean",
+      false
+    );
+  }
+
+  async function saveUserBlocked(preferenceId, blocked) {
+    await saveUserPreference(
+      preferenceId,
+      "userBlocked",
+      getUserBlockedKey,
+      blocked
+    );
+  }
+
+  async function readUserWithdrawalLimit(preferenceId) {
+    return readUserPreference(
+      preferenceId,
+      "userWithdrawalLimit",
+      getUserWithdrawalLimitKey,
+      (value) => Number.isFinite(value) && value >= 0,
+      DEFAULT_WITHDRAWAL_LIMIT
+    );
+  }
+
+  async function saveUserWithdrawalLimit(preferenceId, value) {
+    await saveUserPreference(
+      preferenceId,
+      "userWithdrawalLimit",
+      getUserWithdrawalLimitKey,
+      value
+    );
+  }
+
+  async function readUserRelatedContacts(preferenceId) {
+    return readUserPreference(
+      preferenceId,
+      "userRelatedContacts",
+      getUserRelatedContactsKey,
+      (value) => typeof value === "string",
+      ""
+    );
+  }
+
+  async function saveUserRelatedContacts(preferenceId, value) {
+    const cleaned = typeof value === "string" ? value.trim() : "";
+    await saveUserPreference(
+      preferenceId,
+      "userRelatedContacts",
+      getUserRelatedContactsKey,
+      cleaned
+    );
+  }
+
+  function getContactVisualTagIdentities(usernames, phone, label) {
+    const normalizedUsernames = {
+      ganamos: typeof usernames?.ganamos === "string" ? usernames.ganamos.toLowerCase() : "",
+      multipanel: typeof usernames?.multipanel === "string" ? usernames.multipanel.toLowerCase() : ""
+    };
+    const accountIdentities = Object.values(normalizedUsernames)
+      .filter(Boolean)
+      .map((username) => `account:${username}`);
+    if (accountIdentities.length) {
+      return [
+        ...accountIdentities,
+        `accounts:${normalizedUsernames.ganamos}|${normalizedUsernames.multipanel}`
+      ];
+    }
+    const normalizedLabel = typeof label === "string"
+      ? label.normalize("NFKC").replace(/[\u200e\u200f\u202a-\u202e]/g, "").trim().toLowerCase()
+      : "";
+    const labelPhone = normalizedLabel.match(/^\+?[\d\s().-]{4,}$/)?.[0].replace(/\D/g, "");
+    if (labelPhone && /^\d{4,20}$/.test(labelPhone)) return [`phone:${labelPhone}`];
+    if (normalizedLabel) return [`label:${normalizedLabel}`];
+    if (typeof phone === "string" && /^\d{4,20}$/.test(phone)) return [`phone:${phone}`];
+    return [];
+  }
+
+  function getHostContactVisualTagIdentities(host) {
+    return getContactVisualTagIdentities({
+      ganamos: host.dataset.username,
+      multipanel: host.dataset.multipanelUsername
+    }, host.dataset.contactPhone, findContactTitle()?.textContent);
+  }
+
+  function getActiveContactVisualTagIdentities() {
+    const host = document.getElementById(HOST_ID);
+    if (!host || !activeAccountsKey || host.dataset.accounts !== activeAccountsKey) return null;
+    return getHostContactVisualTagIdentities(host);
+  }
+
+  function getContactVisualTags(identities, tagsByIdentity = contactVisualTags) {
+    const merged = identities.reduce((result, identity) => {
+      const tags = tagsByIdentity[identity];
+      if (tags?.highDepositor) result.highDepositor = true;
+      if (tags?.scammer) result.scammer = true;
+      return result;
+    }, { highDepositor: false, scammer: false });
+    const usernames = new Set(identities
+      .filter((identity) => identity.startsWith("account:"))
+      .map((identity) => identity.slice("account:".length)));
+    for (const [identity, tags] of Object.entries(tagsByIdentity)) {
+      if (!identity.startsWith("accounts:")) continue;
+      const legacyUsernames = identity.slice("accounts:".length).split("|");
+      if (!legacyUsernames.some((username) => usernames.has(username))) continue;
+      if (tags.highDepositor) merged.highDepositor = true;
+      if (tags.scammer) merged.scammer = true;
+    }
+    return merged;
+  }
+
+  function normalizeContactVisualTags(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const normalized = {};
+    for (const [identity, tags] of Object.entries(value)) {
+      if (!tags || typeof tags !== "object" || Array.isArray(tags)) continue;
+      const cleanTags = {
+        highDepositor: tags.highDepositor === true,
+        scammer: tags.scammer === true
+      };
+      if (cleanTags.highDepositor || cleanTags.scammer) normalized[identity] = cleanTags;
+    }
+    return normalized;
+  }
+
+  function updateContactUserSearchBlockedIndicators(root) {
+    if (!root) return;
+    for (const usernameButton of root.querySelectorAll(".contact-user-search-name")) {
+      const displayUsername = usernameButton.textContent.trim();
+      const username = displayUsername.toLowerCase();
+      const platform = usernameButton.dataset.platform;
+      const settingKey = getUserAccountSettingKey("userBlocked", { platform, username });
+      const isBlocked = blockedUserAccountSettings.has(settingKey);
+      const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
+      usernameButton.dataset.blocked = String(isBlocked);
+      usernameButton.setAttribute(
+        "aria-label",
+        `${platformName}: ${displayUsername}${isBlocked ? ", marcado como Bloqueado" : ""}`
+      );
+      usernameButton.title = isBlocked ? `${displayUsername} — Bloqueado` : displayUsername;
+    }
+  }
+
+  function loadContactVisualTags() {
+    if (!contactVisualTagsLoadPromise) {
+      contactVisualTagsLoadPromise = stateStorage.get(CONTACT_VISUAL_TAGS_KEY)
+        .then((stored) => {
+          contactVisualTags = normalizeContactVisualTags(stored[CONTACT_VISUAL_TAGS_KEY]);
+          scheduleContactTagScan();
+          return contactVisualTags;
+        })
+        .catch((error) => {
+          console.error("[Ganamos balance extension] No se pudieron cargar las marcas de contactos.", error);
+          return contactVisualTags;
+        });
+    }
+    return contactVisualTagsLoadPromise;
+  }
+
+  function saveContactVisualTag(identities, tag, enabled) {
+    const save = async () => {
+      const stored = await stateStorage.get(CONTACT_VISUAL_TAGS_KEY);
+      const nextTags = normalizeContactVisualTags(stored[CONTACT_VISUAL_TAGS_KEY]);
+      for (const identity of identities) {
+        const contactTags = { ...(nextTags[identity] || {}) };
+        if (enabled) contactTags[tag] = true;
+        else delete contactTags[tag];
+        if (contactTags.highDepositor || contactTags.scammer) nextTags[identity] = contactTags;
+        else delete nextTags[identity];
+      }
+      await stateStorage.set({ [CONTACT_VISUAL_TAGS_KEY]: nextTags });
+      contactVisualTags = normalizeContactVisualTags(nextTags);
+      scheduleContactTagScan();
+    };
+    contactVisualTagSaveQueue = contactVisualTagSaveQueue.then(save, save);
+    return contactVisualTagSaveQueue;
   }
 
   function getLegacyMovementContactKeys(contactKey) {
@@ -375,9 +897,10 @@
 
   function positionHost(host, title) {
     const chat = title?.closest("#main") || document.querySelector("#main");
-    if (!chat || !title) return;
+    if (!chat) return;
     const chatRect = chat.getBoundingClientRect();
-    const headerRect = title.closest("header")?.getBoundingClientRect();
+    const headerRect = title?.closest("header")?.getBoundingClientRect() ||
+      chat.querySelector("header")?.getBoundingClientRect();
     const width = Math.max(0, chatRect.width - 16);
     if (!width) return;
 
@@ -386,12 +909,293 @@
     host.style.width = `${width}px`;
   }
 
+  function formatCompactWithdrawalLimit(amount) {
+    return amount >= 1000
+      ? `${formatBalance(Math.round(amount / 1000))}K`
+      : formatBalance(amount);
+  }
+
+  function getContactIndicatorsContainer(panel) {
+    let container = panel?.querySelector(".contact-indicators");
+    if (!container && panel) {
+      container = document.createElement("div");
+      container.className = "contact-indicators";
+      panel.append(container);
+    }
+    return container;
+  }
+
+  function updateWithdrawalLimitIndicator() {
+    const host = document.getElementById(HOST_ID);
+    const indicator = host?.shadowRoot?.querySelector(".withdrawal-limit-inline");
+    const storedAmount = host?.dataset.withdrawalLimit;
+    const isLoading = storedAmount == null || storedAmount === "";
+    const amount = Number(storedAmount);
+    if (!indicator) return;
+    if (isLoading) {
+      indicator.textContent = "";
+      indicator.hidden = true;
+      return;
+    }
+    indicator.textContent = Number.isFinite(amount) && amount >= 0
+      ? formatCompactWithdrawalLimit(amount)
+      : "";
+    indicator.title = Number.isFinite(amount) && amount >= 0
+      ? `Monto máximo de retiro: $${formatBalance(amount)}`
+      : "Monto máximo de retiro no disponible";
+    const informationButton = host.shadowRoot.querySelector(".user-information-button");
+    const exchangeButton = host.shadowRoot.querySelector(".exchange-button");
+    indicator.hidden = !host.dataset.accounts || Boolean(informationButton?.hidden) ||
+      !Number.isFinite(amount) || amount < 0;
+    indicator.style.left = `${exchangeButton && !exchangeButton.hidden ? 75 : 42}px`;
+  }
+
+  function updateRelatedContactsIndicator(title) {
+    const host = document.getElementById(HOST_ID);
+    const panel = host?.shadowRoot?.querySelector(".panel");
+    const container = getContactIndicatorsContainer(panel);
+    if (!container) return;
+    let indicator = container.querySelector(".related-contacts-indicator");
+    const relatedContacts = host?.dataset.relatedContacts?.trim() || "";
+    const hasRelatedContacts = relatedContacts.split("/").some((contact) => contact.trim());
+
+    if (!indicator && hasRelatedContacts) {
+      indicator = document.createElement("div");
+      indicator.className = "related-contacts-indicator";
+      indicator.setAttribute("role", "group");
+      indicator.tabIndex = 0;
+      indicator.setAttribute("aria-label", "Contactos relacionados");
+      const symbol = document.createElement("span");
+      symbol.className = "related-contacts-indicator__symbol";
+      symbol.textContent = "↔️";
+      symbol.setAttribute("aria-hidden", "true");
+      const popover = document.createElement("div");
+      popover.className = "related-contacts-popover";
+      popover.setAttribute("role", "group");
+      popover.setAttribute("aria-label", "Copiar un contacto relacionado");
+      indicator.append(symbol, popover);
+    }
+
+    const ball = container.querySelector(".sport-bets-indicator");
+    if (indicator) {
+      indicator.hidden = !title || !hasRelatedContacts;
+      indicator.setAttribute("aria-label", "Contactos relacionados");
+      const popover = indicator.querySelector(".related-contacts-popover");
+      popover.replaceChildren();
+      for (const contact of relatedContacts.split("/").map((value) => value.trim()).filter(Boolean)) {
+        const copyContact = document.createElement("button");
+        copyContact.type = "button";
+        copyContact.className = "related-contact-copy";
+        copyContact.setAttribute("role", "listitem");
+        copyContact.textContent = contact;
+        copyContact.title = `Copiar ${contact}`;
+        copyContact.setAttribute("aria-label", `Copiar contacto ${contact}`);
+        copyContact.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          try {
+            await navigator.clipboard.writeText(contact);
+            showToast(
+              host,
+              host.dataset.username || host.dataset.multipanelUsername || "Chat",
+              `Copiado: ${contact}`,
+              "success",
+              `related-contact:${host.dataset.accounts}:${contact}`
+            );
+          } catch (error) {
+            console.error("[Ganamos balance extension] No se pudo copiar un contacto relacionado.", error);
+            showToast(
+              host,
+              host.dataset.username || host.dataset.multipanelUsername || "Chat",
+              `No se pudo copiar ${contact}.`,
+              "error",
+              `related-contact:${host.dataset.accounts}:${contact}`
+            );
+          }
+        });
+        popover.append(copyContact);
+      }
+      if (indicator.parentElement !== container) container.insertBefore(indicator, ball || null);
+      else if (ball && indicator.nextElementSibling !== ball) container.insertBefore(indicator, ball);
+    }
+
+    const hasVisibleIndicator = Boolean(indicator && !indicator.hidden);
+    const hasVisibleBall = Boolean(ball && !ball.hidden);
+    container.hidden = !title || (!hasVisibleIndicator && !hasVisibleBall);
+    if (container.hidden) return;
+
+    const chat = title.closest("#main") || document.querySelector("#main");
+    const footer = chat?.querySelector("footer");
+    if (!footer || !isVisible(footer)) {
+      container.hidden = true;
+      return;
+    }
+    const footerRect = footer.getBoundingClientRect();
+    if (footerRect.width <= 0 || footerRect.height <= 0) {
+      container.hidden = true;
+      return;
+    }
+    container.style.left = `${footerRect.left + 12}px`;
+    container.style.top = `${footerRect.top - 12}px`;
+  }
+
+  function ensureContactVisualTagStyles() {
+    if (document.getElementById("ganamos-contact-visual-tag-styles")) return;
+    const stylesheet = document.createElement("link");
+    stylesheet.id = "ganamos-contact-visual-tag-styles";
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = chrome.runtime.getURL("styles/contact-tags.css");
+    (document.head || document.documentElement).append(stylesheet);
+  }
+
+  function getSidebarPlatformUsernames(row) {
+    const titleElements = [...row.querySelectorAll(
+      '[data-testid="cell-frame-title"], [data-testid="cell-frame-title"] [title], span[title]'
+    )];
+    const labels = [
+      ...titleElements.flatMap((element) => [
+        element.getAttribute("title") || "",
+        element.textContent || ""
+      ]),
+      row.getAttribute("aria-label") || "",
+      row.textContent || ""
+    ];
+    let bestMatch = { ganamos: null, multipanel: null, legacy: {}, firstPlatform: null };
+    let bestScore = 0;
+    for (const label of labels) {
+      const usernames = findPlatformUsernames(label);
+      const score = Number(Boolean(usernames.ganamos)) +
+        Number(Boolean(usernames.multipanel));
+      if (score > bestScore) {
+        bestMatch = usernames;
+        bestScore = score;
+      }
+      if (score === 2) break;
+    }
+    return bestMatch;
+  }
+
+  function getSidebarContactIdentity(row) {
+    const usernames = getSidebarPlatformUsernames(row);
+    const titleElement = row.querySelector('[data-testid="cell-frame-title"]');
+    const label = titleElement?.getAttribute("title") || titleElement?.textContent ||
+      row.getAttribute("aria-label") || "";
+    const dataIds = [row, ...row.querySelectorAll("[data-id]")]
+      .map((element) => element.getAttribute("data-id") || "");
+    const phone = dataIds.map((value) =>
+      value.match(/(\d{4,20})@(?:c\.us|s\.whatsapp\.net)/i)?.[1])
+      .find(Boolean) || label.replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+        .match(/^\+?[\d\s().-]{4,}$/)?.[0]?.replace(/\D/g, "");
+    return getContactVisualTagIdentities(usernames, phone, label);
+  }
+
+  function getSidebarBlockedSettingKeys(row) {
+    return Object.entries(getSidebarPlatformUsernames(row))
+      .filter(([platform, username]) =>
+        ["ganamos", "multipanel"].includes(platform) && username)
+      .map(([platform, username]) => getUserAccountSettingKey(
+        "userBlocked",
+        { platform, username: username.toLowerCase() }
+      ));
+  }
+
+  function updateContactSidebarTags() {
+    ensureContactVisualTagStyles();
+    const sidebar = document.querySelector("#pane-side");
+    if (!sidebar) return;
+    let rows = [...sidebar.querySelectorAll('[role="row"][data-testid^="list-item-"]')];
+    if (!rows.length) rows = [...sidebar.querySelectorAll('[data-testid="cell-frame-container"]')];
+    if (!rows.length) rows = [...sidebar.querySelectorAll('[role="listitem"]')];
+    const activeIdentities = getActiveContactVisualTagIdentities() || [];
+    const blockedSettingsToLoad = new Set();
+    for (const row of rows) {
+      const identities = getSidebarContactIdentity(row);
+      const blockedSettingKeys = getSidebarBlockedSettingKeys(row);
+      for (const key of blockedSettingKeys) {
+        if (!loadedBlockedUserAccountSettings.has(key) &&
+          !pendingBlockedUserAccountSettings.has(key)) {
+          blockedSettingsToLoad.add(key);
+        }
+      }
+      const tags = getContactVisualTags(identities);
+      const tag = tags?.scammer && tags?.highDepositor
+        ? "high-depositor-and-scammer"
+        : tags?.scammer
+          ? "scammer"
+          : tags?.highDepositor
+            ? "high-depositor"
+            : null;
+      const ariaSelected = row.matches('[aria-selected="true"]') ||
+        Boolean(row.querySelector('[aria-selected="true"]'));
+      const visualCell = row.matches('[data-testid="cell-frame-container"]')
+        ? row
+        : row.querySelector('[data-testid="cell-frame-container"]') || row;
+      row.removeAttribute("data-extension-contact-tag");
+      row.removeAttribute("data-extension-contact-active");
+      const isBlocked = blockedSettingKeys.some((key) =>
+        blockedUserAccountSettings.has(key));
+      const visualTags = [tag, isBlocked ? "blocked" : null].filter(Boolean);
+      visualCell.toggleAttribute("data-extension-user-blocked", isBlocked);
+      if (visualTags.length) {
+        visualCell.setAttribute("data-extension-contact-tag", visualTags.join(" "));
+        visualCell.toggleAttribute(
+          "data-extension-contact-active",
+          Boolean(tag) &&
+            (identities.some((identity) => activeIdentities.includes(identity)) || ariaSelected)
+        );
+      } else {
+        visualCell.removeAttribute("data-extension-contact-tag");
+        visualCell.removeAttribute("data-extension-contact-active");
+      }
+    }
+    if (blockedSettingsToLoad.size) {
+      const keys = [...blockedSettingsToLoad];
+      for (const key of keys) pendingBlockedUserAccountSettings.add(key);
+      void stateStorage.get(keys)
+        .then((stored) => {
+          for (const key of keys) {
+            loadedBlockedUserAccountSettings.add(key);
+            if (stored[key] === true) blockedUserAccountSettings.add(key);
+            else blockedUserAccountSettings.delete(key);
+          }
+          scheduleContactTagScan();
+        })
+        .catch((error) => console.error(
+          "[Ganamos balance extension] No se pudo cargar la marca Bloqueado de los chats visibles.",
+          error
+        ))
+        .finally(() => {
+          for (const key of keys) pendingBlockedUserAccountSettings.delete(key);
+        });
+    }
+  }
+
+  function scheduleContactTagScan() {
+    if (contactTagScanScheduled) return;
+    contactTagScanScheduled = true;
+    requestAnimationFrame(() => {
+      contactTagScanScheduled = false;
+      updateContactSidebarTags();
+    });
+  }
+
+  function nodeTouchesSidebar(node) {
+    const element = node instanceof Element ? node : node.parentElement;
+    return Boolean(element && (
+      element.closest("#pane-side") ||
+      element.matches("#pane-side") ||
+      element.querySelector("#pane-side")
+    ));
+  }
+
   function updateSportBetsIndicator(title, visible) {
     const host = document.getElementById(HOST_ID);
     const panel = host?.shadowRoot?.querySelector(".panel");
-    let ball = panel?.querySelector(".sport-bets-indicator");
+    const container = getContactIndicatorsContainer(panel);
+    let ball = container?.querySelector(".sport-bets-indicator");
     if (!visible || !title) {
       if (ball) ball.hidden = true;
+      updateRelatedContactsIndicator(title);
+      updateWithdrawalLimitIndicator(title);
       return;
     }
 
@@ -399,29 +1203,36 @@
     const footer = chat?.querySelector("footer");
     if (!footer || !isVisible(footer)) {
       if (ball) ball.hidden = true;
+      updateRelatedContactsIndicator(title);
+      updateWithdrawalLimitIndicator(title);
       return;
     }
 
     const footerRect = footer.getBoundingClientRect();
     if (footerRect.width <= 0 || footerRect.height <= 0) {
       if (ball) ball.hidden = true;
+      updateRelatedContactsIndicator(title);
+      updateWithdrawalLimitIndicator(title);
       return;
     }
 
-    if (!ball && panel) {
+    if (!ball && container) {
       ball = document.createElement("span");
       ball.className = "sport-bets-indicator";
       ball.textContent = "⚽";
       ball.setAttribute("role", "img");
       ball.setAttribute("aria-label", "Este usuario usa apuestas deportivas");
       ball.title = "Este usuario usa apuestas deportivas";
-      panel.append(ball);
+      container.append(ball);
     }
-    if (!ball) return;
+    if (!ball) {
+      updateRelatedContactsIndicator(title);
+      return;
+    }
 
     ball.hidden = false;
-    ball.style.left = `${footerRect.left + 12}px`;
-    ball.style.top = `${footerRect.top - 36}px`;
+    updateRelatedContactsIndicator(title);
+    updateWithdrawalLimitIndicator(title);
   }
 
   function getToastStack() {
@@ -1102,6 +1913,235 @@
     ]);
   }
 
+  function normalizePendingWithdrawals(value) {
+    if (!Array.isArray(value)) return [];
+    const seenIds = new Set();
+    const seenIdentities = new Set();
+    return [...value].reverse().flatMap((withdrawal) => {
+      const identity = typeof withdrawal?.identity === "string" && withdrawal.identity
+        ? withdrawal.identity
+        : typeof withdrawal?.phone === "string" && /^\d{7,20}$/.test(withdrawal.phone)
+          ? `phone:${withdrawal.phone}`
+          : "";
+      if (!withdrawal || typeof withdrawal !== "object" || Array.isArray(withdrawal) ||
+        typeof withdrawal.id !== "string" || !withdrawal.id ||
+        !identity ||
+        !Number.isSafeInteger(withdrawal.createdAt) || withdrawal.createdAt < 0 ||
+        seenIds.has(withdrawal.id) || seenIdentities.has(identity)) return [];
+      seenIds.add(withdrawal.id);
+      seenIdentities.add(identity);
+      return [{
+        id: withdrawal.id,
+        identity,
+        name: typeof withdrawal.name === "string" && withdrawal.name.trim()
+          ? withdrawal.name.trim()
+          : identity,
+        username: typeof withdrawal.username === "string" ? withdrawal.username : "",
+        status: "Pendiente",
+        createdAt: withdrawal.createdAt
+      }];
+    }).reverse();
+  }
+
+  function getPendingWithdrawalContact(chatTitleText) {
+    const title = chatTitleText.trim();
+    const usernames = findPlatformUsernames(title);
+    const ganamos = usernames.ganamos?.toLowerCase() || "";
+    const multipanel = usernames.multipanel?.toLowerCase() || "";
+    const identity = ganamos || multipanel
+      ? `accounts:${ganamos}|${multipanel}`
+      : /^[+\d\s().-]+$/.test(title)
+        ? ""
+        : getContactVisualTagIdentities(null, null, title)[0];
+    const displayUsernames = [
+      usernames.ganamos,
+      usernames.multipanel
+    ].filter(Boolean);
+    return {
+      identity,
+      name: displayUsernames.join("/") || title || identity,
+      username: ""
+    };
+  }
+
+  function savePendingWithdrawals() {
+    const snapshot = pendingWithdrawals.map((withdrawal) => ({ ...withdrawal }));
+    pendingWithdrawalSaveQueue = pendingWithdrawalSaveQueue
+      .then(() => stateStorage.set({ [PENDING_WITHDRAWALS_KEY]: snapshot }))
+      .catch((error) => {
+        console.error(
+          "[Ganamos balance extension] No se pudieron guardar los retiros pendientes.",
+          error
+        );
+        showToast(
+          null,
+          "Retiros pendientes",
+          error.message || "No se pudieron guardar los cambios.",
+          "error",
+          "pending-withdrawals"
+        );
+        return false;
+      });
+    return pendingWithdrawalSaveQueue.then((result) => result !== false);
+  }
+
+  function normalizeWithdrawalMessageText(value) {
+    return value.normalize("NFKD")
+      .replace(/\p{M}/gu, "")
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  }
+
+  function trackPendingWithdrawal(details) {
+    if (!pendingWithdrawalsLoaded) return;
+    const now = Date.now();
+    if (now - details.timestamp > PENDING_WITHDRAWAL_MESSAGE_MAX_AGE_MS ||
+      details.timestamp > now + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS) return;
+    const messageText = normalizeWithdrawalMessageText(details.text);
+    if (messageText.includes("proxima victoria")) {
+      let pendingIndex = -1;
+      for (let index = pendingWithdrawals.length - 1; index >= 0; index--) {
+        if (pendingWithdrawals[index].identity === details.contact.identity) {
+          pendingIndex = index;
+          break;
+        }
+      }
+      if (pendingIndex >= 0) {
+        pendingWithdrawals.splice(pendingIndex, 1);
+        renderPendingWithdrawals();
+        void savePendingWithdrawals();
+      }
+      return;
+    }
+    if (!messageText.includes("muchas gracias por su paciencia") ||
+      pendingWithdrawals.some((withdrawal) =>
+        withdrawal.identity === details.contact.identity) ||
+      pendingWithdrawals.some((withdrawal) => withdrawal.id === details.messageId)) return;
+    pendingWithdrawals.push({
+      id: details.messageId,
+      identity: details.contact.identity,
+      name: details.contact.name,
+      username: details.contact.username,
+      status: "Pendiente",
+      createdAt: now
+    });
+    renderPendingWithdrawals();
+    void savePendingWithdrawals();
+  }
+
+  function completePendingWithdrawal(id) {
+    const pendingIndex = pendingWithdrawals.findIndex(
+      (withdrawal) => withdrawal.id === id
+    );
+    if (pendingIndex < 0) return;
+    pendingWithdrawals.splice(pendingIndex, 1);
+    renderPendingWithdrawals();
+    void savePendingWithdrawals();
+  }
+
+  function renderPendingWithdrawals() {
+    const host = document.getElementById(PENDING_WITHDRAWALS_HOST_ID);
+    if (!host || !pendingWithdrawalsToggle || !pendingWithdrawalsList) return;
+    const noOpenChat = !isNormalChatOpen(findContactTitle());
+    host.style.display = pendingWithdrawalsLoaded && noOpenChat && pendingWithdrawals.length
+      ? ""
+      : "none";
+    const count = pendingWithdrawals.length;
+    pendingWithdrawalsToggle.textContent = `${count} retiros pendientes`;
+    pendingWithdrawalsToggle.setAttribute("aria-expanded", String(pendingWithdrawalsExpanded));
+    pendingWithdrawalsList.hidden = !pendingWithdrawalsExpanded;
+    if (!pendingWithdrawalsExpanded) return;
+    const signature = JSON.stringify(
+      pendingWithdrawals.map(({ id, name, username }) => [id, name, username])
+    );
+    if (signature === pendingWithdrawalsRenderedSignature) return;
+    pendingWithdrawalsList.replaceChildren();
+    for (const withdrawal of pendingWithdrawals) {
+      const row = document.createElement("div");
+      row.className = "pending-withdrawals-item";
+      row.setAttribute("role", "listitem");
+      const contact = document.createElement("div");
+      contact.className = "pending-withdrawals-contact";
+      const name = document.createElement("span");
+      name.className = "pending-withdrawals-name";
+      name.textContent = withdrawal.name;
+      contact.append(name);
+      if (withdrawal.username) {
+        const username = document.createElement("span");
+        username.className = "pending-withdrawals-username";
+        username.textContent = withdrawal.username;
+        contact.append(username);
+      }
+      const complete = document.createElement("button");
+      complete.type = "button";
+      complete.className = "pending-withdrawals-complete";
+      complete.title = `Marcar el retiro de ${withdrawal.name} como completado`;
+      complete.setAttribute("aria-label", complete.title);
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("viewBox", "0 0 24 24");
+      icon.setAttribute("aria-hidden", "true");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "m5 12 4 4L19 6");
+      icon.append(path);
+      complete.append(icon);
+      complete.addEventListener("click", () => completePendingWithdrawal(withdrawal.id));
+      row.append(contact, complete);
+      pendingWithdrawalsList.append(row);
+    }
+    pendingWithdrawalsRenderedSignature = signature;
+  }
+
+  function createPendingWithdrawalsPanel() {
+    const host = document.createElement("div");
+    host.id = PENDING_WITHDRAWALS_HOST_ID;
+    host.style.display = "none";
+    host.style.top = "12px";
+    host.style.right = "12px";
+    host.style.left = "auto";
+    host.style.width = "320px";
+    host.style.maxWidth = "calc(100vw - 24px)";
+    host.style.maxHeight = "calc(100vh - 24px)";
+    host.style.overflowY = "auto";
+    const shadow = host.attachShadow({ mode: "open" });
+    for (const eventName of ["click", "mousedown", "pointerdown"]) {
+      shadow.addEventListener(eventName, (event) => event.stopPropagation());
+    }
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
+    stylesheet.addEventListener("error", () => console.error(
+      "[Ganamos balance extension] No se pudo cargar styles/whatsapp.css para los retiros pendientes."
+    ), { once: true });
+    const panel = document.createElement("section");
+    panel.className = "pending-withdrawals-panel";
+    panel.setAttribute("aria-label", "Retiros pendientes");
+    pendingWithdrawalsToggle = document.createElement("button");
+    pendingWithdrawalsToggle.type = "button";
+    pendingWithdrawalsToggle.className = "pending-withdrawals-toggle";
+    pendingWithdrawalsToggle.addEventListener("click", () => {
+      pendingWithdrawalsExpanded = !pendingWithdrawalsExpanded;
+      renderPendingWithdrawals();
+    });
+    pendingWithdrawalsList = document.createElement("div");
+    pendingWithdrawalsList.className = "pending-withdrawals-list";
+    pendingWithdrawalsList.setAttribute("role", "list");
+    panel.append(pendingWithdrawalsToggle, pendingWithdrawalsList);
+    shadow.append(stylesheet, panel);
+    document.documentElement.append(host);
+    renderPendingWithdrawals();
+  }
+
+  function reportUntrackablePendingWithdrawal(metadataElement, reason, diagnostic) {
+    if (reportedPendingWithdrawalMessages.has(metadataElement)) return;
+    reportedPendingWithdrawalMessages.add(metadataElement);
+    console.error(
+      `[Ganamos balance extension] Se detectó el mensaje de retiro, pero ${reason}.`,
+      diagnostic
+    );
+    showToast(null, "Retiros pendientes", reason, "error", "pending-withdrawals");
+  }
+
   function getOutgoingMessageDetails(metadataElement) {
     const metadata = metadataElement.getAttribute("data-pre-plain-text");
     const match = metadata?.match(/^\[([^\]]+)\]/);
@@ -1169,11 +2209,27 @@
       .map((id) => id.match(/(?:^|_)(\d{7,20})@(?:c\.us|s\.whatsapp\.net)(?:_|$)/i))
       .find(Boolean);
     const chatNumber = jidMatch?.[1] ||
-      getPhoneFromContactTitle(chatTitle) ||
+      getPhoneFromWhatsAppChat(chatTitle) ||
       contactFlowChatNumbers.get(chat);
-    if (!chatNumber || !/^\d{7,20}$/.test(chatNumber)) return null;
+    const contact = getPendingWithdrawalContact(chatTitleText);
+    if (!contact.identity) {
+      const textElements = messageContainer.querySelectorAll(
+        '[data-testid="selectable-text"], .selectable-text'
+      );
+      const text = [
+        messageContainer.textContent || "",
+        ...[...textElements].map((element) => element.textContent || "")
+      ].join("\n");
+      if (normalizeWithdrawalMessageText(text).includes("muchas gracias por su paciencia")) {
+        reportUntrackablePendingWithdrawal(
+          metadataElement,
+          "no se pudo identificar un nombre o usuario de la conversación",
+          { chatTitle: chatTitleText, messageIds }
+        );
+      }
+      return null;
+    }
     const timestamp = parseIncomingMessageTimestamp(match[1]);
-    if (!timestamp) return null;
     const textElements = messageContainer.querySelectorAll(
       '[data-testid="selectable-text"], .selectable-text'
     );
@@ -1184,13 +2240,34 @@
       .normalize("NFKC")
       .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
       .toLocaleLowerCase();
-    return { number: chatNumber, timestamp, text };
+    if (!timestamp) {
+      if (normalizeWithdrawalMessageText(text).includes("muchas gracias por su paciencia")) {
+        reportUntrackablePendingWithdrawal(
+          metadataElement,
+          "no se pudo interpretar su fecha",
+          metadata
+        );
+      }
+      return null;
+    }
+    const messageId = outgoingMessageId ||
+      messageIds.find((id) => /^true_\d{7,20}@(?:c\.us|s\.whatsapp\.net)_/i.test(id)) ||
+      `${contact.identity}:${timestamp}`;
+    return {
+      number: chatNumber && /^\d{7,20}$/.test(chatNumber) ? chatNumber : "",
+      timestamp,
+      text,
+      messageId,
+      contact
+    };
   }
 
   function countOutgoingMessagePanels(metadataElement) {
     if (processedOutgoingMessages.has(metadataElement)) return;
     const details = getOutgoingMessageDetails(metadataElement);
     if (!details) return;
+    trackPendingWithdrawal(details);
+    if (!details.number) return;
     const now = Date.now();
     if (pruneExpiredContactFlowNumbers(now)) saveContactFlowCounters();
     if (now - details.timestamp > CONTACT_FLOW_MESSAGE_MAX_AGE_MS) {
@@ -2278,6 +3355,7 @@
     const accountHost = document.getElementById(HOST_ID);
     const bypassButton = accountHost?.shadowRoot?.querySelector(".deposit-bonus-bypass");
     const depositButton = accountHost?.shadowRoot?.querySelector('[data-action="deposit"]');
+    const bonusDisabled = accountHost?.dataset.bonusDisabled === "true";
     if (bypassButton) {
       bypassButton.dataset.appliesBonus = String(invertDepositButtons);
       bypassButton.title = !bonusEnabled
@@ -2288,7 +3366,8 @@
       bypassButton.setAttribute("aria-label", bypassButton.title);
     }
     if (depositButton) {
-      depositButton.title = !bonusEnabled
+      depositButton.dataset.bonusDisabled = String(bonusDisabled);
+      depositButton.title = bonusDisabled || !bonusEnabled
         ? "Depositar"
         : invertDepositButtons
           ? "Depositar sin aplicar el bono automático"
@@ -2297,7 +3376,25 @@
     }
     if (!bypassButton) return;
     const hasPlatformUsers = Boolean(accountHost?.dataset.username || accountHost?.dataset.multipanelUsername);
-    bypassButton.hidden = !bonusEnabled || !hasPlatformUsers;
+    bypassButton.hidden = bonusDisabled || !bonusEnabled || !hasPlatformUsers;
+  }
+
+  function updateUserBonusDisabledPresentation(host, disabled) {
+    host.dataset.bonusDisabled = String(disabled);
+    const label = host.shadowRoot?.querySelector(".bonus-disabled-label");
+    if (label) label.hidden = !disabled;
+    const activeBonusHost = document.getElementById(ACTIVE_BONUS_HOST_ID);
+    updateDepositBonusBypassVisibility(
+      Boolean(activeBonusHost?.dataset.bonusType && activeBonusHost.dataset.bonusType !== "none"),
+      activeBonusHost?.dataset.invertDepositButtons === "true"
+    );
+    updateDepositAdvertisingVisibility(activeBonusHost?.dataset.advertisingReady === "true");
+  }
+
+  function updateUserAccumulatesBonusesPresentation(host, enabled) {
+    host.dataset.accumulatesBonuses = String(enabled);
+    const label = host.shadowRoot?.querySelector(".accumulates-bonuses-label");
+    if (label) label.hidden = !enabled;
   }
 
   function updateDepositAdvertisingVisibility(advertisingEnabled) {
@@ -3390,6 +4487,58 @@
     });
   }
 
+  function confirmDisabledBonusDeposit(root, username, amount, bonus) {
+    return new Promise((resolve) => {
+      let answered = false;
+      const finish = (shouldContinue) => {
+        if (answered) return;
+        answered = true;
+        modal.remove();
+        resolve(shouldContinue);
+      };
+
+      const modal = document.createElement("div");
+      modal.className = "modal bonus-disabled-modal";
+      registerModalEscapeHandler(modal, () => finish(false));
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal) finish(false);
+      });
+
+      const dialog = document.createElement("section");
+      dialog.className = "dialog";
+      dialog.dataset.operation = "bonus-disabled-confirmation";
+      dialog.setAttribute("role", "alertdialog");
+      dialog.setAttribute("aria-modal", "true");
+      const title = document.createElement("h2");
+      title.textContent = "Bono desactivado";
+      const message = document.createElement("p");
+      message.className = "notice";
+      message.textContent =
+        `${username}: el depósito incluye un bono de $${formatCurrency(bonus)}. ¿Querés continuar con la carga de $${formatCurrency(amount + bonus)}?`;
+
+      const actions = document.createElement("div");
+      actions.className = "dialog-actions";
+      const actionButtons = document.createElement("div");
+      actionButtons.className = "dialog-action-buttons";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "secondary";
+      cancel.textContent = "Cancelar";
+      cancel.addEventListener("click", () => finish(false));
+      const accept = document.createElement("button");
+      accept.type = "button";
+      accept.className = "bonus-disabled-continue";
+      accept.textContent = "Aceptar";
+      accept.addEventListener("click", () => finish(true));
+      actionButtons.append(cancel, accept);
+      actions.append(actionButtons);
+      dialog.append(title, message, actions);
+      modal.append(dialog);
+      root.append(modal);
+      cancel.focus();
+    });
+  }
+
   async function startWithdrawal(host, { skipMovementRecord = false } = {}) {
     if (withdrawalChecksInProgress.has(host)) return;
     withdrawalChecksInProgress.add(host);
@@ -3460,6 +4609,221 @@
     close.addEventListener("click", () => root.replaceChildren());
     heading.append(title, close);
 
+    const tabs = document.createElement("div");
+    tabs.className = "active-bonus-tabs";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Sección de movimientos");
+    const createTab = (id, label, selected) => {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "active-bonus-tab";
+      tab.id = `movement-history-tab-${id}`;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", `movement-history-panel-${id}`);
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      tab.textContent = label;
+      tabs.append(tab);
+      return tab;
+    };
+    const movementsTab = createTab("movements", "Movimientos", true);
+    const settingsTab = createTab("settings", "Configuración", false);
+    const movementsPanel = document.createElement("div");
+    movementsPanel.className = "active-bonus-tab-panel";
+    movementsPanel.id = "movement-history-panel-movements";
+    movementsPanel.setAttribute("role", "tabpanel");
+    movementsPanel.setAttribute("aria-labelledby", movementsTab.id);
+    const settingsPanel = document.createElement("div");
+    settingsPanel.className = "active-bonus-tab-panel movement-history-settings-panel";
+    settingsPanel.id = "movement-history-panel-settings";
+    settingsPanel.setAttribute("role", "tabpanel");
+    settingsPanel.setAttribute("aria-labelledby", settingsTab.id);
+    settingsPanel.hidden = true;
+    const sportBetsSettingHeading = document.createElement("h3");
+    sportBetsSettingHeading.className = "movement-history-settings-heading";
+    sportBetsSettingHeading.textContent = "Apuestas deportivas";
+    const sportBetsSetting = document.createElement("label");
+    sportBetsSetting.className = "active-bonus-setting-toggle";
+    const sportBetsDisabledInput = document.createElement("input");
+    sportBetsDisabledInput.type = "checkbox";
+    sportBetsDisabledInput.setAttribute("aria-label", "Desactivar detección de apuestas deportivas");
+    const sportBetsSettingSwitch = document.createElement("span");
+    sportBetsSettingSwitch.className = "active-bonus-setting-switch";
+    const sportBetsSettingText = document.createElement("span");
+    sportBetsSettingText.textContent = "Desactivar detección";
+    sportBetsSetting.append(sportBetsDisabledInput, sportBetsSettingSwitch, sportBetsSettingText);
+    const bonusDisabledSetting = document.createElement("label");
+    bonusDisabledSetting.className = "active-bonus-setting-toggle";
+    const bonusDisabledInput = document.createElement("input");
+    bonusDisabledInput.type = "checkbox";
+    bonusDisabledInput.setAttribute("aria-label", "Bono Desactivado");
+    const bonusDisabledSwitch = document.createElement("span");
+    bonusDisabledSwitch.className = "active-bonus-setting-switch";
+    const bonusDisabledText = document.createElement("span");
+    bonusDisabledText.textContent = "Bono Desactivado";
+    bonusDisabledSetting.append(bonusDisabledInput, bonusDisabledSwitch, bonusDisabledText);
+    const accumulatesBonusesSetting = document.createElement("label");
+    accumulatesBonusesSetting.className = "active-bonus-setting-toggle";
+    const accumulatesBonusesInput = document.createElement("input");
+    accumulatesBonusesInput.type = "checkbox";
+    accumulatesBonusesInput.setAttribute("aria-label", "Acumula bonos");
+    const accumulatesBonusesSwitch = document.createElement("span");
+    accumulatesBonusesSwitch.className = "active-bonus-setting-switch";
+    const accumulatesBonusesText = document.createElement("span");
+    accumulatesBonusesText.textContent = "Acumula bonos";
+    accumulatesBonusesSetting.append(
+      accumulatesBonusesInput,
+      accumulatesBonusesSwitch,
+      accumulatesBonusesText
+    );
+    const bonusSettingsToggleGroup = document.createElement("div");
+    bonusSettingsToggleGroup.className = "movement-history-contact-tag-options";
+    bonusSettingsToggleGroup.append(bonusDisabledSetting, accumulatesBonusesSetting);
+    const bonusSettingHeading = document.createElement("h3");
+    bonusSettingHeading.className = "movement-history-settings-heading";
+    bonusSettingHeading.textContent = "Bono automático";
+    const contactTagsHeading = document.createElement("h3");
+    contactTagsHeading.className = "movement-history-settings-heading";
+    contactTagsHeading.textContent = "Marcas del contacto";
+    const userStatusHeading = document.createElement("h3");
+    userStatusHeading.className = "movement-history-settings-heading";
+    userStatusHeading.textContent = "Estado del usuario";
+    const contactTagOptions = document.createElement("div");
+    contactTagOptions.className = "movement-history-contact-tag-options";
+    const createContactTagSetting = (text, ariaLabel) => {
+      const setting = document.createElement("label");
+      setting.className = "active-bonus-setting-toggle";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.setAttribute("aria-label", ariaLabel);
+      const toggle = document.createElement("span");
+      toggle.className = "active-bonus-setting-switch";
+      const label = document.createElement("span");
+      label.textContent = text;
+      setting.append(input, toggle, label);
+      return { setting, input };
+    };
+    const highDepositorTagSetting = createContactTagSetting("Cargador alto", "Cargador alto");
+    const scammerTagSetting = createContactTagSetting("Peligro", "Peligro");
+    const blockedUserSetting = createContactTagSetting("Bloqueado", "Bloqueado");
+    contactTagOptions.append(highDepositorTagSetting.setting, scammerTagSetting.setting);
+    const userStatusOptions = document.createElement("div");
+    userStatusOptions.className = "movement-history-contact-tag-options";
+    userStatusOptions.append(blockedUserSetting.setting);
+    const relatedContactsHeading = document.createElement("h3");
+    relatedContactsHeading.className = "movement-history-settings-heading";
+    relatedContactsHeading.textContent = "Contactos relacionados";
+    const relatedContactsInput = document.createElement("textarea");
+    relatedContactsInput.className = "movement-history-related-contacts";
+    relatedContactsInput.rows = 2;
+    relatedContactsInput.maxLength = 1200;
+    relatedContactsInput.placeholder = "usuario1 / usuario2";
+    relatedContactsInput.setAttribute("aria-label", "Contactos relacionados, separados por /");
+    const withdrawalLimitLabel = document.createElement("label");
+    withdrawalLimitLabel.className = "movement-history-withdrawal-limit";
+    withdrawalLimitLabel.textContent = "Monto máximo";
+    const withdrawalLimitInput = document.createElement("input");
+    configureNumericInput(withdrawalLimitInput);
+    withdrawalLimitInput.value = formatBalance(DEFAULT_WITHDRAWAL_LIMIT);
+    withdrawalLimitInput.setAttribute("aria-label", "Monto máximo de retiro");
+    withdrawalLimitLabel.append(createInputAffix(withdrawalLimitInput, "$"));
+    const withdrawalLimitEntry = document.createElement("div");
+    withdrawalLimitEntry.className = "amount-entry movement-history-limit-entry";
+    withdrawalLimitEntry.append(withdrawalLimitLabel);
+    const withdrawalLimitShortcuts = document.createElement("div");
+    withdrawalLimitShortcuts.className = "amount-shortcuts withdrawal-limit-shortcuts";
+    withdrawalLimitShortcuts.setAttribute("role", "group");
+    withdrawalLimitShortcuts.setAttribute("aria-label", "Elegir monto máximo de retiro");
+    const withdrawalLimitPresets = [100000, 150000, 200000, 250000, 300000];
+    const updateWithdrawalLimitShortcuts = () => {
+      const currentValue = numericInputValue(withdrawalLimitInput);
+      for (const button of withdrawalLimitShortcuts.querySelectorAll("button")) {
+        button.setAttribute("aria-pressed", String(Number(button.dataset.amount) === currentValue));
+      }
+    };
+    for (const amount of withdrawalLimitPresets) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.amount = String(amount);
+      const buttonLabel = document.createElement("span");
+      buttonLabel.textContent = `$${formatBalance(amount)}`;
+      button.append(buttonLabel);
+      button.setAttribute("aria-label", `Establecer máximo en $${formatBalance(amount)}`);
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", () => {
+        withdrawalLimitInput.value = formatBalance(amount);
+        withdrawalLimitInput.dispatchEvent(new Event("input", { bubbles: true }));
+        withdrawalLimitInput.dispatchEvent(new Event("change", { bubbles: true }));
+        withdrawalLimitInput.focus();
+      });
+      withdrawalLimitShortcuts.append(button);
+    }
+    withdrawalLimitInput.addEventListener("input", updateWithdrawalLimitShortcuts);
+    updateWithdrawalLimitShortcuts();
+      const createSettingsSection = (heading, ...content) => {
+        const section = document.createElement("section");
+        section.className = "movement-history-settings-section";
+        section.append(heading, ...content);
+        return section;
+      };
+      const sportBetsSettingsSection = createSettingsSection(
+        sportBetsSettingHeading,
+        sportBetsSetting
+      );
+      const bonusSettingsSection = createSettingsSection(
+        bonusSettingHeading,
+        bonusSettingsToggleGroup
+      );
+      const contactTagsSettingsSection = createSettingsSection(
+        contactTagsHeading,
+        contactTagOptions
+      );
+      const userStatusSettingsSection = createSettingsSection(
+        userStatusHeading,
+        userStatusOptions
+      );
+      const relatedContactsSettingsSection = createSettingsSection(
+        relatedContactsHeading,
+        relatedContactsInput
+      );
+      const withdrawalSettingsHeading = document.createElement("h3");
+      withdrawalSettingsHeading.className = "movement-history-settings-heading";
+      withdrawalSettingsHeading.textContent = "Límite de retiro";
+      const withdrawalSettingsSection = createSettingsSection(
+        withdrawalSettingsHeading,
+        withdrawalLimitEntry,
+        withdrawalLimitShortcuts
+      );
+    settingsPanel.append(
+        sportBetsSettingsSection,
+        bonusSettingsSection,
+        contactTagsSettingsSection,
+        userStatusSettingsSection,
+        relatedContactsSettingsSection,
+        withdrawalSettingsSection
+    );
+    const setActiveTab = (tabName, moveFocus = false) => {
+      const showSettings = tabName === "settings";
+      dialog.dataset.settingsActive = String(showSettings);
+      movementsTab.setAttribute("aria-selected", String(!showSettings));
+      movementsTab.tabIndex = showSettings ? -1 : 0;
+      settingsTab.setAttribute("aria-selected", String(showSettings));
+      settingsTab.tabIndex = showSettings ? 0 : -1;
+      movementsPanel.hidden = showSettings;
+      settingsPanel.hidden = !showSettings;
+      if (moveFocus) (showSettings ? settingsTab : movementsTab).focus();
+    };
+    movementsTab.addEventListener("click", () => setActiveTab("movements"));
+    settingsTab.addEventListener("click", () => setActiveTab("settings"));
+    tabs.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const nextTab = event.key === "Home" || event.key === "ArrowLeft"
+        ? "movements"
+        : "settings";
+      setActiveTab(nextTab, true);
+    });
+
     const filters = document.createElement("div");
     filters.className = "movement-history-filters";
     const platformLabel = document.createElement("label");
@@ -3529,7 +4893,8 @@
     const bonusTotal = createTotal("Bonos", "bonus", "movement-history-total-bonuses");
     const withdrawalTotal = createTotal("Retiros", "withdrawal", "movement-history-total-withdrawals");
     const differenceTotal = createTotal("Diferencia", "difference", "movement-history-total-difference");
-    dialog.append(heading, filters, dates, list, totals);
+    movementsPanel.append(filters, dates, list, totals);
+    dialog.append(heading, tabs, movementsPanel, settingsPanel);
     modal.append(dialog);
     root.append(modal);
 
@@ -3537,9 +4902,277 @@
       ganamos: host.dataset.username,
       multipanel: host.dataset.multipanelUsername
     };
+    const preferenceId = getSportBetsPreferenceId(host);
+    const contactTagIdentities = getHostContactVisualTagIdentities(host);
+    const userAccounts = Object.entries(platformUsernames)
+      .filter(([, username]) => username);
     const defaultPlatform = host.dataset.defaultPlatform || "ganamos";
     title.textContent = `Movimientos ${platformUsernames[defaultPlatform] || ""}`.trim();
     let storedMovements = [];
+    let savedWithdrawalLimit = DEFAULT_WITHDRAWAL_LIMIT;
+    let savedRelatedContacts = "";
+
+    const loadSportBetsSetting = async () => {
+      sportBetsDisabledInput.disabled = true;
+      bonusDisabledInput.disabled = true;
+      accumulatesBonusesInput.disabled = true;
+      highDepositorTagSetting.input.disabled = true;
+      scammerTagSetting.input.disabled = true;
+      blockedUserSetting.input.disabled = true;
+      relatedContactsInput.disabled = true;
+      withdrawalLimitInput.disabled = true;
+      try {
+        const [
+          disabled,
+          bonusDisabled,
+          accumulatesBonuses,
+          blocked,
+          withdrawalLimit,
+          loadedContactVisualTags,
+          relatedContacts
+        ] = await Promise.all([
+          readSportBetsDisabled(preferenceId),
+          readUserBonusDisabled(preferenceId),
+          readUserAccumulatesBonuses(preferenceId),
+          readUserBlocked(preferenceId),
+          readUserWithdrawalLimit(preferenceId),
+          loadContactVisualTags(),
+          readUserRelatedContacts(preferenceId)
+        ]);
+        if (host.dataset.accounts !== contactKey || !root.contains(modal)) return;
+        sportBetsDisabledInput.checked = disabled;
+        bonusDisabledInput.checked = bonusDisabled;
+        accumulatesBonusesInput.checked = accumulatesBonuses;
+        blockedUserSetting.input.checked = blocked;
+        const contactTags = getContactVisualTags(
+          contactTagIdentities,
+          loadedContactVisualTags
+        );
+        highDepositorTagSetting.input.checked = contactTags.highDepositor === true;
+        scammerTagSetting.input.checked = contactTags.scammer === true;
+        savedWithdrawalLimit = withdrawalLimit;
+        withdrawalLimitInput.value = formatBalance(withdrawalLimit);
+        savedRelatedContacts = relatedContacts;
+        relatedContactsInput.value = relatedContacts;
+        updateWithdrawalLimitShortcuts();
+        updateUserBonusDisabledPresentation(host, bonusDisabled);
+        updateUserAccumulatesBonusesPresentation(host, accumulatesBonuses);
+        host.dataset.relatedContacts = relatedContacts;
+        updateRelatedContactsIndicator(findContactTitle());
+      } catch (error) {
+        console.error(
+          "[Ganamos balance extension] No se pudo cargar la configuración de apuestas deportivas.",
+          error
+        );
+      } finally {
+        if (root.contains(modal)) {
+          sportBetsDisabledInput.disabled = false;
+          bonusDisabledInput.disabled = false;
+          accumulatesBonusesInput.disabled = false;
+          highDepositorTagSetting.input.disabled = !contactTagIdentities.length;
+          scammerTagSetting.input.disabled = !contactTagIdentities.length;
+          blockedUserSetting.input.disabled = preferenceId.accounts.length === 0;
+          relatedContactsInput.disabled = false;
+          withdrawalLimitInput.disabled = false;
+        }
+      }
+    };
+
+    sportBetsDisabledInput.addEventListener("change", async () => {
+      const disabled = sportBetsDisabledInput.checked;
+      const previousDisabled = host.sportBetsDisabled === true;
+      sportBetsDisabledInput.disabled = true;
+      if (host.dataset.accounts === contactKey) host.sportBetsDisabled = disabled;
+      try {
+        await saveSportBetsDisabled(preferenceId, disabled);
+        if (host.dataset.accounts !== contactKey || activeAccountsKey !== contactKey) return;
+        if (disabled) {
+          host.sportBetsStates = {};
+          renderSportBetsCount(host);
+          renderBalanceRows(host, userAccounts);
+          updateSportBetsIndicator(findContactTitle(), false);
+        } else {
+          host.sportBetsStates ||= {};
+          for (const [platform] of userAccounts) {
+            host.sportBetsStates[platform] = {
+              ...host.sportBetsStates[platform],
+              loading: true
+            };
+          }
+          renderSportBetsCount(host);
+          renderBalanceRows(host, userAccounts);
+          await refreshSportBetsCounts(host, userAccounts, contactKey, userAccounts);
+        }
+      } catch (error) {
+        if (host.dataset.accounts === contactKey) {
+          host.sportBetsDisabled = previousDisabled;
+          if (!previousDisabled && activeAccountsKey === contactKey) {
+            for (const [platform] of userAccounts) {
+              host.sportBetsStates[platform] = {
+                ...host.sportBetsStates[platform],
+                loading: true
+              };
+            }
+            renderSportBetsCount(host);
+            renderBalanceRows(host, userAccounts);
+            void refreshSportBetsCounts(host, userAccounts, contactKey, userAccounts);
+          }
+        }
+        sportBetsDisabledInput.checked = previousDisabled;
+        showToast(
+          host,
+          platformUsernames[host.dataset.defaultPlatform] || "Chat",
+          error.message || "No se pudo guardar la configuración de apuestas deportivas.",
+          "error"
+        );
+      } finally {
+        if (root.contains(modal)) sportBetsDisabledInput.disabled = false;
+      }
+    });
+    bonusDisabledInput.addEventListener("change", async () => {
+      const disabled = bonusDisabledInput.checked;
+      const previousDisabled = host.dataset.bonusDisabled === "true";
+      bonusDisabledInput.disabled = true;
+      if (host.dataset.accounts === contactKey) {
+        updateUserBonusDisabledPresentation(host, disabled);
+      }
+      try {
+        await saveUserBonusDisabled(preferenceId, disabled);
+        if (host.dataset.accounts !== contactKey || activeAccountsKey !== contactKey) return;
+      } catch (error) {
+        if (host.dataset.accounts === contactKey) {
+          updateUserBonusDisabledPresentation(host, previousDisabled);
+        }
+        bonusDisabledInput.checked = previousDisabled;
+        showToast(
+          host,
+          platformUsernames[host.dataset.defaultPlatform] || "Chat",
+          error.message || "No se pudo guardar la configuración del bono.",
+          "error"
+        );
+      } finally {
+        if (root.contains(modal)) bonusDisabledInput.disabled = false;
+      }
+    });
+    accumulatesBonusesInput.addEventListener("change", async () => {
+      const enabled = accumulatesBonusesInput.checked;
+      const previousEnabled = host.dataset.accumulatesBonuses === "true";
+      accumulatesBonusesInput.disabled = true;
+      if (host.dataset.accounts === contactKey) {
+        updateUserAccumulatesBonusesPresentation(host, enabled);
+      }
+      try {
+        await saveUserAccumulatesBonuses(preferenceId, enabled);
+        if (host.dataset.accounts !== contactKey || activeAccountsKey !== contactKey) return;
+      } catch (error) {
+        if (host.dataset.accounts === contactKey) {
+          updateUserAccumulatesBonusesPresentation(host, previousEnabled);
+        }
+        accumulatesBonusesInput.checked = previousEnabled;
+        showToast(
+          host,
+          platformUsernames[host.dataset.defaultPlatform] || "Chat",
+          error.message || "No se pudo guardar la configuración Acumula bonos.",
+          "error"
+        );
+      } finally {
+        if (root.contains(modal)) accumulatesBonusesInput.disabled = false;
+      }
+    });
+    const bindContactTagSetting = (input, tag) => {
+      input.addEventListener("change", async () => {
+        if (!contactTagIdentities.length) return;
+        const previousValue = getContactVisualTags(contactTagIdentities)[tag] === true;
+        input.disabled = true;
+        try {
+          await saveContactVisualTag(contactTagIdentities, tag, input.checked);
+          if (host.dataset.accounts !== contactKey || activeAccountsKey !== contactKey) return;
+        } catch (error) {
+          input.checked = previousValue;
+          showToast(
+            host,
+            platformUsernames[host.dataset.defaultPlatform] || "Chat",
+            error.message || "No se pudo guardar la marca del contacto.",
+            "error"
+          );
+        } finally {
+          if (root.contains(modal)) input.disabled = false;
+        }
+      });
+    };
+    bindContactTagSetting(highDepositorTagSetting.input, "highDepositor");
+    bindContactTagSetting(scammerTagSetting.input, "scammer");
+    blockedUserSetting.input.addEventListener("change", async () => {
+      const blocked = blockedUserSetting.input.checked;
+      const previousBlocked = !blocked;
+      blockedUserSetting.input.disabled = true;
+      try {
+        await saveUserBlocked(preferenceId, blocked);
+        if (host.dataset.accounts !== contactKey || activeAccountsKey !== contactKey) return;
+      } catch (error) {
+        blockedUserSetting.input.checked = previousBlocked;
+        showToast(
+          host,
+          platformUsernames[host.dataset.defaultPlatform] || "Chat",
+          error.message || "No se pudo guardar la configuración Bloqueado.",
+          "error"
+        );
+      } finally {
+        if (root.contains(modal)) blockedUserSetting.input.disabled = false;
+      }
+    });
+    relatedContactsInput.addEventListener("change", async () => {
+      const previousContacts = savedRelatedContacts;
+      const nextContacts = relatedContactsInput.value.trim();
+      relatedContactsInput.disabled = true;
+      try {
+        await saveUserRelatedContacts(preferenceId, nextContacts);
+        savedRelatedContacts = nextContacts;
+        if (host.dataset.accounts !== contactKey || activeAccountsKey !== contactKey) return;
+        host.dataset.relatedContacts = nextContacts;
+        updateRelatedContactsIndicator(findContactTitle());
+      } catch (error) {
+        relatedContactsInput.value = previousContacts;
+        showToast(
+          host,
+          platformUsernames[host.dataset.defaultPlatform] || "Chat",
+          error.message || "No se pudieron guardar los contactos relacionados.",
+          "error"
+        );
+      } finally {
+        if (root.contains(modal)) relatedContactsInput.disabled = false;
+      }
+    });
+    withdrawalLimitInput.addEventListener("change", async () => {
+      const previousLimit = savedWithdrawalLimit;
+      const nextLimit = numericInputValue(withdrawalLimitInput);
+      if (!withdrawalLimitInput.value || !Number.isFinite(nextLimit) || nextLimit < 0 ||
+        !hasValidInputPrecision(withdrawalLimitInput)) {
+        withdrawalLimitInput.value = formatBalance(previousLimit);
+        updateWithdrawalLimitShortcuts();
+        return;
+      }
+      withdrawalLimitInput.disabled = true;
+      try {
+        await saveUserWithdrawalLimit(preferenceId, nextLimit);
+        savedWithdrawalLimit = nextLimit;
+        if (host.dataset.accounts !== contactKey || activeAccountsKey !== contactKey) return;
+        host.dataset.withdrawalLimit = String(nextLimit);
+        updateWithdrawalLimitIndicator(findContactTitle());
+      } catch (error) {
+        withdrawalLimitInput.value = formatBalance(previousLimit);
+        updateWithdrawalLimitShortcuts();
+        showToast(
+          host,
+          platformUsernames[host.dataset.defaultPlatform] || "Chat",
+          error.message || "No se pudo guardar el monto máximo de retiro.",
+          "error"
+        );
+      } finally {
+        if (root.contains(modal)) withdrawalLimitInput.disabled = false;
+      }
+    });
+    void loadSportBetsSetting();
 
     const renderMovements = () => {
       const selectedPlatform = platformSelect.value;
@@ -4736,6 +6369,11 @@
     exchangeButton.setAttribute("aria-label", "Intercambiar fichas entre plataformas");
     exchangeButton.hidden = true;
     exchangeButton.addEventListener("click", () => openExchangeDialog(host));
+    const withdrawalLimitIndicator = document.createElement("span");
+    withdrawalLimitIndicator.className = "withdrawal-limit-inline";
+    withdrawalLimitIndicator.textContent = "-";
+    withdrawalLimitIndicator.title = "Cargando monto máximo de retiro";
+    withdrawalLimitIndicator.hidden = true;
     const status = document.createElement("div");
     status.className = "status";
     status.setAttribute("aria-live", "polite");
@@ -4756,7 +6394,15 @@
     const sportBetsLabel = document.createElement("span");
     sportBetsLabel.className = "sport-bets-label";
     sportBetsLabel.hidden = true;
-    balanceContent.append(balanceLine, sportBetsLabel);
+    const bonusDisabledLabel = document.createElement("span");
+    bonusDisabledLabel.className = "sport-bets-label bonus-disabled-label";
+    bonusDisabledLabel.textContent = "Bonos Desactivados";
+    bonusDisabledLabel.hidden = true;
+    const accumulatesBonusesLabel = document.createElement("span");
+    accumulatesBonusesLabel.className = "sport-bets-label accumulates-bonuses-label";
+    accumulatesBonusesLabel.textContent = "Acumula Bonos";
+    accumulatesBonusesLabel.hidden = true;
+    balanceContent.append(balanceLine, sportBetsLabel, bonusDisabledLabel, accumulatesBonusesLabel);
     status.append(balanceContent);
     const actions = document.createElement("div");
     actions.className = "actions";
@@ -4899,6 +6545,7 @@
     panel.append(
       informationButton,
       exchangeButton,
+      withdrawalLimitIndicator,
       passwordResetButton,
       actions,
       status,
@@ -4925,14 +6572,6 @@
     }
     const sportBetsAccounts = accountsToFetch.filter(([platform]) =>
       platform === "ganamos" || platform === "multipanel");
-    host.sportBetsStates ||= {};
-    for (const [platform] of sportBetsAccounts) {
-      host.sportBetsStates[platform] = {
-        ...host.sportBetsStates[platform],
-        loading: true
-      };
-    }
-    if (sportBetsAccounts.length) renderSportBetsCount(host);
     renderBalanceRows(host, accounts);
 
     const balanceRequests = accountsToFetch.map(async ([platform, username]) => {
@@ -4956,7 +6595,35 @@
       }
     });
     const sportBetsRequest = sportBetsAccounts.length
-      ? refreshSportBetsCounts(host, sportBetsAccounts, requestAccountsKey, accounts)
+      ? (async () => {
+        const preferenceId = getSportBetsPreferenceId(host);
+        let disabled = false;
+        try {
+          disabled = await readSportBetsDisabled(preferenceId);
+        } catch (error) {
+          console.error(
+            "[Ganamos balance extension] No se pudo cargar la configuración de apuestas deportivas.",
+            error
+          );
+        }
+        if (host.dataset.accounts !== requestAccountsKey || activeAccountsKey !== requestAccountsKey) return;
+        host.sportBetsDisabled = disabled;
+        host.sportBetsStates ||= {};
+        if (disabled) {
+          host.sportBetsStates = {};
+          renderSportBetsCount(host);
+          renderBalanceRows(host, accounts);
+          return;
+        }
+        for (const [platform] of sportBetsAccounts) {
+          host.sportBetsStates[platform] = {
+            ...host.sportBetsStates[platform],
+            loading: true
+          };
+        }
+        renderSportBetsCount(host);
+        await refreshSportBetsCounts(host, sportBetsAccounts, requestAccountsKey, accounts);
+      })()
       : Promise.resolve();
     await Promise.all([...balanceRequests, sportBetsRequest]);
   }
@@ -4965,7 +6632,8 @@
     const isCurrentRequest = () =>
       document.getElementById(HOST_ID) === host &&
       host.dataset.accounts === requestAccountsKey &&
-      activeAccountsKey === requestAccountsKey;
+      activeAccountsKey === requestAccountsKey &&
+      host.sportBetsDisabled !== true;
     await Promise.all(accountsToFetch.map(async ([platform, username]) => {
       const toastKey = `sport-bets:${requestAccountsKey}:${platform}`;
       const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
@@ -5470,6 +7138,7 @@
           : "multipanel";
     let activeBonusConfig = null;
     let activeBonusConfigLoadFailed = false;
+    let bonusDisabled = host.dataset.bonusDisabled === "true";
     if (operation === "deposit") {
       try {
         activeBonusConfig = await readActiveBonusConfig();
@@ -5479,10 +7148,22 @@
         showToast(host, getPlatformUsername(selectedPlatform), "No se pudo cargar el bono activo para este depósito.", "error");
       }
     }
+    if (operation === "deposit" && !advertisingDeposit) {
+      try {
+        bonusDisabled = await readUserBonusDisabled(getSportBetsPreferenceId(host));
+        if (host.dataset.accounts !== openedAccountsKey) return;
+        updateUserBonusDisabledPresentation(host, bonusDisabled);
+      } catch (error) {
+        console.error(
+          "[Ganamos balance extension] No se pudo cargar la configuración de bono por usuario.",
+          error
+        );
+      }
+    }
     if (advertisingDeposit && activeBonusConfigLoadFailed) return;
-    if (operation === "deposit" && depositButtonRole) {
-      skipAutomaticBonus = Boolean(activeBonusConfig?.invertDepositButtons) ===
-        (depositButtonRole === "main");
+    if (operation === "deposit" && !advertisingDeposit && depositButtonRole) {
+      skipAutomaticBonus = bonusDisabled ||
+        Boolean(activeBonusConfig?.invertDepositButtons) === (depositButtonRole === "main");
     }
     if (advertisingDeposit &&
       (!activeBonusConfig?.activeAdvertising ||
@@ -5505,6 +7186,9 @@
     const modal = document.createElement("div");
     modal.className = "modal";
     if (advertisingDeposit) modal.dataset.advertisingDeposit = "true";
+    if (operation === "deposit" && bonusDisabled && !advertisingDeposit) {
+      modal.dataset.bonusDisabled = "true";
+    }
     registerModalEscapeHandler(modal, () => {
       root.replaceChildren();
     });
@@ -6036,6 +7720,30 @@
         }
       }
 
+      if (operation === "withdrawal") {
+        const username = getPlatformUsername(selectedPlatform);
+        confirm.disabled = true;
+        try {
+          const maximumWithdrawal = await readUserWithdrawalLimit(
+            getSportBetsPreferenceId(host)
+          );
+          if (host.dataset.accounts !== openedAccountsKey) return;
+          if (numericAmount > maximumWithdrawal && !window.confirm(
+            `${username}: el retiro de $${formatCurrency(numericAmount)} supera el máximo configurado de $${formatCurrency(maximumWithdrawal)}. ¿Querés continuar igualmente?`
+          )) return;
+        } catch (error) {
+          showToast(
+            host,
+            username,
+            error.message || "No se pudo consultar el monto máximo de retiro.",
+            "error"
+          );
+          return;
+        } finally {
+          confirm.disabled = false;
+        }
+      }
+
       const bonus = bonusInput?.value && (numericInputValue(bonusInput) || 0) > 0
         ? { enabled: true, mode: "value", value: numericInputString(bonusInput) }
         : null;
@@ -6045,6 +7753,18 @@
       if (host.dataset.accounts !== openedAccountsKey || !username) {
         showToast(host, username || "Chat", "El chat cambió; cerrá este formulario y volvé a iniciar la operación.", "error");
         return;
+      }
+      const bonusValue = bonus?.enabled ? Number(bonus.value) : 0;
+      if (operation === "deposit" && bonusDisabled && !advertisingDeposit && bonusValue > 0) {
+        confirm.disabled = true;
+        const shouldContinue = await confirmDisabledBonusDeposit(
+          root,
+          username,
+          numericAmount,
+          bonusValue
+        );
+        confirm.disabled = false;
+        if (!shouldContinue || host.dataset.accounts !== openedAccountsKey) return;
       }
       confirm.disabled = true;
       showToast(host, username, "Enviando solicitud...", "warning");
@@ -6056,7 +7776,6 @@
         });
         if (!response?.ok) throw new Error(response?.error || "La API no confirmó la operación.");
         const amountValue = numericAmount;
-        const bonusValue = bonus?.enabled ? Number(bonus.value) : 0;
         let bonusClipboardWriteFailed = false;
         if (operation === "deposit" && activeBonusConfig?.copyBonus === true && bonusValue > 0) {
           try {
@@ -6586,7 +8305,7 @@
 
     const isCurrentContact = () =>
       document.getElementById(HOST_ID) === host && host.dataset.accounts === accountsKey;
-    const appendSearchResult = (name, result, requestError = null, destinationId = null) => {
+    const appendSearchResult = async (name, result, requestError = null, destinationId = null) => {
       if (requestError) {
         console.error(`[Ganamos balance extension] No se pudieron buscar usuarios en ${name}.`, requestError);
         showToast(host, name, String(requestError), "error", `user-search:${name}:${digits}`);
@@ -6621,6 +8340,36 @@
         }
       }
 
+      const blockedSettingKeys = [...new Set(namesByPlatform.map(({ username, platform }) =>
+        getUserAccountSettingKey("userBlocked", {
+          platform,
+          username: username.toLowerCase()
+        })))];
+      if (blockedSettingKeys.length) {
+        try {
+          const storedBlockedSettings = await stateStorage.get(blockedSettingKeys);
+          if (!isCurrentContact()) return;
+          for (const key of blockedSettingKeys) {
+            loadedBlockedUserAccountSettings.add(key);
+            if (storedBlockedSettings[key] === true) blockedUserAccountSettings.add(key);
+            else blockedUserAccountSettings.delete(key);
+          }
+          dismissToast(`user-search-blocked:${name}:${digits}`);
+        } catch (error) {
+          console.error(
+            `[Ganamos balance extension] No se pudo cargar la marca Bloqueado de los usuarios encontrados en ${name}.`,
+            error
+          );
+          showToast(
+            host,
+            name,
+            "No se pudo consultar la configuración Bloqueado de los usuarios encontrados.",
+            "error",
+            `user-search-blocked:${name}:${digits}`
+          );
+        }
+      }
+      if (!isCurrentContact()) return;
       if (namesByPlatform.length) {
         const row = document.createElement("div");
         row.className = "contact-user-search-row";
@@ -6651,6 +8400,7 @@
           row.append(usernameLabel);
         });
         resultsContainer.append(row);
+        updateContactUserSearchBlockedIndicators(resultsContainer);
       }
 
       for (const [platform, message] of Object.entries(result?.errors || {})) {
@@ -6697,7 +8447,7 @@
         }));
         if (!isCurrentContact()) return;
         for (const { destination, result, error } of results) {
-          appendSearchResult(destination.name, result, error, destination.id);
+          await appendSearchResult(destination.name, result, error, destination.id);
         }
       } else {
         const response = await chrome.runtime.sendMessage({
@@ -6707,7 +8457,7 @@
         if (!isCurrentContact()) return;
         if (!response?.ok) throw new Error(response?.error || "La búsqueda en esta PC no se completó.");
         dismissToast(`user-search:local:${digits}`);
-        appendSearchResult("Esta PC", response);
+        await appendSearchResult("Esta PC", response);
       }
     } catch (error) {
       if (!isCurrentContact()) return;
@@ -6741,6 +8491,7 @@
     }
 
     const title = findContactTitle();
+    const hasUnblockButton = Boolean(findUnblockButton());
     const isNormalChat = isNormalChatOpen(title);
     const contactTitle = title?.textContent || "";
     const usernames = isNormalChat ? findPlatformUsernames(contactTitle) : null;
@@ -6793,6 +8544,58 @@
     host.dataset.multipanelUsername = usernames?.multipanel || "";
     host.dataset.defaultPlatform = usernames?.firstPlatform || (usernames?.ganamos ? "ganamos" : "multipanel");
     host.dataset.contactPhone = phone || "";
+    host.dataset.withdrawalLimit = "";
+    host.dataset.relatedContacts = "";
+    const userPreferenceId = getSportBetsPreferenceId(host);
+    updateRelatedContactsIndicator(title);
+    host.dataset.bonusDisabled = "false";
+    host.dataset.accumulatesBonuses = "false";
+    const bonusDisabledLabel = host.shadowRoot.querySelector(".bonus-disabled-label");
+    if (bonusDisabledLabel) bonusDisabledLabel.hidden = true;
+    const accumulatesBonusesLabel = host.shadowRoot.querySelector(".accumulates-bonuses-label");
+    if (accumulatesBonusesLabel) accumulatesBonusesLabel.hidden = true;
+    void readUserBonusDisabled(userPreferenceId)
+      .then((disabled) => {
+        if (host.dataset.accounts === accountsKey && activeAccountsKey === accountsKey) {
+          updateUserBonusDisabledPresentation(host, disabled);
+        }
+      })
+      .catch((error) => console.error(
+        "[Ganamos balance extension] No se pudo cargar la configuración de bono por usuario.",
+        error
+      ));
+    void readUserAccumulatesBonuses(userPreferenceId)
+      .then((enabled) => {
+        if (host.dataset.accounts === accountsKey && activeAccountsKey === accountsKey) {
+          updateUserAccumulatesBonusesPresentation(host, enabled);
+        }
+      })
+      .catch((error) => console.error(
+        "[Ganamos balance extension] No se pudo cargar la configuración Acumula bonos.",
+        error
+      ));
+    void readUserRelatedContacts(userPreferenceId)
+      .then((relatedContacts) => {
+        if (host.dataset.accounts === accountsKey && activeAccountsKey === accountsKey) {
+          host.dataset.relatedContacts = relatedContacts;
+          updateRelatedContactsIndicator(findContactTitle());
+        }
+      })
+      .catch((error) => console.error(
+        "[Ganamos balance extension] No se pudieron cargar los contactos relacionados.",
+        error
+      ));
+    void readUserWithdrawalLimit(userPreferenceId)
+      .then((limit) => {
+        if (host.dataset.accounts === accountsKey && activeAccountsKey === accountsKey) {
+          host.dataset.withdrawalLimit = String(limit);
+          updateWithdrawalLimitIndicator(findContactTitle());
+        }
+      })
+      .catch((error) => console.error(
+        "[Ganamos balance extension] No se pudo cargar el monto máximo de retiro.",
+        error
+      ));
     const hasPlatformUsers = Boolean(usernames?.ganamos || usernames?.multipanel);
     host.passwordResetCandidates = [];
     updateDepositBonusBypassVisibility(
@@ -6803,9 +8606,11 @@
     const contactUserSearch = host.shadowRoot.querySelector(".contact-user-search");
     contactUserSearch.hidden = true;
     contactUserSearch.querySelector(".contact-user-search-results").replaceChildren();
-    host.shadowRoot.querySelector(".user-information-button").hidden = !hasPlatformUsers;
+    host.shadowRoot.querySelector(".user-information-button").hidden =
+      !hasPlatformUsers && !hasUnblockButton;
     host.shadowRoot.querySelector(".exchange-button").hidden =
       !usernames?.ganamos || !usernames?.multipanel;
+    updateWithdrawalLimitIndicator();
     const missingPlatform = usernames?.ganamos && !usernames?.multipanel
       ? "multipanel"
       : usernames?.multipanel && !usernames?.ganamos
@@ -6891,6 +8696,8 @@
     requestAnimationFrame(() => {
       scheduled = false;
       updateContact();
+      scheduleContactTagScan();
+      renderPendingWithdrawals();
     });
   }
 
@@ -6928,12 +8735,18 @@
   const observer = new MutationObserver((mutations) => {
     if (mutations.every(({ target }) =>
       target.id === HOST_ID || target.id === AGENT_BALANCE_HOST_ID ||
-      target.id === CONTACT_FLOW_COUNTER_HOST_ID)) return;
+      target.id === CONTACT_FLOW_COUNTER_HOST_ID ||
+      target.id === PENDING_WITHDRAWALS_HOST_ID)) return;
+    if (mutations.some(({ target, addedNodes, removedNodes }) =>
+      nodeTouchesSidebar(target) ||
+      [...addedNodes, ...removedNodes].some(nodeTouchesSidebar))) {
+      scheduleContactTagScan();
+    }
     scheduleUpdate();
   });
   observer.observe(document.documentElement, {
     attributes: true,
-    attributeFilter: ["aria-hidden", "aria-label", "class", "hidden", "style"],
+    attributeFilter: ["aria-hidden", "aria-label", "aria-selected", "class", "data-id", "hidden", "style", "title"],
     childList: true,
     subtree: true,
     characterData: true
@@ -6957,9 +8770,11 @@
   });
   createActiveBonusHost();
   createContactFlowCounterPanel();
+  createPendingWithdrawalsPanel();
   const agentBalanceHost = createAgentBalancePanel();
   void refreshAgentBalance(agentBalanceHost);
   void refreshMultiPanelAgentBalance(agentBalanceHost);
+  void loadContactVisualTags();
   window.setInterval(() => {
     void refreshAgentBalance(agentBalanceHost);
     void refreshMultiPanelAgentBalance(agentBalanceHost);

@@ -32,7 +32,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["styles/whatsapp.css"],
+      "resources": ["styles/whatsapp.css", "styles/contact-tags.css"],
       "matches": ["https://web.whatsapp.com/*"]
     }
   ]

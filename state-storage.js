@@ -16,7 +16,7 @@
         .catch((error) => {
           console.error("[Ganamos balance extension] No se pudo sincronizar el estado PostgreSQL.", error);
         });
-    }, 10_000);
+    }, 5_000);
   }
 
   function send(type, data = {}) {

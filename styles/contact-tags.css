@@ -1,0 +1,62 @@
+#pane-side [data-testid="cell-frame-container"][data-extension-contact-tag~="high-depositor"],
+#pane-side [role="listitem"][data-extension-contact-tag~="high-depositor"] {
+  background-color: rgb(76 111 86 / 24%) !important;
+}
+
+#pane-side [data-testid="cell-frame-container"][data-extension-contact-tag~="scammer"],
+#pane-side [role="listitem"][data-extension-contact-tag~="scammer"] {
+  background-color: rgb(133 75 75 / 24%) !important;
+}
+
+#pane-side [data-testid="cell-frame-container"][data-extension-contact-tag~="high-depositor-and-scammer"],
+#pane-side [role="listitem"][data-extension-contact-tag~="high-depositor-and-scammer"] {
+  background-image: linear-gradient(
+    90deg,
+    rgb(55 135 75 / 30%) 0%,
+    rgb(155 68 68 / 30%) 100%
+  ) !important;
+}
+
+#pane-side [data-testid="cell-frame-container"][data-extension-contact-tag~="blocked"],
+#pane-side [role="row"][data-extension-contact-tag~="blocked"],
+#pane-side [role="listitem"][data-extension-contact-tag~="blocked"] {
+  border: 2px solid #ff4d4f !important;
+  border-radius: 8px !important;
+  box-sizing: border-box !important;
+}
+
+#pane-side [data-testid="cell-frame-container"][data-extension-user-blocked="true"] {
+  border: 2px solid #ff4d4f !important;
+  border-radius: 8px !important;
+  box-sizing: border-box !important;
+}
+
+#pane-side [data-extension-contact-tag~="high-depositor"]:hover,
+#pane-side [data-extension-contact-tag~="high-depositor"][data-extension-contact-active="true"],
+#pane-side [data-extension-contact-tag~="high-depositor"]:is([aria-selected="true"], [aria-current="true"], .selected) {
+  background-color: rgb(83 119 93 / 36%) !important;
+}
+
+#pane-side [aria-selected="true"] [data-testid="cell-frame-container"][data-extension-contact-tag~="high-depositor"] {
+  background-color: rgb(83 119 93 / 36%) !important;
+}
+
+#pane-side [data-extension-contact-tag~="scammer"]:hover,
+#pane-side [data-extension-contact-tag~="scammer"][data-extension-contact-active="true"],
+#pane-side [data-extension-contact-tag~="scammer"]:is([aria-selected="true"], [aria-current="true"], .selected) {
+  background-color: rgb(144 81 81 / 36%) !important;
+}
+
+#pane-side [aria-selected="true"] [data-testid="cell-frame-container"][data-extension-contact-tag~="scammer"] {
+  background-color: rgb(144 81 81 / 36%) !important;
+}
+
+#pane-side [data-extension-contact-tag~="high-depositor-and-scammer"]:hover,
+#pane-side [data-extension-contact-tag~="high-depositor-and-scammer"][data-extension-contact-active="true"],
+#pane-side [aria-selected="true"] [data-testid="cell-frame-container"][data-extension-contact-tag~="high-depositor-and-scammer"] {
+  background-image: linear-gradient(
+    90deg,
+    rgb(58 153 79 / 44%) 0%,
+    rgb(173 73 73 / 44%) 100%
+  ) !important;
+}

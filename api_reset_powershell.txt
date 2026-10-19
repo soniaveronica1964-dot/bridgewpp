@@ -1,2 +1,0 @@
-Set-Location 'C:\Users\Operador\Documents\Programación\Cajas\Extension'
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\data-api\update-windows-api.ps1

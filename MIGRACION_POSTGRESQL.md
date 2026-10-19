@@ -662,6 +662,14 @@ originales durante la importación. La configuración compartida usa una entidad
 equivalente con clave `(workspace_id, setting_key)` y control de revisión; no
 guardar ajustes compartidos en esta tabla de perfil.
 
+La configuración del usuario se comparte dentro del workspace. Las marcas
+visuales (`contactVisualTags`) se asocian a cada alias reconocido, conservando
+las identidades compuestas anteriores para compatibilidad. Las preferencias de
+apuestas deportivas, bonos, estado Bloqueado, límite de retiro y contactos
+relacionados usan claves de estado compartido por plataforma y alias. Al leer
+estas preferencias, se consultan también las claves heredadas de los perfiles
+para migrarlas al identificador de usuario cuando se encuentren.
+
 ```sql
 CREATE TABLE workspace_settings (
   workspace_id UUID NOT NULL REFERENCES workspaces(workspace_id),

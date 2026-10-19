@@ -1,0 +1,4 @@
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList @('-NoExit','-NoProfile','-ExecutionPolicy','Bypass','-Command', '$config = Get-Content -LiteralPath (Join-Path $env:LOCALAPPDATA ''BridgeWppDataApi\api-config.json'') -Raw | ConvertFrom-Json; $vars = @{ PGHOST = $config.DbHost; PGPORT = $config.DbPort; PGDATABASE = $config.DbName; PGUSER = $config.DbUser; PGPASSWORD = $config.DbPassword; DATA_WORKSPACE_ID = $config.WorkspaceId; DATA_INITIAL_DEVICE_NAME = ''Publi''; DATA_ENROLLMENT_ADMIN = ''false'' }; foreach ($name in $vars.Keys) { [Environment]::SetEnvironmentVariable($name, [string]$vars[$name], ''Process'') }; try { & node.exe (Join-Path $config.Repo ''data-api\admin.js'') enroll; if ($LASTEXITCODE -ne 0) { throw ""Falló la generación del código (código de salida $LASTEXITCODE)."" } } catch { Write-Host $_ -ForegroundColor Red }; Read-Host ''Presioná Enter para cerrar''')"
+
+pause

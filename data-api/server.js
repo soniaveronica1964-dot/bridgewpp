@@ -239,8 +239,9 @@ function buildReport(payload) {
       "bridgeRole", "bridgeToken", "ganamosUserId", "ganamosSuffix",
       "multiPanelSuffix", "userCreationPassword", "remoteCreateDestinations",
       "multiPanelSession", "activeBonusConfig", "hiddenAdvertisingProfiles", "contactFlowCounters",
+      "contactVisualTags",
       "agentBalanceView", "agentBalancesMinimized", "platformOutageConfig"
-    ].includes(entry.key)) {
+    ].includes(entry.key) && !isUserAccountSettingKey(entry.key)) {
       unknownKeyCount++;
     }
   }
@@ -259,7 +260,7 @@ async function buildConflictPreview(pool, identity, payload, encryptionKey) {
   const movementEntries = payload.entries.filter(({ key }) => key.startsWith("agentMovement:"));
   const legacyEntries = payload.entries.filter(({ key }) =>
     !PROFILE_SETTING_KEYS.has(key) && !PROFILE_SECRET_KEYS.has(key) &&
-    !SHARED_KEYS.has(key) &&
+    !SHARED_KEYS.has(key) && !isUserAccountSettingKey(key) &&
     !key.startsWith("agentMovement:")
   );
   const [settings, secrets, movements, legacy, shared] = await Promise.all([
@@ -365,7 +366,17 @@ const PROFILE_SECRET_KEYS = new Set([
   "multiPanelSession",
   "remoteCreateDestinations"
 ]);
-const SHARED_KEYS = new Set(["contactFlowCounters"]);
+const CONTACT_VISUAL_TAGS_STATE_KEY = "contactVisualTags";
+const USER_ACCOUNT_SETTING_PREFIX = "userSetting:";
+const USER_ACCOUNT_SETTINGS = new Set([
+  "sportBetsDisabled",
+  "userBonusDisabled",
+  "userAccumulatesBonuses",
+  "userBlocked",
+  "userWithdrawalLimit",
+  "userRelatedContacts"
+]);
+const SHARED_KEYS = new Set(["contactFlowCounters", CONTACT_VISUAL_TAGS_STATE_KEY]);
 const PUBLIC_STATE_KEYS = new Set([
   ...PROFILE_SETTING_KEYS,
   "contactFlowCounters",
@@ -383,9 +394,58 @@ const CONTACT_COUNTER_KEYS = new Set([
   "resetOperations"
 ]);
 
+function parseUserAccountSettingKey(key) {
+  if (typeof key !== "string" || !key.startsWith(USER_ACCOUNT_SETTING_PREFIX)) return null;
+  const match = key.match(/^userSetting:([^:]+):(ganamos|multipanel):(.+)$/);
+  if (!match || !USER_ACCOUNT_SETTINGS.has(match[1])) return null;
+  let username;
+  try {
+    username = decodeURIComponent(match[3]);
+  } catch {
+    return null;
+  }
+  if (!username || username.length > 128 || username !== username.toLowerCase() ||
+    /[\u0000-\u001f\u007f]/.test(username) ||
+    encodeURIComponent(username) !== match[3]) return null;
+  return { setting: match[1], platform: match[2], username };
+}
+
+function isUserAccountSettingKey(key) {
+  return parseUserAccountSettingKey(key) !== null;
+}
+
+function validateUserAccountSettingValue(key, value) {
+  const parsed = parseUserAccountSettingKey(key);
+  if (!parsed) return false;
+  if (["sportBetsDisabled", "userBonusDisabled", "userAccumulatesBonuses", "userBlocked"]
+    .includes(parsed.setting)) {
+    return typeof value === "boolean";
+  }
+  if (parsed.setting === "userWithdrawalLimit") {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  }
+  return parsed.setting === "userRelatedContacts" &&
+    typeof value === "string" && value.length <= 1200;
+}
+
 function stateScope(key) {
-  if (SHARED_KEYS.has(key)) return "workspace";
+  if (SHARED_KEYS.has(key) || isUserAccountSettingKey(key)) return "workspace";
   return "profile";
+}
+
+function mergeContactVisualTagSnapshots(...snapshots) {
+  const merged = {};
+  for (const snapshot of snapshots) {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) continue;
+    for (const [identity, tags] of Object.entries(snapshot)) {
+      if (!identity || !tags || typeof tags !== "object" || Array.isArray(tags)) continue;
+      const current = merged[identity] || {};
+      if (tags.highDepositor === true) current.highDepositor = true;
+      if (tags.scammer === true) current.scammer = true;
+      if (current.highDepositor || current.scammer) merged[identity] = current;
+    }
+  }
+  return merged;
 }
 
 function isStateSecret(key, value) {
@@ -531,7 +591,7 @@ async function readContactFlowCounterSnapshot(pool, workspaceId, fallbackValue) 
 async function readExtensionState(pool, config, identity, keys) {
   const workspaceKeys = keys === null
     ? [...SHARED_KEYS]
-    : keys.filter((key) => SHARED_KEYS.has(key));
+    : keys.filter((key) => stateScope(key) === "workspace");
   const [profileValues, workspaceValues, movements] = await Promise.all([
     pool.query(`
       SELECT storage_key, value_json, value_ciphertext
@@ -544,8 +604,9 @@ async function readExtensionState(pool, config, identity, keys) {
           SELECT storage_key, value_json, value_ciphertext
           FROM extension_state_values
           WHERE scope_type = 'workspace' AND scope_id = $1
-            AND storage_key = ANY($2::text[])
-        `, [identity.workspace_id, workspaceKeys])
+            AND (storage_key = ANY($2::text[]) OR
+              ($3::boolean AND storage_key LIKE 'userSetting:%'))
+        `, [identity.workspace_id, workspaceKeys, keys === null])
       : { rows: [] },
     keys === null || keys.some((key) => key.startsWith("agentMovement:"))
       ? pool.query(`
@@ -563,6 +624,31 @@ async function readExtensionState(pool, config, identity, keys) {
       ? JSON.parse(decryptValue(row.value_ciphertext, config.encryptionKey))
       : row.value_json;
   }
+  const legacyUserPreferenceKeys = keys?.filter((key) =>
+    /^(?:sportBetsDisabledUsers|userBonusDisabled|userAccumulatesBonuses|userWithdrawalLimit|userRelatedContacts):/.test(key)
+  ) || [];
+  if (legacyUserPreferenceKeys.length) {
+    const legacyValues = await pool.query(`
+      SELECT state.storage_key, state.value_json, state.value_ciphertext, state.updated_at_ms
+      FROM extension_state_values AS state
+      JOIN extension_profiles AS profiles ON profiles.profile_id = state.scope_id
+      WHERE profiles.workspace_id = $1 AND state.scope_type = 'profile'
+        AND state.storage_key = ANY($2::text[])
+      UNION ALL
+      SELECT legacy.storage_key, NULL::jsonb AS value_json,
+             legacy.value_ciphertext, legacy.imported_at_ms AS updated_at_ms
+      FROM legacy_extension_values AS legacy
+      JOIN extension_profiles AS profiles ON profiles.profile_id = legacy.profile_id
+      WHERE profiles.workspace_id = $1 AND legacy.storage_key = ANY($2::text[])
+      ORDER BY updated_at_ms DESC
+    `, [identity.workspace_id, legacyUserPreferenceKeys]);
+    for (const row of legacyValues.rows) {
+      if (Object.hasOwn(values, row.storage_key)) continue;
+      values[row.storage_key] = row.value_ciphertext
+        ? JSON.parse(decryptValue(row.value_ciphertext, config.encryptionKey))
+        : row.value_json;
+    }
+  }
   for (const row of movements.rows) values[row.legacy_storage_key] = row.legacy_record_json;
   if (workspaceKeys.includes("contactFlowCounters")) {
     const counters = await readContactFlowCounterSnapshot(
@@ -572,8 +658,34 @@ async function readExtensionState(pool, config, identity, keys) {
     );
     if (counters !== undefined) values.contactFlowCounters = counters;
   }
+  if (workspaceKeys.includes(CONTACT_VISUAL_TAGS_STATE_KEY) &&
+    !workspaceValues.rows.some(({ storage_key: key }) =>
+      key === CONTACT_VISUAL_TAGS_STATE_KEY)) {
+    const legacyTags = await pool.query(`
+      SELECT legacy.value_ciphertext, NULL::jsonb AS value_json
+      FROM legacy_extension_values AS legacy
+      JOIN extension_profiles AS profiles ON profiles.profile_id = legacy.profile_id
+      WHERE profiles.workspace_id = $1 AND legacy.storage_key = $2
+      UNION ALL
+      SELECT state.value_ciphertext, state.value_json
+      FROM extension_state_values AS state
+      JOIN extension_profiles AS profiles ON profiles.profile_id = state.scope_id
+      WHERE profiles.workspace_id = $1 AND state.scope_type = 'profile'
+        AND state.storage_key = $2
+    `, [identity.workspace_id, CONTACT_VISUAL_TAGS_STATE_KEY]);
+    if (legacyTags.rowCount) {
+      values[CONTACT_VISUAL_TAGS_STATE_KEY] = mergeContactVisualTagSnapshots(
+        values[CONTACT_VISUAL_TAGS_STATE_KEY],
+        ...legacyTags.rows.map(({ value_ciphertext, value_json }) =>
+          value_ciphertext
+            ? JSON.parse(decryptValue(value_ciphertext, config.encryptionKey))
+            : value_json)
+      );
+    }
+  }
   if (keys === null || keys.some((key) => !PROFILE_SETTING_KEYS.has(key) &&
     !PROFILE_SECRET_KEYS.has(key) && !SHARED_KEYS.has(key) &&
+    !isUserAccountSettingKey(key) &&
     !key.startsWith("agentMovement:"))) {
     const legacy = await pool.query(`
       SELECT storage_key, value_ciphertext FROM legacy_extension_values
@@ -661,6 +773,13 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
     new Set([...keys, ...removes]).size !== keys.length + removes.length) {
     throw new ApiError(400, "invalid_state", "Las claves del estado están vacías, repetidas o superan el límite.");
   }
+  if ([...keys, ...removes].some((key) =>
+    key.startsWith(USER_ACCOUNT_SETTING_PREFIX) && !isUserAccountSettingKey(key)) ||
+    Object.entries(changes).some(([key, value]) =>
+      key.startsWith(USER_ACCOUNT_SETTING_PREFIX) &&
+      !validateUserAccountSettingValue(key, value))) {
+    throw new ApiError(400, "invalid_state", "Una configuración de usuario compartida no es válida.");
+  }
   const hiddenAdvertisingProfiles = changes.hiddenAdvertisingProfiles;
   if (Object.hasOwn(changes, "hiddenAdvertisingProfiles") &&
     (!Array.isArray(hiddenAdvertisingProfiles) || hiddenAdvertisingProfiles.length > 1000 ||
@@ -699,27 +818,32 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
       const isStaleCounterSnapshot = Number.isSafeInteger(expectedRevision) &&
         expectedRevision >= 0 && expectedRevision < revision &&
         keys.length === 1 && keys[0] === "contactFlowCounters" && removes.length === 0;
-      if (!isStaleCounterSnapshot) {
+      const isStaleUserSettingWrite = Number.isSafeInteger(expectedRevision) &&
+        expectedRevision >= 0 && expectedRevision < revision &&
+        keys.length > 0 && keys.every(isUserAccountSettingKey) && removes.length === 0;
+      if (!isStaleCounterSnapshot && !isStaleUserSettingWrite) {
         throw new ApiError(409, "state_revision_conflict", "El estado compartido cambió; recargá y revisá antes de volver a guardar.");
       }
-      const storedCounters = await client.query(`
-        SELECT value_json, value_ciphertext
-        FROM extension_state_values
-        WHERE scope_type = 'workspace' AND scope_id = $1
-          AND storage_key = 'contactFlowCounters'
-        FOR UPDATE
-      `, [identity.workspace_id]);
-      if (storedCounters.rows[0]) {
-        const currentValue = storedCounters.rows[0].value_ciphertext
-          ? JSON.parse(decryptValue(storedCounters.rows[0].value_ciphertext, config.encryptionKey))
-          : storedCounters.rows[0].value_json;
-        changes = {
-          ...changes,
-          contactFlowCounters: mergeContactFlowCounterSnapshots(
-            currentValue,
-            changes.contactFlowCounters
-          )
-        };
+      if (isStaleCounterSnapshot) {
+        const storedCounters = await client.query(`
+          SELECT value_json, value_ciphertext
+          FROM extension_state_values
+          WHERE scope_type = 'workspace' AND scope_id = $1
+            AND storage_key = 'contactFlowCounters'
+          FOR UPDATE
+        `, [identity.workspace_id]);
+        if (storedCounters.rows[0]) {
+          const currentValue = storedCounters.rows[0].value_ciphertext
+            ? JSON.parse(decryptValue(storedCounters.rows[0].value_ciphertext, config.encryptionKey))
+            : storedCounters.rows[0].value_json;
+          changes = {
+            ...changes,
+            contactFlowCounters: mergeContactFlowCounterSnapshots(
+              currentValue,
+              changes.contactFlowCounters
+            )
+          };
+        }
       }
     }
     const timestamp = Date.now();
@@ -1673,6 +1797,12 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
     }
 
     const entries = new Map(payload.entries.map(({ key, value }) => [key, value]));
+    for (const [key, value] of entries) {
+      if (key.startsWith(USER_ACCOUNT_SETTING_PREFIX) &&
+        !validateUserAccountSettingValue(key, value)) {
+        throw new ApiError(409, "invalid_user_setting", "Una configuración de usuario del respaldo no es válida.");
+      }
+    }
     const now = Date.now();
     let settingCount = 0;
     let secretCount = 0;
@@ -1680,7 +1810,9 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
     let unknownCount = 0;
     for (const [key, value] of entries) {
       if (key.startsWith("agentMovement:") ||
-        SHARED_KEYS.has(key) && decision !== "initialize_shared") continue;
+        (SHARED_KEYS.has(key) || isUserAccountSettingKey(key)) &&
+          key !== CONTACT_VISUAL_TAGS_STATE_KEY &&
+          decision !== "initialize_shared") continue;
       const scope = stateScope(key);
       const scopeId = scope === "workspace" ? identity.workspace_id : identity.profile_id;
       const valueJson = canonicalJson(value);
@@ -1781,6 +1913,15 @@ async function commitMigration({ pool, config, identity, migrationId, decision }
           }
         }
         movementCount++;
+      } else if (key === CONTACT_VISUAL_TAGS_STATE_KEY) {
+        const encryptedTags = encryptValue(canonicalJson(value), config.encryptionKey);
+        await client.query(`
+          UPDATE extension_state_values
+          SET value_json = NULL, value_ciphertext = $3, updated_at_ms = $4
+          WHERE scope_type = 'workspace' AND scope_id = $1 AND storage_key = $2
+        `, [identity.workspace_id, key, encryptedTags, now]);
+      } else if (isUserAccountSettingKey(key)) {
+        if (decision !== "initialize_shared") continue;
       } else if (SHARED_KEYS.has(key)) {
         if (decision !== "initialize_shared") continue;
         const counters = validateCounterSnapshot(value);
@@ -3058,8 +3199,10 @@ module.exports = {
   createDeviceAssertionNonceCleanup,
   getMovementAccountIds,
   getServerConfig,
+  parseUserAccountSettingKey,
   mergeContactFlowCounterSnapshots,
   normalizeArgentinaPhone,
+  validateUserAccountSettingValue,
   validateCounterSnapshot,
   validateDestinations
 };

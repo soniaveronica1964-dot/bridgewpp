@@ -172,7 +172,7 @@
 
 .contact-flow-counter-empty {
   color: rgb(255 255 255 / 80%);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.25;
   text-align: center;
   overflow-wrap: anywhere;
@@ -512,6 +512,31 @@
   line-height: 1;
 }
 
+.withdrawal-limit-inline {
+  box-sizing: border-box;
+  position: absolute;
+  z-index: 1;
+  top: -31px;
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  min-height: 28px;
+  padding: 2px 6px 0;
+  border: 1px solid #3a7d64;
+  border-radius: 4px;
+  color: #ffffff;
+  background: rgb(0 0 0 / 80%);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.withdrawal-limit-inline[hidden] {
+  display: none !important;
+}
+
 .exchange-button:hover:not(:disabled) {
   border-color: #00a884;
   background: #263432;
@@ -658,7 +683,7 @@
 .active-bonus-button svg {
   width: 25px;
   height: 25px;
-  transform: translateX(2px);
+  transform: translateX(-1px);
   fill: none;
   stroke: var(--bonus-indicator-accent);
   stroke-linecap: round;
@@ -1472,20 +1497,124 @@
   line-height: 1.35;
 }
 
-.sport-bets-indicator {
+.accumulates-bonuses-label {
+  color: #79d8f2;
+}
+
+.contact-indicators {
   position: fixed;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  transform: translateY(-100%);
+  pointer-events: none;
+}
+
+.contact-indicators[hidden] {
+  display: none;
+}
+
+.sport-bets-indicator {
   display: block;
   box-sizing: border-box;
   width: 24px;
   height: 24px;
   font-size: 22px;
   line-height: 24px;
-  pointer-events: none;
   text-align: center;
 }
 
 .sport-bets-indicator[hidden] {
   display: none;
+}
+
+.related-contacts-indicator {
+  position: relative;
+  display: grid;
+  flex: 0 0 24px;
+  place-items: center;
+  box-sizing: border-box;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: #e7edef;
+  background: transparent;
+  font-size: 20px;
+  line-height: 24px;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.related-contacts-indicator__symbol {
+  display: block;
+  width: 24px;
+  height: 24px;
+  font-size: 20px;
+  line-height: 24px;
+  text-align: center;
+  transform: translateX(1px);
+}
+
+.related-contacts-popover {
+  position: absolute;
+  z-index: 2;
+  bottom: 0;
+  left: calc(100% + 7px);
+  display: none;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100px;
+  max-width: min(130px, calc(100vw - 64px));
+  max-height: min(40vh, 240px);
+  gap: 1px;
+  padding: 3px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid #40504e;
+  border-radius: 6px;
+  color: #e7edef;
+  background: rgb(13 20 20 / 96%);
+  box-shadow: 0 4px 14px #0009;
+  pointer-events: auto;
+}
+
+.related-contacts-indicator:hover .related-contacts-popover,
+.related-contacts-indicator:focus-within .related-contacts-popover {
+  display: grid;
+}
+
+.related-contact-copy {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 22px;
+  padding: 3px 5px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.related-contact-copy:hover:not(:disabled),
+.related-contact-copy:focus-visible {
+  background: #344546;
+}
+
+.related-contacts-indicator[hidden] {
+  display: none !important;
 }
 
 .contact-user-search {
@@ -1554,6 +1683,11 @@
   outline-offset: 1px;
 }
 
+.contact-user-search-name[data-blocked="true"]::before {
+  content: "🚨";
+  margin-right: 3px;
+}
+
 .contact-user-search-pc {
   color: #d3ddda;
 }
@@ -1568,7 +1702,7 @@
 
 .contact-user-search-error {
   color: #ffb19a;
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .balance-label {
@@ -2114,6 +2248,17 @@ button[data-action="deposit"]:hover:not(:disabled) {
   background: #303333;
 }
 
+button[data-action="deposit"][data-bonus-disabled="true"] {
+  border-color: #c49a32;
+  color: #f0c875;
+  background: #242626;
+}
+
+button[data-action="deposit"][data-bonus-disabled="true"]:hover:not(:disabled) {
+  border-color: #c49a32;
+  background: #303333;
+}
+
 button[data-action="withdrawal"] {
   color: #ff8a5c;
   background: #242626;
@@ -2356,9 +2501,62 @@ button:disabled {
   color: #ffdada;
 }
 
+.dialog[data-operation="bonus-disabled-confirmation"] {
+  border-color: #c49a32;
+}
+
+.dialog[data-operation="bonus-disabled-confirmation"] h2 {
+  color: #f0c875;
+}
+
+.dialog[data-operation="bonus-disabled-confirmation"] .dialog-actions {
+  border-top-color: #806e39;
+}
+
+.bonus-disabled-continue {
+  border-color: #a98220;
+  color: #ffffff;
+  background: #806318;
+}
+
+.bonus-disabled-continue:hover:not(:disabled) {
+  background: #a98220;
+}
+
+.dialog[data-operation="bonus-disabled-confirmation"] .dialog-actions button.secondary {
+  border-color: #806e39;
+  color: #f8e7b4;
+}
+
 .movement-history-dialog {
+  --bonus-accent: #e2e8e7;
+  --bonus-border: #899492;
+  --bonus-button: #53615f;
+  --bonus-button-hover: #687773;
   width: min(520px, 100%);
   border-color: #ffffff;
+}
+
+.movement-history-dialog[data-settings-active="true"] {
+  display: flex;
+  flex-direction: column;
+  height: auto;
+  max-height: calc(100vh - 32px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.movement-history-dialog[data-settings-active="true"] > .movement-history-heading,
+.movement-history-dialog[data-settings-active="true"] > .active-bonus-tabs {
+  flex: 0 0 auto;
+}
+
+.movement-history-dialog[data-settings-active="true"] .movement-history-settings-panel {
+  flex: 0 1 auto;
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .movement-history-heading,
@@ -2375,6 +2573,38 @@ button:disabled {
 
 .movement-history-heading h2 {
   margin: 0;
+}
+
+.movement-history-settings-heading {
+  margin: 0;
+  color: #d8e0de;
+  font-size: 13px;
+}
+
+.movement-history-settings-section {
+  display: grid;
+  gap: 7px;
+  padding: 9px 0;
+  border-bottom: 1px solid #344546;
+}
+
+.movement-history-settings-section:first-child {
+  padding-top: 0;
+}
+
+.movement-history-settings-section:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.movement-history-contact-tag-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.movement-history-contact-tag-options > .active-bonus-setting-toggle {
+  flex: 1 1 145px;
 }
 
 .movement-history-close {
@@ -2401,7 +2631,7 @@ button:disabled {
 }
 
 .movement-history-dialog select,
-.movement-history-dialog input {
+.movement-history-dialog input:not([type="checkbox"]) {
   display: block;
   width: 100%;
   min-width: 0;
@@ -2415,10 +2645,71 @@ button:disabled {
   font: inherit;
 }
 
-.movement-history-dialog select:focus,
-.movement-history-dialog input:focus {
+.movement-history-related-contacts {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 54px;
+  padding: 8px;
+  border: 1px solid #40504e;
+  border-radius: 6px;
+  color: #e7edef;
+  background: #182323;
+  font: inherit;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.movement-history-related-contacts:focus {
   border-color: #ffffff;
   outline: 2px solid #ffffff33;
+}
+
+.movement-history-dialog select:focus,
+.movement-history-dialog input:not([type="checkbox"]):focus {
+  border-color: #ffffff;
+  outline: 2px solid #ffffff33;
+}
+
+.movement-history-limit-entry > .movement-history-withdrawal-limit {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.movement-history-limit-entry .movement-history-withdrawal-limit input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 4px;
+  padding: 8px 11px 8px 29px;
+  border: 1px solid #167356;
+  border-radius: 7px;
+  color: #e7edef;
+  background: #1b2727;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.movement-history-limit-entry .movement-history-withdrawal-limit input:focus {
+  border-color: #29a875;
+  outline: none;
+  box-shadow: 0 0 0 2px #29a87533;
+}
+
+.movement-history-limit-entry .input-affix span {
+  color: #929f9f;
+}
+
+.withdrawal-limit-shortcuts {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.withdrawal-limit-shortcuts button {
+  padding: 0 3px;
+  font-size: 12px;
 }
 
 .movement-history-dates[hidden] {
@@ -2900,6 +3191,39 @@ input::placeholder {
 
 .dialog[data-operation="deposit"] .dialog-actions button[type="submit"]:hover:not(:disabled) {
   background: #1c8966;
+}
+
+.modal[data-bonus-disabled="true"] .dialog[data-operation="deposit"] {
+  border-color: #c49a32;
+}
+
+.modal[data-bonus-disabled="true"] .dialog[data-operation="deposit"] input {
+  border-color: #806e39;
+}
+
+.modal[data-bonus-disabled="true"] .dialog[data-operation="deposit"] input:focus {
+  border-color: #e0b841;
+  box-shadow: 0 0 0 2px #e0b84133;
+}
+
+.modal[data-bonus-disabled="true"] .dialog[data-operation="deposit"] .dialog-actions button[type="submit"] {
+  border-color: #a98220;
+  color: #ffffff;
+  background: #806318;
+}
+
+.modal[data-bonus-disabled="true"] .dialog[data-operation="deposit"] .dialog-actions button[type="submit"]:hover:not(:disabled) {
+  background: #a98220;
+}
+
+.modal[data-bonus-disabled="true"] .dialog[data-operation="deposit"] .amount-shortcuts button[aria-pressed="true"] {
+  border-color: #c49a32;
+  color: #ffffff;
+  background: #806318;
+}
+
+.modal[data-bonus-disabled="true"] .dialog[data-operation="deposit"] .amount-shortcuts button[aria-pressed="true"]:hover:not(:disabled) {
+  background: #a98220;
 }
 
 .modal[data-advertising-deposit="true"] {
@@ -3677,4 +4001,117 @@ input::placeholder {
   .movement-history-totals {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+:host(#ganamos-pending-withdrawals) {
+  z-index: 2147483647;
+  color: #f4dfe1;
+}
+
+.pending-withdrawals-panel {
+  display: grid;
+  gap: 5px;
+  padding: 6px;
+  border: 1px solid #ba3440;
+  border-radius: 8px;
+  background: #291719;
+  box-shadow: 0 3px 12px rgb(0 0 0 / 35%);
+}
+
+.pending-withdrawals-toggle {
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid #c53b48;
+  border-radius: 6px;
+  color: #ff858d;
+  background: #641d25;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pending-withdrawals-toggle:hover {
+  background: #79232d;
+}
+
+.pending-withdrawals-toggle:focus-visible,
+.pending-withdrawals-complete:focus-visible {
+  outline: 2px solid #ff858d;
+  outline-offset: 2px;
+}
+
+.pending-withdrawals-list {
+  display: grid;
+  gap: 4px;
+  max-height: min(45vh, 360px);
+  overflow-y: auto;
+}
+
+.pending-withdrawals-list[hidden] {
+  display: none;
+}
+
+.pending-withdrawals-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: 5px;
+  background: #3b2023;
+}
+
+.pending-withdrawals-contact {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pending-withdrawals-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #f4dfe1;
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-withdrawals-username {
+  overflow: hidden;
+  color: #e5a3a8;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-withdrawals-complete {
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  border: 1px solid #427d5c;
+  border-radius: 5px;
+  color: #a7f3c2;
+  background: #1e4931;
+  cursor: pointer;
+}
+
+.pending-withdrawals-complete:hover {
+  background: #28643f;
+}
+
+.pending-withdrawals-complete svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.5;
 }

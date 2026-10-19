@@ -7,6 +7,7 @@ const test = require("node:test");
 test("extension storage adapter routes reads and revisioned writes through the service worker", async () => {
   const messages = [];
   const listeners = [];
+  const intervals = [];
   const responses = [
     { ok: true, values: { activeBonusConfig: { enabled: false } }, revision: 7 },
     { ok: true, movements: [{ operation: "withdrawal", amount: 10 }] },
@@ -27,7 +28,10 @@ test("extension storage adapter routes reads and revisioned writes through the s
       }
     },
     console,
-    setInterval() { return 1; }
+    setInterval(callback, delay) {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    }
   });
   const source = fs.readFileSync(path.join(__dirname, "..", "..", "state-storage.js"), "utf8");
   vm.runInContext(source, context, { filename: "state-storage.js" });
@@ -38,6 +42,8 @@ test("extension storage adapter routes reads and revisioned writes through the s
   assert.deepEqual(JSON.parse(JSON.stringify(initial)), {
     activeBonusConfig: { enabled: false }
   });
+  assert.equal(intervals.length, 1);
+  assert.equal(intervals[0].delay, 5_000);
   const movements = await context.stateStorage.getMovements({
     contactKey: "contact-1",
     operation: "withdrawal",
