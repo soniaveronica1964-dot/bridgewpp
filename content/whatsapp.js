@@ -20,6 +20,7 @@
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
   const PENDING_WITHDRAWALS_KEY = "pendingWithdrawals";
   const PENDING_WITHDRAWAL_MESSAGE_MAX_AGE_MS = 60_000;
+  const PENDING_WITHDRAWAL_BALANCE_THRESHOLD = 10_000;
   const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 5_000;
   const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 45 * 60_000;
   const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
@@ -68,6 +69,7 @@
   let pendingWithdrawalsList = null;
   let pendingWithdrawalsToggle = null;
   let pendingWithdrawalsRenderedSignature = null;
+  let pendingWithdrawalBalanceRefreshInProgress = false;
   let contactVisualTags = {};
   const blockedUserAccountSettings = new Set();
   const loadedBlockedUserAccountSettings = new Set();
@@ -268,6 +270,7 @@
       );
       pendingWithdrawalsLoaded = true;
       renderPendingWithdrawals();
+      void refreshPendingWithdrawalBalances();
       contactFlowCountersLoaded = true;
       for (const updateRow of contactFlowCounterRows.values()) updateRow();
       startContactFlowMessageObserver();
@@ -1923,6 +1926,29 @@
         : typeof withdrawal?.phone === "string" && /^\d{7,20}$/.test(withdrawal.phone)
           ? `phone:${withdrawal.phone}`
           : "";
+      const inferredUsernames = findPlatformUsernames(
+        `${typeof withdrawal?.name === "string" ? withdrawal.name : ""} ${
+          typeof withdrawal?.username === "string" ? withdrawal.username : ""
+        }`
+      );
+      const accounts = {
+        ganamos: typeof withdrawal?.accounts?.ganamos === "string"
+          ? withdrawal.accounts.ganamos
+          : inferredUsernames.ganamos || "",
+        multipanel: typeof withdrawal?.accounts?.multipanel === "string"
+          ? withdrawal.accounts.multipanel
+          : inferredUsernames.multipanel || ""
+      };
+      const balances = Object.fromEntries(["ganamos", "multipanel"].map((platform) => {
+        const state = withdrawal?.balances?.[platform];
+        const amount = state && typeof state === "object"
+          ? state.amount
+          : state;
+        return [platform, {
+          amount: Number.isFinite(amount) ? amount : null,
+          checked: state && typeof state === "object" && state.checked === true
+        }];
+      }));
       if (!withdrawal || typeof withdrawal !== "object" || Array.isArray(withdrawal) ||
         typeof withdrawal.id !== "string" || !withdrawal.id ||
         !identity ||
@@ -1936,7 +1962,8 @@
         name: typeof withdrawal.name === "string" && withdrawal.name.trim()
           ? withdrawal.name.trim()
           : identity,
-        username: typeof withdrawal.username === "string" ? withdrawal.username : "",
+        accounts,
+        balances,
         status: "Pendiente",
         createdAt: withdrawal.createdAt
       }];
@@ -1960,8 +1987,115 @@
     return {
       identity,
       name: displayUsernames.join("/") || title || identity,
-      username: ""
+      accounts: {
+        ganamos: usernames.ganamos || "",
+        multipanel: usernames.multipanel || ""
+      },
+      balances: {
+        ganamos: { amount: null, checked: false },
+        multipanel: { amount: null, checked: false }
+      }
     };
+  }
+
+  function getPendingWithdrawalBalancesFromOpenContact(contact) {
+    const host = document.getElementById(HOST_ID);
+    if (!host || host.dataset.accounts !== activeAccountsKey) {
+      return contact.balances;
+    }
+    const hostUsernames = {
+      ganamos: host.dataset.username || "",
+      multipanel: host.dataset.multipanelUsername || ""
+    };
+    const balances = { ...contact.balances };
+    for (const platform of ["ganamos", "multipanel"]) {
+      if (!contact.accounts[platform] ||
+        hostUsernames[platform].toLowerCase() !== contact.accounts[platform].toLowerCase()) continue;
+      const state = host.balanceStates?.[platform];
+      const amount = parseBalance(state?.balance);
+      balances[platform] = {
+        amount,
+        checked: amount !== null || Boolean(state?.error)
+      };
+    }
+    return balances;
+  }
+
+  async function refreshPendingWithdrawalBalances() {
+    if (!pendingWithdrawalsLoaded || !pendingWithdrawals.length ||
+      pendingWithdrawalBalanceRefreshInProgress) return;
+    pendingWithdrawalBalanceRefreshInProgress = true;
+    let changed = false;
+    try {
+      await Promise.all(pendingWithdrawals.flatMap((withdrawal) =>
+        ["ganamos", "multipanel"]
+          .filter((platform) => Boolean(withdrawal.accounts[platform]))
+          .map(async (platform) => {
+            const username = withdrawal.accounts[platform];
+            try {
+              const response = await chrome.runtime.sendMessage({
+                type: "BALANCE_REQUEST",
+                data: { nombre: username, platform }
+              });
+              if (!response?.ok) {
+                throw new Error(response?.error || "No se pudo consultar el saldo.");
+              }
+              const amount = parseBalance(response.balance);
+              if (amount === null) throw new Error("La plataforma devolvió un saldo no válido.");
+              const current = pendingWithdrawals.find(({ id }) => id === withdrawal.id);
+              if (!current) return;
+              current.balances[platform] = { amount, checked: true };
+              changed = true;
+            } catch (error) {
+              console.error(
+                `[Ganamos balance extension] No se pudo actualizar el saldo pendiente de ${username}.`,
+                error
+              );
+              const current = pendingWithdrawals.find(({ id }) => id === withdrawal.id);
+              if (!current) return;
+              current.balances[platform] = {
+                amount: current.balances[platform]?.amount ?? null,
+                checked: true
+              };
+              changed = true;
+            }
+          })
+      ));
+      if (changed) {
+        renderPendingWithdrawals();
+        await savePendingWithdrawals();
+      }
+    } finally {
+      pendingWithdrawalBalanceRefreshInProgress = false;
+    }
+  }
+
+  function getPendingWithdrawalBalanceLines(withdrawal) {
+    const accounts = ["ganamos", "multipanel"]
+      .map((platform) => ({
+        platform,
+        username: withdrawal.accounts?.[platform],
+        balance: withdrawal.balances?.[platform]?.amount ?? null,
+        checked: withdrawal.balances?.[platform]?.checked === true
+      }))
+      .filter(({ username }) => username);
+    if (!accounts.length) return [withdrawal.name];
+    if (accounts.some(({ checked }) => !checked)) {
+      return accounts.map(({ username, balance, checked }) =>
+        `${username} (${balance === null ? checked ? "saldo no disponible" : "consultando saldo" : `$${formatBalance(balance)}`})`);
+    }
+    const aboveThreshold = accounts.filter(({ balance }) =>
+      balance !== null && balance > PENDING_WITHDRAWAL_BALANCE_THRESHOLD);
+    const selected = aboveThreshold.length
+      ? aboveThreshold
+      : accounts.filter(({ balance }) => balance !== null)
+        .sort((first, second) => second.balance - first.balance)
+        .slice(0, 1);
+    if (selected.length) {
+      return selected.map(({ username, balance }) =>
+        `${username} ($${formatBalance(balance)})`);
+    }
+    return accounts.map(({ username }) => `${username} (saldo no disponible)`);
   }
 
   function savePendingWithdrawals() {
@@ -2022,12 +2156,14 @@
       id: details.messageId,
       identity: details.contact.identity,
       name: details.contact.name,
-      username: details.contact.username,
+      accounts: details.contact.accounts,
+      balances: getPendingWithdrawalBalancesFromOpenContact(details.contact),
       status: "Pendiente",
       createdAt: now
     });
     renderPendingWithdrawals();
     void savePendingWithdrawals();
+    void refreshPendingWithdrawalBalances();
   }
 
   function completePendingWithdrawal(id) {
@@ -2043,8 +2179,10 @@
   function renderPendingWithdrawals() {
     const host = document.getElementById(PENDING_WITHDRAWALS_HOST_ID);
     if (!host || !pendingWithdrawalsToggle || !pendingWithdrawalsList) return;
-    const noOpenChat = !isNormalChatOpen(findContactTitle());
-    host.style.display = pendingWithdrawalsLoaded && noOpenChat && pendingWithdrawals.length
+    const homeIntroPanel = document.querySelector('[data-testid="intro-panel"]');
+    const isWhatsAppHomeView = isVisible(homeIntroPanel);
+    host.style.display = pendingWithdrawalsLoaded && isWhatsAppHomeView &&
+      pendingWithdrawals.length
       ? ""
       : "none";
     const count = pendingWithdrawals.length;
@@ -2053,7 +2191,8 @@
     pendingWithdrawalsList.hidden = !pendingWithdrawalsExpanded;
     if (!pendingWithdrawalsExpanded) return;
     const signature = JSON.stringify(
-      pendingWithdrawals.map(({ id, name, username }) => [id, name, username])
+      pendingWithdrawals.map(({ id, name, accounts, balances }) =>
+        [id, name, accounts, balances])
     );
     if (signature === pendingWithdrawalsRenderedSignature) return;
     pendingWithdrawalsList.replaceChildren();
@@ -2063,14 +2202,10 @@
       row.setAttribute("role", "listitem");
       const contact = document.createElement("div");
       contact.className = "pending-withdrawals-contact";
-      const name = document.createElement("span");
-      name.className = "pending-withdrawals-name";
-      name.textContent = withdrawal.name;
-      contact.append(name);
-      if (withdrawal.username) {
+      for (const line of getPendingWithdrawalBalanceLines(withdrawal)) {
         const username = document.createElement("span");
         username.className = "pending-withdrawals-username";
-        username.textContent = withdrawal.username;
+        username.textContent = line;
         contact.append(username);
       }
       const complete = document.createElement("button");
@@ -4738,7 +4873,13 @@
     const updateWithdrawalLimitShortcuts = () => {
       const currentValue = numericInputValue(withdrawalLimitInput);
       for (const button of withdrawalLimitShortcuts.querySelectorAll("button")) {
-        button.setAttribute("aria-pressed", String(Number(button.dataset.amount) === currentValue));
+        const amount = Number(button.dataset.amount);
+        button.setAttribute("aria-pressed", String(amount === currentValue));
+        if (amount === 150000 && currentValue !== null && currentValue !== amount) {
+          button.dataset.comparison = currentValue < amount ? "below" : "above";
+        } else {
+          delete button.dataset.comparison;
+        }
       }
     };
     for (const amount of withdrawalLimitPresets) {
@@ -8778,6 +8919,7 @@
   window.setInterval(() => {
     void refreshAgentBalance(agentBalanceHost);
     void refreshMultiPanelAgentBalance(agentBalanceHost);
+    void refreshPendingWithdrawalBalances();
   }, 60_000);
   updateContact();
 })();

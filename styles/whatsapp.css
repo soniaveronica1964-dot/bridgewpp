@@ -2712,6 +2712,28 @@ button:disabled {
   font-size: 12px;
 }
 
+.withdrawal-limit-shortcuts button[data-amount="150000"][data-comparison="below"] {
+  border-color: #a85d65;
+  color: #f2dfe1;
+  background: #653b40;
+}
+
+.withdrawal-limit-shortcuts button[data-amount="150000"][data-comparison="below"]:hover:not(:disabled) {
+  border-color: #c8757e;
+  background: #76474d;
+}
+
+.withdrawal-limit-shortcuts button[data-amount="150000"][data-comparison="above"] {
+  border-color: #4c9c75;
+  color: #e0f1e7;
+  background: #28604b;
+}
+
+.withdrawal-limit-shortcuts button[data-amount="150000"][data-comparison="above"]:hover:not(:disabled) {
+  border-color: #62b58b;
+  background: #347456;
+}
+
 .movement-history-dates[hidden] {
   display: none;
 }
@@ -4070,20 +4092,11 @@ input::placeholder {
   min-width: 0;
 }
 
-.pending-withdrawals-name {
-  min-width: 0;
+.pending-withdrawals-username {
   overflow: hidden;
   color: #f4dfe1;
   font-size: 15px;
   font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pending-withdrawals-username {
-  overflow: hidden;
-  color: #e5a3a8;
-  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
