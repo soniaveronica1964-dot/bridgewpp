@@ -8521,6 +8521,31 @@
     const isCurrentContact = () =>
       document.getElementById(HOST_ID) === host && host.dataset.accounts === accountsKey;
     const appendSearchResult = async (name, result, requestError = null, destinationId = null) => {
+      if (Array.isArray(result?.profiles)) {
+        for (const profile of result.profiles) {
+          const profileName = typeof profile.profileName === "string" &&
+            profile.profileName.trim()
+            ? profile.profileName.trim()
+            : name;
+          if (profile.ok === false) {
+            await appendSearchResult(
+              profileName,
+              null,
+              profile.error || "No se pudo completar la búsqueda en este perfil.",
+              destinationId
+            );
+          } else {
+            await appendSearchResult(profileName, profile, null, destinationId);
+          }
+        }
+        if (result.missingSecondaryCount > 0) {
+          const error = document.createElement("div");
+          error.className = "contact-user-search-error";
+          error.textContent = `No respondieron ${result.missingSecondaryCount} perfiles secundarios.`;
+          resultsContainer.append(error);
+        }
+        return;
+      }
       if (requestError) {
         console.error(`[Ganamos balance extension] No se pudieron buscar usuarios en ${name}.`, requestError);
         showToast(host, name, String(requestError), "error", `user-search:${name}:${digits}`);

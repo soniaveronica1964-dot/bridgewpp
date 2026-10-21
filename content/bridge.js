@@ -7,6 +7,7 @@
     multipanel: Promise.resolve()
   };
   let searchQueue = Promise.resolve();
+  let secondarySearchQueue = Promise.resolve();
 
   async function sendRuntimeMessage(message) {
     return chrome.runtime.sendMessage(message);
@@ -85,6 +86,57 @@
         enqueuePrimaryTask(polled.task);
       } catch (error) {
         console.error("[Ganamos balance extension] Error de conexión con el puente local.", error);
+        await sleep(RETRY_DELAY_MS);
+      }
+    }
+  }
+
+  async function executeSecondarySearchTask(task) {
+    let result;
+    try {
+      if (Number.isFinite(task.expiresAt) && Date.now() >= task.expiresAt) {
+        throw new Error("La búsqueda secundaria expiró antes de ejecutarse.");
+      }
+      result = await sendRuntimeMessage({
+        type: "BRIDGE_SECONDARY_SEARCH_EXECUTE",
+        message: task.message
+      });
+    } catch (error) {
+      result = { ok: false, error: error.message || "No se pudo ejecutar la búsqueda secundaria." };
+    }
+    try {
+      await sendRuntimeMessage({
+        type: "BRIDGE_SECONDARY_SEARCH_COMPLETE",
+        id: task.id,
+        result
+      });
+    } catch (error) {
+      console.error("[Ganamos balance extension] No se pudo devolver la búsqueda del perfil secundario.", error);
+    }
+  }
+
+  function enqueueSecondarySearchTask(task) {
+    secondarySearchQueue = secondarySearchQueue
+      .then(() => executeSecondarySearchTask(task))
+      .catch((error) => console.error(
+        "[Ganamos balance extension] Falló la cola de búsqueda del perfil secundario.",
+        error
+      ));
+  }
+
+  async function runSecondarySearchBridge() {
+    while (true) {
+      try {
+        const polled = await sendRuntimeMessage({
+          type: "BRIDGE_SECONDARY_SEARCH_POLL"
+        });
+        if (!polled?.ok) {
+          await sleep(RETRY_DELAY_MS);
+          continue;
+        }
+        if (polled.task) enqueueSecondarySearchTask(polled.task);
+      } catch (error) {
+        console.error("[Ganamos balance extension] Error de conexión de búsqueda con el puente local.", error);
         await sleep(RETRY_DELAY_MS);
       }
     }
@@ -202,6 +254,7 @@
         void runPrimaryAdvertisingProfilesBridge();
         void runPrimaryPlatformOutagesBridge();
       } else if (bridgeRole === "secondary" && typeof bridgeToken === "string" && bridgeToken) {
+        void runSecondarySearchBridge();
         void runSecondaryBonusConfigBridge();
         void runSecondaryAdvertisingProfilesBridge();
         void runSecondaryPlatformOutagesBridge();

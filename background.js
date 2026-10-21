@@ -1693,6 +1693,17 @@ async function sendRequestThroughBridge(message) {
   });
 }
 
+async function getSecondarySearchWorkerId() {
+  const key = "bridgeSecondarySearchWorkerId";
+  const stored = await chrome.storage.local.get(key);
+  if (typeof stored[key] === "string" && /^[a-f0-9-]{36}$/i.test(stored[key])) {
+    return stored[key];
+  }
+  const clientId = crypto.randomUUID();
+  await chrome.storage.local.set({ [key]: clientId });
+  return clientId;
+}
+
 function getRemoteCreateOrigin(value) {
   let url;
   try {
@@ -2298,6 +2309,55 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return executeApiMessage(message.message);
     }).then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo ejecutar la solicitud en el perfil principal." }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_SECONDARY_SEARCH_POLL" ||
+    message?.type === "BRIDGE_SECONDARY_SEARCH_COMPLETE") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de búsqueda secundaria no válida." });
+      return;
+    }
+    getBridgeSettings().then(async ({ role, token }) => {
+      if (role !== "secondary" || !token) {
+        throw new Error("Este perfil no está configurado como secundario.");
+      }
+      const clientId = await getSecondarySearchWorkerId();
+      if (message.type === "BRIDGE_SECONDARY_SEARCH_POLL") {
+        return bridgeFetch(
+          `/v1/secondary/next?clientId=${encodeURIComponent(clientId)}`,
+          token,
+          { timeoutMs: 25_000 }
+        );
+      }
+      return bridgeFetch("/v1/secondary/complete", token, {
+        method: "POST",
+        timeoutMs: 10_000,
+        body: { id: message.id, clientId, result: message.result }
+      });
+    }).then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "Falló la comunicación de búsqueda del perfil secundario."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_SECONDARY_SEARCH_EXECUTE") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de búsqueda secundaria no válida." });
+      return;
+    }
+    getBridgeSettings().then(({ role }) => {
+      if (role !== "secondary" || message.message?.type !== "USER_SEARCH_REQUEST") {
+        throw new Error("El perfil secundario solo puede ejecutar búsquedas autorizadas.");
+      }
+      return executeApiMessage(message.message);
+    }).then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo buscar en el perfil secundario."
+      }));
     return true;
   }
 
