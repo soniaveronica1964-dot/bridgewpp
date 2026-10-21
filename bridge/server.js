@@ -287,6 +287,25 @@ function submitTaskAndWait(task, timeoutError) {
           return;
         }
         pending.primaryResult = result;
+        const candidates = {
+          ganamos: [...new Set((Array.isArray(result?.ganamos) ? result.ganamos : [])
+            .filter((username) => typeof username === "string" && username.length > 0 && username.length <= 64))],
+          multipanel: [...new Set((Array.isArray(result?.multipanel) ? result.multipanel : [])
+            .filter((username) => typeof username === "string" && username.length > 0 && username.length <= 64))]
+        };
+        if (!candidates.ganamos.length && !candidates.multipanel.length) {
+          pending.expectedSecondaryIds.clear();
+        }
+        for (const clientId of pending.expectedSecondaryIds) {
+          enqueueSecondaryTask(clientId, {
+            id: task.id,
+            expiresAt: task.expiresAt,
+            message: {
+              type: "USER_SEARCH_PROFILE_REQUEST",
+              data: candidates
+            }
+          });
+        }
         if (pending.secondaryResults.size === pending.expectedSecondaryIds.size) {
           pending.finish(mergeSearchResults(
             result,
@@ -319,7 +338,6 @@ function submitTaskAndWait(task, timeoutError) {
       pending.finish({ ok: false, error: timeoutError });
     }, REQUEST_TIMEOUT_MS);
     pendingRequests.set(task.id, pending);
-    for (const clientId of secondaryIds) enqueueSecondaryTask(clientId, task);
     deliverTask(task);
   });
 }
