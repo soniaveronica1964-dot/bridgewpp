@@ -16,6 +16,7 @@ const ALLOWED_REQUEST_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
   "USER_SEARCH_REQUEST",
+  "USER_SEARCH_PROFILE_REQUEST",
   "SPORT_BETS_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
@@ -237,7 +238,7 @@ function removeQueuedSecondaryTask(taskId) {
 
 function mergeSearchResults(primaryResult, secondaryResults, missingSecondaryCount = 0) {
   const results = [primaryResult, ...secondaryResults];
-  return {
+  const merged = {
     ok: true,
     profiles: results.map((result) => ({
       ok: result.ok !== false,
@@ -249,11 +250,15 @@ function mergeSearchResults(primaryResult, secondaryResults, missingSecondaryCou
     })),
     missingSecondaryCount
   };
+  merged.profiles[0].profileRole = "primary";
+  for (const profile of merged.profiles.slice(1)) profile.profileRole = "secondary";
+  return merged;
 }
 
 function submitTaskAndWait(task, timeoutError) {
   return new Promise((resolve) => {
-    const isSearch = task.message.type === "USER_SEARCH_REQUEST";
+    const isSearch = ["USER_SEARCH_REQUEST", "USER_SEARCH_PROFILE_REQUEST"]
+      .includes(task.message.type);
     const staleClientIds = [...secondaryClients]
       .filter(([, client]) => Date.now() - client.lastSeen >= 45_000)
       .map(([clientId]) => clientId);
@@ -287,10 +292,13 @@ function submitTaskAndWait(task, timeoutError) {
           return;
         }
         pending.primaryResult = result;
+        const candidateSource = task.message.type === "USER_SEARCH_PROFILE_REQUEST"
+          ? task.message.data
+          : result;
         const candidates = {
-          ganamos: [...new Set((Array.isArray(result?.ganamos) ? result.ganamos : [])
+          ganamos: [...new Set((Array.isArray(candidateSource?.ganamos) ? candidateSource.ganamos : [])
             .filter((username) => typeof username === "string" && username.length > 0 && username.length <= 64))],
-          multipanel: [...new Set((Array.isArray(result?.multipanel) ? result.multipanel : [])
+          multipanel: [...new Set((Array.isArray(candidateSource?.multipanel) ? candidateSource.multipanel : [])
             .filter((username) => typeof username === "string" && username.length > 0 && username.length <= 64))]
         };
         if (!candidates.ganamos.length && !candidates.multipanel.length) {
@@ -803,6 +811,13 @@ function validateRemoteMessage(message) {
   if (message?.type === "USER_SEARCH_REQUEST") {
     return /^\d{4}$/.test(message.data?.digits || "");
   }
+  if (message?.type === "USER_SEARCH_PROFILE_REQUEST") {
+    const isValidUserList = (list) => Array.isArray(list) && list.length <= 500 &&
+      list.every((username) =>
+        typeof username === "string" && username.length > 0 && username.length <= 64);
+    return message.data && isValidUserList(message.data.ganamos) &&
+      isValidUserList(message.data.multipanel);
+  }
   return ["AGENT_BALANCE_REQUEST", "MULTIPANEL_AGENT_BALANCE_REQUEST"]
     .includes(message?.type) && message.data === undefined;
 }
@@ -908,6 +923,14 @@ async function handleRemoteCreateRequest(request, response) {
     message = {
       type: "USER_SEARCH_REQUEST",
       data: { digits: body.message.data.digits }
+    };
+  } else if (body.message.type === "USER_SEARCH_PROFILE_REQUEST") {
+    message = {
+      type: "USER_SEARCH_PROFILE_REQUEST",
+      data: {
+        ganamos: [...new Set(body.message.data.ganamos)],
+        multipanel: [...new Set(body.message.data.multipanel)]
+      }
     };
   } else {
     message = { type: body.message.type };

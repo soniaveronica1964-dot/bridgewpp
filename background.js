@@ -1129,6 +1129,12 @@ async function searchUsersByDigits(digits) {
   };
 }
 
+function isValidKnownUserList(usernames) {
+  return Array.isArray(usernames) && usernames.length <= 500 &&
+    usernames.every((username) =>
+      typeof username === "string" && username.length > 0 && username.length <= 64);
+}
+
 async function getMultiPanelBalance(data) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -1537,6 +1543,7 @@ const API_MESSAGE_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
   "USER_SEARCH_REQUEST",
+  "USER_SEARCH_PROFILE_REQUEST",
   "SPORT_BETS_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
@@ -1890,6 +1897,11 @@ async function sendRemoteOperation(destinationId, message, timeoutMs = 95_000) {
     if (!/^\d{4}$/.test(message.data?.digits || "")) {
       throw new Error("La búsqueda remota requiere exactamente cuatro números.");
     }
+  } else if (message.type === "USER_SEARCH_PROFILE_REQUEST") {
+    if (!isValidKnownUserList(message.data?.ganamos) ||
+      !isValidKnownUserList(message.data?.multipanel)) {
+      throw new Error("La lista de usuarios encontrados para consultar no es válida.");
+    }
   } else if (!["AGENT_BALANCE_REQUEST", "MULTIPANEL_AGENT_BALANCE_REQUEST"].includes(message.type) ||
     message.data !== undefined) {
     throw new Error("La operación remota no está permitida.");
@@ -2020,11 +2032,28 @@ async function getRemoteUserSearch(data) {
   }, 95_000);
 }
 
+async function getRemoteKnownUsersSearch(data) {
+  if (!isValidKnownUserList(data?.ganamos) || !isValidKnownUserList(data?.multipanel)) {
+    throw new Error("La lista de usuarios encontrados para consultar no es válida.");
+  }
+  return sendRemoteOperation(data.destinationId, {
+    type: "USER_SEARCH_PROFILE_REQUEST",
+    data: {
+      ganamos: [...new Set(data.ganamos)],
+      multipanel: [...new Set(data.multipanel)]
+    }
+  }, 95_000);
+}
+
 function validateApiMessage(message, suffixes) {
   if (!API_MESSAGE_TYPES.has(message?.type)) return false;
   if (message.type === "AGENT_BALANCE_REQUEST" ||
     message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return true;
   if (message.type === "USER_SEARCH_REQUEST") return /^\d{4}$/.test(message.data?.digits || "");
+  if (message.type === "USER_SEARCH_PROFILE_REQUEST") {
+    return isValidKnownUserList(message.data?.ganamos) &&
+      isValidKnownUserList(message.data?.multipanel);
+  }
 
   const platform = message.data?.platform || "ganamos";
   if (message.type === "SPORT_BETS_REQUEST") {
@@ -2060,7 +2089,8 @@ async function executeApiMessage(message) {
   const suffixes = [
     "AGENT_BALANCE_REQUEST",
     "MULTIPANEL_AGENT_BALANCE_REQUEST",
-    "USER_SEARCH_REQUEST"
+    "USER_SEARCH_REQUEST",
+    "USER_SEARCH_PROFILE_REQUEST"
   ].includes(message.type)
     ? null
     : await getPlatformSuffixes();
@@ -2070,6 +2100,7 @@ async function executeApiMessage(message) {
   if (message.type === "AGENT_BALANCE_REQUEST") return getGanamosAgentBalance();
   if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return getMultiPanelAgentBalance();
   if (message.type === "USER_SEARCH_REQUEST") return searchUsersByDigits(message.data.digits);
+  if (message.type === "USER_SEARCH_PROFILE_REQUEST") return searchUsersByKnownNames(message.data);
   if (message.type === "SPORT_BETS_REQUEST") {
     return message.data.platform === "multipanel"
       ? getMultiPanelActiveSportBets(message.data)
@@ -2464,9 +2495,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         throw new Error("El perfil secundario solo puede ejecutar búsquedas autorizadas.");
       }
       const users = message.message.data || {};
-      const isValidUserList = (list) => Array.isArray(list) &&
-        list.every((username) => typeof username === "string" && username.length > 0 && username.length <= 64);
-      if (!isValidUserList(users.ganamos) || !isValidUserList(users.multipanel)) {
+      if (!isValidKnownUserList(users.ganamos) || !isValidKnownUserList(users.multipanel)) {
         throw new Error("La lista de usuarios para verificar no es válida.");
       }
       return searchUsersByKnownNames(users);
@@ -2521,6 +2550,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getRemoteUserSearch(message.data || {})
       .then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudieron buscar usuarios en la PC destino." }));
+    return true;
+  }
+
+  if (message?.type === "REMOTE_USER_PROFILE_SEARCH_REQUEST") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud no válida o enviada desde una página no autorizada." });
+      return;
+    }
+    getRemoteKnownUsersSearch(message.data || {})
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudieron verificar los usuarios encontrados en la PC destino."
+      }));
     return true;
   }
 

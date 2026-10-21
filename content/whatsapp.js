@@ -8527,15 +8527,21 @@
             profile.profileName.trim()
             ? profile.profileName.trim()
             : name;
+          const roleLabel = profile.profileRole === "primary"
+            ? "Perfil principal"
+            : profile.profileRole === "secondary"
+              ? "Perfil secundario"
+              : null;
+          const displayName = roleLabel ? `${roleLabel} · ${profileName}` : profileName;
           if (profile.ok === false) {
             await appendSearchResult(
-              profileName,
+              displayName,
               null,
               profile.error || "No se pudo completar la búsqueda en este perfil.",
               destinationId
             );
           } else {
-            await appendSearchResult(profileName, profile, null, destinationId);
+            await appendSearchResult(displayName, profile, null, destinationId);
           }
         }
         if (result.missingSecondaryCount > 0) {
@@ -8565,6 +8571,11 @@
       const profileName = hasEnrolledProfileName
         ? result.profileName.trim()
         : name;
+      const profileRoleLabel = result.profileRole === "primary"
+        ? "Perfil principal"
+        : result.profileRole === "secondary"
+          ? "Perfil secundario"
+          : null;
       for (const platform of ["ganamos", "multipanel"]) {
         const names = result?.[platform];
         if (!Array.isArray(names)) {
@@ -8627,7 +8638,7 @@
         pcLabel.className = "contact-user-search-pc";
         pcLabel.textContent = `${hasEnrolledProfileName
           ? "Perfil de Publicidad"
-          : "Destino configurado"} · ${profileName}: `;
+          : "Destino configurado"} · ${profileRoleLabel ? `${profileRoleLabel} · ` : ""}${profileName}: `;
         row.append(pcLabel);
         namesByPlatform.forEach(({ username, platform }, index) => {
           if (index) row.append(document.createTextNode(" / "));
@@ -8684,42 +8695,56 @@
         : [];
       if (!isCurrentContact()) return;
 
+      const response = await chrome.runtime.sendMessage({
+        type: "USER_SEARCH_REQUEST",
+        data: { digits }
+      });
+      if (!isCurrentContact()) return;
+      if (!response?.ok) throw new Error(response?.error || "La búsqueda en el perfil principal no se completó.");
+      dismissToast(`user-search:local:${digits}`);
+      const profileSettings = await stateStorage.get("whatsappProfileName");
+      const localProfileName = typeof profileSettings.whatsappProfileName === "string"
+        ? profileSettings.whatsappProfileName.trim() || "Perfil principal"
+        : "Perfil principal";
+      await appendSearchResult(localProfileName, response);
+
       if (destinations.length) {
-        const results = await Promise.all(destinations.map(async (destination) => {
-          try {
-            const response = await chrome.runtime.sendMessage({
-              type: "REMOTE_USER_SEARCH_REQUEST",
-              data: { destinationId: destination.id, digits }
-            });
-            if (!response?.ok) {
-              throw new Error(response?.error || "La búsqueda remota no se completó.");
+        const primaryProfile = Array.isArray(response.profiles)
+          ? response.profiles.find((profile) => profile.profileRole === "primary") || response.profiles[0]
+          : response;
+        const knownUsers = {
+          ganamos: [...new Set((Array.isArray(primaryProfile?.ganamos) ? primaryProfile.ganamos : [])
+            .filter((username) => typeof username === "string" && username.includes(digits)))],
+          multipanel: [...new Set((Array.isArray(primaryProfile?.multipanel) ? primaryProfile.multipanel : [])
+            .filter((username) => typeof username === "string" && username.includes(digits)))]
+        };
+        if (knownUsers.ganamos.length || knownUsers.multipanel.length) {
+          const results = await Promise.all(destinations.map(async (destination) => {
+            try {
+              const response = await chrome.runtime.sendMessage({
+                type: "REMOTE_USER_PROFILE_SEARCH_REQUEST",
+                data: {
+                  destinationId: destination.id,
+                  ...knownUsers
+                }
+              });
+              if (!response?.ok) {
+                throw new Error(response?.error || "La verificación remota no se completó.");
+              }
+              return { name: destination.name, destinationId: destination.id, result: response };
+            } catch (error) {
+              return {
+                name: destination.name,
+                destinationId: destination.id,
+                error: error.message || "No se pudo consultar la PC."
+              };
             }
-            return { name: destination.name, destinationId: destination.id, result: response };
-          } catch (error) {
-            return {
-              name: destination.name,
-              destinationId: destination.id,
-              error: error.message || "No se pudo consultar la PC."
-            };
+          }));
+          if (!isCurrentContact()) return;
+          for (const { name, destinationId, result, error } of results) {
+            await appendSearchResult(name, result, error, destinationId);
           }
-        }));
-        if (!isCurrentContact()) return;
-        for (const { name, destinationId, result, error } of results) {
-          await appendSearchResult(name, result, error, destinationId);
         }
-      } else {
-        const response = await chrome.runtime.sendMessage({
-          type: "USER_SEARCH_REQUEST",
-          data: { digits }
-        });
-        if (!isCurrentContact()) return;
-        if (!response?.ok) throw new Error(response?.error || "La búsqueda en esta PC no se completó.");
-        dismissToast(`user-search:local:${digits}`);
-        const profileSettings = await stateStorage.get("whatsappProfileName");
-        const localProfileName = typeof profileSettings.whatsappProfileName === "string"
-          ? profileSettings.whatsappProfileName.trim() || "Perfil actual"
-          : "Perfil actual";
-        await appendSearchResult(localProfileName, response);
       }
     } catch (error) {
       if (!isCurrentContact()) return;
