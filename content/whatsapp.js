@@ -1091,6 +1091,50 @@
     return bestMatch;
   }
 
+  function findKnownUsersInSidebar(users) {
+    const sidebar = document.querySelector("#pane-side");
+    if (!sidebar) {
+      return { ok: false, error: "No se pudo leer la lista de chats de WhatsApp en este perfil." };
+    }
+    const rows = [...sidebar.querySelectorAll('[role="row"][data-testid^="list-item-"]')];
+    if (!rows.length) rows.push(...sidebar.querySelectorAll(
+      '[data-testid="cell-frame-container"], [role="listitem"]'
+    ));
+    const found = { ganamos: new Set(), multipanel: new Set() };
+    const requested = {
+      ganamos: new Map(users.ganamos.map((username) => [username.normalize("NFC").toLowerCase(), username])),
+      multipanel: new Map(users.multipanel.map((username) => [username.normalize("NFC").toLowerCase(), username]))
+    };
+    for (const row of rows) {
+      const usernames = getSidebarPlatformUsernames(row);
+      for (const platform of ["ganamos", "multipanel"]) {
+        const username = usernames[platform];
+        if (typeof username !== "string") continue;
+        const match = requested[platform].get(username.normalize("NFC").toLowerCase());
+        if (match) found[platform].add(match);
+      }
+    }
+    return {
+      ok: true,
+      ganamos: [...found.ganamos],
+      multipanel: [...found.multipanel]
+    };
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type !== "WHATSAPP_SEARCH_KNOWN_USERS") return;
+    const users = message.users;
+    const isValidList = (list) => Array.isArray(list) && list.length <= 500 &&
+      list.every((username) =>
+        typeof username === "string" && username.length > 0 && username.length <= 64);
+    if (sender.id !== chrome.runtime.id ||
+      !users || !isValidList(users.ganamos) || !isValidList(users.multipanel)) {
+      sendResponse({ ok: false, error: "La solicitud de búsqueda local no es válida." });
+      return;
+    }
+    sendResponse(findKnownUsersInSidebar(users));
+  });
+
   function getSidebarContactIdentity(row) {
     const usernames = getSidebarPlatformUsernames(row);
     const titleElement = row.querySelector('[data-testid="cell-frame-title"]');
@@ -8526,22 +8570,18 @@
           const profileName = typeof profile.profileName === "string" &&
             profile.profileName.trim()
             ? profile.profileName.trim()
-            : name;
-          const roleLabel = profile.profileRole === "primary"
-            ? "Perfil principal"
-            : profile.profileRole === "secondary"
-              ? "Perfil secundario"
-              : null;
-          const displayName = roleLabel ? `${roleLabel} · ${profileName}` : profileName;
+            : result.profiles.length === 1
+              ? name
+              : "Perfil de WhatsApp sin nombre";
           if (profile.ok === false) {
             await appendSearchResult(
-              displayName,
+              profileName,
               null,
               profile.error || "No se pudo completar la búsqueda en este perfil.",
               destinationId
             );
           } else {
-            await appendSearchResult(displayName, profile, null, destinationId);
+            await appendSearchResult(profileName, profile, null, destinationId);
           }
         }
         if (result.missingSecondaryCount > 0) {
@@ -8571,11 +8611,6 @@
       const profileName = hasEnrolledProfileName
         ? result.profileName.trim()
         : name;
-      const profileRoleLabel = result.profileRole === "primary"
-        ? "Perfil principal"
-        : result.profileRole === "secondary"
-          ? "Perfil secundario"
-          : null;
       for (const platform of ["ganamos", "multipanel"]) {
         const names = result?.[platform];
         if (!Array.isArray(names)) {
@@ -8636,9 +8671,7 @@
         row.className = "contact-user-search-row";
         const pcLabel = document.createElement("span");
         pcLabel.className = "contact-user-search-pc";
-        pcLabel.textContent = `${hasEnrolledProfileName
-          ? "Perfil de Publicidad"
-          : "Destino configurado"} · ${profileRoleLabel ? `${profileRoleLabel} · ` : ""}${profileName}: `;
+        pcLabel.textContent = `${profileName}: `;
         row.append(pcLabel);
         namesByPlatform.forEach(({ username, platform }, index) => {
           if (index) row.append(document.createTextNode(" / "));
@@ -8704,8 +8737,8 @@
       dismissToast(`user-search:local:${digits}`);
       const profileSettings = await stateStorage.get("whatsappProfileName");
       const localProfileName = typeof profileSettings.whatsappProfileName === "string"
-        ? profileSettings.whatsappProfileName.trim() || "Perfil principal"
-        : "Perfil principal";
+        ? profileSettings.whatsappProfileName.trim() || "Perfil actual"
+        : "Perfil actual";
       await appendSearchResult(localProfileName, response);
 
       if (destinations.length) {

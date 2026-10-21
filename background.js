@@ -554,41 +554,6 @@ async function findGanamosUsersByDigits(digits) {
     normalizeUsernameSuffix(username, suffix).includes(digits));
 }
 
-async function findGanamosUsersByNames(usernames) {
-  const { ganamos: suffix } = await getPlatformSuffixes();
-  const userId = await getAgentUserId();
-  const found = new Map();
-
-  for (const username of usernames) {
-    const params = new URLSearchParams({
-      username,
-      count: "10",
-      page: "0",
-      user_id: userId,
-      is_banned: "false",
-      is_direct_structure: "false"
-    });
-    const payload = await requestGanamosJson(`/api/agent_admin/user/?${params}`);
-    if (payload?.status !== 0) {
-      throw new Error(payload?.error_message || "Ganamos no pudo verificar los usuarios encontrados.");
-    }
-    const normalizedUsername = normalizeUsernameSuffix(username, suffix);
-    const matches = extractUserRecords(payload).filter((user) =>
-      [user?.username, user?.user_name, user?.login, user?.alias]
-        .some((candidate) => normalizeUsernameSuffix(candidate, suffix) === normalizedUsername));
-    if (matches.length > 1) {
-      throw new Error(`Ganamos devolvió varias coincidencias exactas para ${username}.`);
-    }
-    if (matches.length === 1) {
-      const matchedUsername = [matches[0].username, matches[0].user_name, matches[0].login, matches[0].alias]
-        .find((candidate) => typeof candidate === "string");
-      found.set(normalizedUsername, matchedUsername.trim());
-    }
-  }
-
-  return [...found.values()];
-}
-
 async function getGanamosAgentBalance() {
   const payload = await requestGanamosJson("/api/user/balance");
   if (payload?.status !== 0) {
@@ -1019,87 +984,47 @@ async function findMultiPanelUsersByDigits(digits) {
   return [...records.values()];
 }
 
-async function findMultiPanelUsersByNames(usernames) {
-  const { multipanel: suffix } = await getPlatformSuffixes();
-  const found = new Map();
-  let session = await getMultiPanelSession();
-
-  for (const username of usernames) {
-    const report = await requestMultiPanelForm("/api/admin_reports/getReport", {
-      session,
-      company: "MULT",
-      report: "agents_control_all",
-      filter: JSON.stringify([{ field: "u.alias", type: "like", value: username }]),
-      user: "null",
-      db: "null",
-      limit: "limit 0,20",
-      sort: "alias asc",
-      callFilter: ""
-    });
-    const records = report?.data?.data;
-    if (!Array.isArray(records)) {
-      throw new Error("MultiPanel devolvió una lista de usuarios con formato inesperado.");
-    }
-    const normalizedUsername = normalizeUsernameSuffix(username, suffix);
-    const matches = records.filter((record) =>
-      normalizeUsernameSuffix(record?.alias, suffix) === normalizedUsername);
-    if (matches.length > 1) {
-      throw new Error(`MultiPanel devolvió varias coincidencias exactas para ${username}.`);
-    }
-    const refreshedSession = report?.data?.def?.session;
-    if (typeof refreshedSession === "string" && refreshedSession.trim() && refreshedSession !== session) {
-      session = refreshedSession.trim();
-      await setExtensionState({ multiPanelSession: session });
-    }
-    if (!matches.length) continue;
-    if (!/^\d+$/.test(String(matches[0].user ?? "")) ||
-      !/^\d+$/.test(String(matches[0].db ?? ""))) {
-      throw new Error("MultiPanel encontró el alias, pero no devolvió IDs válidos de usuario y base de datos.");
-    }
-    found.set(normalizedUsername, matches[0].alias.trim());
-  }
-
-  return [...found.values()];
-}
-
-async function searchUsersByKnownNames(data) {
+async function searchUsersByKnownNames(data, tabId) {
   const ganamos = Array.isArray(data?.ganamos) ? data.ganamos : [];
   const multipanel = Array.isArray(data?.multipanel) ? data.multipanel : [];
-  const [identityResult, ganamosResult, multipanelResult] = await Promise.allSettled([
-    requestDataApi("/v1/identity"),
-    ganamos.length ? findGanamosUsersByNames(ganamos) : Promise.resolve([]),
-    multipanel.length ? findMultiPanelUsersByNames(multipanel) : Promise.resolve([])
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    throw new Error("No se pudo identificar la pestaña de WhatsApp de este perfil.");
+  }
+  const [profileNameResult, contactsResult] = await Promise.allSettled([
+    getCurrentWhatsAppProfileName(),
+    chrome.tabs.sendMessage(tabId, {
+      type: "WHATSAPP_SEARCH_KNOWN_USERS",
+      users: { ganamos, multipanel }
+    })
   ]);
-  if (identityResult.status === "rejected" && identityResult.reason?.status !== 401) {
-    console.error(
-      "[Ganamos balance extension] No se pudo consultar el nombre del perfil enrolado para verificar usuarios.",
-      identityResult.reason
+  if (contactsResult.status === "rejected") {
+    throw new Error(
+      contactsResult.reason?.message ||
+      "No se pudo leer la lista de contactos de WhatsApp de este perfil."
     );
   }
-  const errors = {};
-  if (ganamosResult.status === "rejected") {
-    errors.ganamos = ganamosResult.reason?.message || "Error al verificar usuarios en Ganamos.";
-  }
-  if (multipanelResult.status === "rejected") {
-    errors.multipanel = multipanelResult.reason?.message || "Error al verificar usuarios en MultiPanel.";
+  if (!contactsResult.value?.ok ||
+    !Array.isArray(contactsResult.value.ganamos) ||
+    !Array.isArray(contactsResult.value.multipanel)) {
+    throw new Error(
+      contactsResult.value?.error ||
+      "El perfil devolvió una lista de contactos con formato no válido."
+    );
   }
   return {
     ok: true,
-    profileName: identityResult.status === "fulfilled" &&
-      typeof identityResult.value?.displayName === "string"
-      ? identityResult.value.displayName.trim() || null
-      : null,
-    ganamos: ganamosResult.status === "fulfilled" ? ganamosResult.value : [],
-    multipanel: multipanelResult.status === "fulfilled" ? multipanelResult.value : [],
-    errors
+    profileName: profileNameResult.status === "fulfilled" ? profileNameResult.value : null,
+    ganamos: contactsResult.value.ganamos,
+    multipanel: contactsResult.value.multipanel,
+    errors: {}
   };
 }
 
 async function searchUsersByDigits(digits) {
-  const [ganamosResult, multipanelResult, identityResult] = await Promise.allSettled([
+  const [ganamosResult, multipanelResult, profileNameResult] = await Promise.allSettled([
     findGanamosUsersByDigits(digits),
     findMultiPanelUsersByDigits(digits),
-    requestDataApi("/v1/identity")
+    getCurrentWhatsAppProfileName()
   ]);
   const errors = {};
   if (ganamosResult.status === "rejected") {
@@ -1108,21 +1033,9 @@ async function searchUsersByDigits(digits) {
   if (multipanelResult.status === "rejected") {
     errors.multipanel = multipanelResult.reason?.message || "Error de búsqueda en MultiPanel.";
   }
-  let profileName = null;
-  if (identityResult.status === "fulfilled" &&
-    typeof identityResult.value?.displayName === "string" &&
-    identityResult.value.displayName.trim()) {
-    profileName = identityResult.value.displayName.trim();
-  } else if (identityResult.status === "rejected" &&
-    identityResult.reason?.status !== 401) {
-    console.error(
-      "[Ganamos balance extension] No se pudo consultar el nombre del perfil enrolado para la búsqueda de usuarios.",
-      identityResult.reason
-    );
-  }
   return {
     ok: true,
-    profileName,
+    profileName: profileNameResult.status === "fulfilled" ? profileNameResult.value : null,
     ganamos: ganamosResult.status === "fulfilled" ? ganamosResult.value : [],
     multipanel: multipanelResult.status === "fulfilled" ? multipanelResult.value : [],
     errors
@@ -1133,6 +1046,37 @@ function isValidKnownUserList(usernames) {
   return Array.isArray(usernames) && usernames.length <= 500 &&
     usernames.every((username) =>
       typeof username === "string" && username.length > 0 && username.length <= 64);
+}
+
+async function getCurrentWhatsAppProfileName() {
+  let profileName = null;
+  try {
+    const identity = await requestDataApi("/v1/identity");
+    if (typeof identity?.displayName === "string" && identity.displayName.trim()) {
+      profileName = identity.displayName.trim();
+    }
+  } catch (error) {
+    if (error?.status !== 401) {
+      console.error(
+        "[Ganamos balance extension] No se pudo consultar el nombre del perfil enrolado.",
+        error
+      );
+    }
+  }
+  if (profileName) return profileName;
+
+  try {
+    const stored = await getExtensionState("whatsappProfileName");
+    return typeof stored.whatsappProfileName === "string"
+      ? stored.whatsappProfileName.trim() || null
+      : null;
+  } catch (error) {
+    console.error(
+      "[Ganamos balance extension] No se pudo cargar el nombre alternativo del perfil de WhatsApp.",
+      error
+    );
+    return null;
+  }
 }
 
 async function getMultiPanelBalance(data) {
@@ -2085,7 +2029,7 @@ function validateApiMessage(message, suffixes) {
   return validateTransaction({ ...message.data, platform }, suffixes);
 }
 
-async function executeApiMessage(message) {
+async function executeApiMessage(message, senderTabId = null) {
   const suffixes = [
     "AGENT_BALANCE_REQUEST",
     "MULTIPANEL_AGENT_BALANCE_REQUEST",
@@ -2100,7 +2044,9 @@ async function executeApiMessage(message) {
   if (message.type === "AGENT_BALANCE_REQUEST") return getGanamosAgentBalance();
   if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return getMultiPanelAgentBalance();
   if (message.type === "USER_SEARCH_REQUEST") return searchUsersByDigits(message.data.digits);
-  if (message.type === "USER_SEARCH_PROFILE_REQUEST") return searchUsersByKnownNames(message.data);
+  if (message.type === "USER_SEARCH_PROFILE_REQUEST") {
+    return searchUsersByKnownNames(message.data, senderTabId);
+  }
   if (message.type === "SPORT_BETS_REQUEST") {
     return message.data.platform === "multipanel"
       ? getMultiPanelActiveSportBets(message.data)
@@ -2448,7 +2394,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     getBridgeSettings().then(({ role }) => {
       if (role !== "primary") throw new Error("Este perfil no está configurado como principal.");
-      return executeApiMessage(message.message);
+      return executeApiMessage(message.message, sender.tab?.id);
     }).then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo ejecutar la solicitud en el perfil principal." }));
     return true;
@@ -2498,7 +2444,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!isValidKnownUserList(users.ganamos) || !isValidKnownUserList(users.multipanel)) {
         throw new Error("La lista de usuarios para verificar no es válida.");
       }
-      return searchUsersByKnownNames(users);
+      return searchUsersByKnownNames(users, sender.tab?.id);
     }).then(sendResponse)
       .catch((error) => sendResponse({
         ok: false,
