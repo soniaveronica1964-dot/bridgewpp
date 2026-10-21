@@ -32,6 +32,8 @@ let extensionStateCache = {};
 const withdrawalUserCache = new Map();
 let profileRuntimeStatePromise = null;
 let dataProfileSelectorPromise = null;
+let cachedWhatsAppProfileName = null;
+let cachedWhatsAppProfileNameUntil = 0;
 const extensionStateOnChanged = {
   addListener(listener) {
     stateChangedListeners.add(listener);
@@ -987,35 +989,51 @@ async function findMultiPanelUsersByDigits(digits) {
 async function searchUsersByKnownNames(data, tabId) {
   const ganamos = Array.isArray(data?.ganamos) ? data.ganamos : [];
   const multipanel = Array.isArray(data?.multipanel) ? data.multipanel : [];
-  if (!Number.isInteger(tabId) || tabId < 0) {
-    throw new Error("No se pudo identificar la pestaña de WhatsApp de este perfil.");
+  const profileNamePromise = getCurrentWhatsAppProfileName();
+  const tabs = await chrome.tabs.query({ url: `${WHATSAPP_ORIGIN}/*` });
+  const tabIds = [...new Set([
+    ...(Number.isInteger(tabId) && tabId >= 0 ? [tabId] : []),
+    ...tabs.map((tab) => tab.id).filter((id) => Number.isInteger(id) && id >= 0)
+  ])];
+  if (!tabIds.length) {
+    throw new Error("No hay una pestaña activa de WhatsApp Web para consultar este perfil.");
   }
-  const [profileNameResult, contactsResult] = await Promise.allSettled([
-    getCurrentWhatsAppProfileName(),
-    chrome.tabs.sendMessage(tabId, {
-      type: "WHATSAPP_SEARCH_KNOWN_USERS",
-      users: { ganamos, multipanel }
-    })
-  ]);
-  if (contactsResult.status === "rejected") {
+
+  let lastError = null;
+  let contacts;
+  for (const candidateTabId of tabIds) {
+    try {
+      const response = await chrome.tabs.sendMessage(candidateTabId, {
+        type: "WHATSAPP_SEARCH_KNOWN_USERS",
+        users: { ganamos, multipanel }
+      });
+      if (!response?.ok) {
+        lastError = new Error(response?.error || "La lista de chats todavía no está disponible.");
+        continue;
+      }
+      if (!Array.isArray(response.ganamos) || !Array.isArray(response.multipanel)) {
+        lastError = new Error("El perfil devolvió una lista de contactos con formato no válido.");
+        continue;
+      }
+      contacts = response;
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!contacts) {
     throw new Error(
-      contactsResult.reason?.message ||
-      "No se pudo leer la lista de contactos de WhatsApp de este perfil."
+      lastError?.message ||
+      "No se pudo leer la lista de chats de WhatsApp en ninguna pestaña de este perfil."
     );
   }
-  if (!contactsResult.value?.ok ||
-    !Array.isArray(contactsResult.value.ganamos) ||
-    !Array.isArray(contactsResult.value.multipanel)) {
-    throw new Error(
-      contactsResult.value?.error ||
-      "El perfil devolvió una lista de contactos con formato no válido."
-    );
-  }
+
+  const profileName = await profileNamePromise;
   return {
     ok: true,
-    profileName: profileNameResult.status === "fulfilled" ? profileNameResult.value : null,
-    ganamos: contactsResult.value.ganamos,
-    multipanel: contactsResult.value.multipanel,
+    profileName,
+    ganamos: contacts.ganamos,
+    multipanel: contacts.multipanel,
     errors: {}
   };
 }
@@ -1049,6 +1067,7 @@ function isValidKnownUserList(usernames) {
 }
 
 async function getCurrentWhatsAppProfileName() {
+  if (Date.now() < cachedWhatsAppProfileNameUntil) return cachedWhatsAppProfileName;
   let profileName = null;
   try {
     const identity = await requestDataApi("/v1/identity");
@@ -1063,20 +1082,22 @@ async function getCurrentWhatsAppProfileName() {
       );
     }
   }
-  if (profileName) return profileName;
-
-  try {
-    const stored = await getExtensionState("whatsappProfileName");
-    return typeof stored.whatsappProfileName === "string"
-      ? stored.whatsappProfileName.trim() || null
-      : null;
-  } catch (error) {
-    console.error(
-      "[Ganamos balance extension] No se pudo cargar el nombre alternativo del perfil de WhatsApp.",
-      error
-    );
-    return null;
+  if (!profileName) {
+    try {
+      const stored = await getExtensionState("whatsappProfileName");
+      profileName = typeof stored.whatsappProfileName === "string"
+        ? stored.whatsappProfileName.trim() || null
+        : null;
+    } catch (error) {
+      console.error(
+        "[Ganamos balance extension] No se pudo cargar el nombre alternativo del perfil de WhatsApp.",
+        error
+      );
+    }
   }
+  cachedWhatsAppProfileName = profileName;
+  cachedWhatsAppProfileNameUntil = Date.now() + (profileName ? 5 * 60_000 : 30_000);
+  return profileName;
 }
 
 async function getMultiPanelBalance(data) {

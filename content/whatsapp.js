@@ -1100,6 +1100,9 @@
     if (!rows.length) rows.push(...sidebar.querySelectorAll(
       '[data-testid="cell-frame-container"], [role="listitem"]'
     ));
+    if (!rows.length) {
+      return { ok: false, error: "La lista de chats de WhatsApp todavía no está cargada en esta pestaña." };
+    }
     const found = { ganamos: new Set(), multipanel: new Set() };
     const requested = {
       ganamos: new Map(users.ganamos.map((username) => [username.normalize("NFC").toLowerCase(), username])),
@@ -8570,7 +8573,7 @@
           const profileName = typeof profile.profileName === "string" &&
             profile.profileName.trim()
             ? profile.profileName.trim()
-            : result.profiles.length === 1
+            : profile.profileRole === "primary" || result.profiles.length === 1
               ? name
               : "Perfil de WhatsApp sin nombre";
           if (profile.ok === false) {
