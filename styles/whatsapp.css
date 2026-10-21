@@ -537,6 +537,18 @@
   display: none !important;
 }
 
+.withdrawal-limit-inline[data-comparison="below"] {
+  border-color: #a85d65;
+  color: #f2dfe1;
+  background: #653b40;
+}
+
+.withdrawal-limit-inline[data-comparison="above"] {
+  border-color: #4c9c75;
+  color: #e0f1e7;
+  background: #28604b;
+}
+
 .exchange-button:hover:not(:disabled) {
   border-color: #00a884;
   background: #263432;
@@ -2712,28 +2724,6 @@ button:disabled {
   font-size: 12px;
 }
 
-.withdrawal-limit-shortcuts button[data-amount="150000"][data-comparison="below"] {
-  border-color: #a85d65;
-  color: #f2dfe1;
-  background: #653b40;
-}
-
-.withdrawal-limit-shortcuts button[data-amount="150000"][data-comparison="below"]:hover:not(:disabled) {
-  border-color: #c8757e;
-  background: #76474d;
-}
-
-.withdrawal-limit-shortcuts button[data-amount="150000"][data-comparison="above"] {
-  border-color: #4c9c75;
-  color: #e0f1e7;
-  background: #28604b;
-}
-
-.withdrawal-limit-shortcuts button[data-amount="150000"][data-comparison="above"]:hover:not(:disabled) {
-  border-color: #62b58b;
-  background: #347456;
-}
-
 .movement-history-dates[hidden] {
   display: none;
 }
@@ -4098,6 +4088,15 @@ input::placeholder {
   font-size: 15px;
   font-weight: 600;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-withdrawals-age {
+  flex: 0 0 auto;
+  color: #ffb7bd;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
   white-space: nowrap;
 }
 

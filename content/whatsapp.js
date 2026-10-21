@@ -69,11 +69,15 @@
   let pendingWithdrawalsList = null;
   let pendingWithdrawalsToggle = null;
   let pendingWithdrawalsRenderedSignature = null;
+  let pendingWithdrawalsTimer = null;
   let pendingWithdrawalBalanceRefreshInProgress = false;
   let contactVisualTags = {};
   const blockedUserAccountSettings = new Set();
   const loadedBlockedUserAccountSettings = new Set();
   const pendingBlockedUserAccountSettings = new Set();
+  const bonusDisabledUserAccountSettings = new Set();
+  const loadedBonusDisabledUserAccountSettings = new Set();
+  const pendingBonusDisabledUserAccountSettings = new Set();
   let contactVisualTagsLoadPromise = null;
   let contactVisualTagSaveQueue = Promise.resolve();
   let contactTagScanScheduled = false;
@@ -179,10 +183,15 @@
     if (areaName === "local" &&
       Object.keys(changes).some((key) => key.startsWith("userSetting:"))) {
       for (const [key, change] of Object.entries(changes)) {
-        if (!key.startsWith("userSetting:userBlocked:")) continue;
-        loadedBlockedUserAccountSettings.add(key);
-        if (change.newValue === true) blockedUserAccountSettings.add(key);
-        else blockedUserAccountSettings.delete(key);
+        if (key.startsWith("userSetting:userBlocked:")) {
+          loadedBlockedUserAccountSettings.add(key);
+          if (change.newValue === true) blockedUserAccountSettings.add(key);
+          else blockedUserAccountSettings.delete(key);
+        } else if (key.startsWith("userSetting:userBonusDisabled:")) {
+          loadedBonusDisabledUserAccountSettings.add(key);
+          if (change.newValue === true) bonusDisabledUserAccountSettings.add(key);
+          else bonusDisabledUserAccountSettings.delete(key);
+        }
       }
       updateContactUserSearchBlockedIndicators(
         document.getElementById(HOST_ID)?.shadowRoot
@@ -946,6 +955,11 @@
     indicator.title = Number.isFinite(amount) && amount >= 0
       ? `Monto máximo de retiro: $${formatBalance(amount)}`
       : "Monto máximo de retiro no disponible";
+    if (Number.isFinite(amount) && amount >= 0 && amount !== DEFAULT_WITHDRAWAL_LIMIT) {
+      indicator.dataset.comparison = amount < DEFAULT_WITHDRAWAL_LIMIT ? "below" : "above";
+    } else {
+      delete indicator.dataset.comparison;
+    }
     const informationButton = host.shadowRoot.querySelector(".user-information-button");
     const exchangeButton = host.shadowRoot.querySelector(".exchange-button");
     indicator.hidden = !host.dataset.accounts || Boolean(informationButton?.hidden) ||
@@ -1101,6 +1115,16 @@
       ));
   }
 
+  function getSidebarBonusDisabledSettingKeys(row) {
+    return Object.entries(getSidebarPlatformUsernames(row))
+      .filter(([platform, username]) =>
+        ["ganamos", "multipanel"].includes(platform) && username)
+      .map(([platform, username]) => getUserAccountSettingKey(
+        "userBonusDisabled",
+        { platform, username: username.toLowerCase() }
+      ));
+  }
+
   function updateContactSidebarTags() {
     ensureContactVisualTagStyles();
     const sidebar = document.querySelector("#pane-side");
@@ -1110,13 +1134,21 @@
     if (!rows.length) rows = [...sidebar.querySelectorAll('[role="listitem"]')];
     const activeIdentities = getActiveContactVisualTagIdentities() || [];
     const blockedSettingsToLoad = new Set();
+    const bonusDisabledSettingsToLoad = new Set();
     for (const row of rows) {
       const identities = getSidebarContactIdentity(row);
       const blockedSettingKeys = getSidebarBlockedSettingKeys(row);
+      const bonusDisabledSettingKeys = getSidebarBonusDisabledSettingKeys(row);
       for (const key of blockedSettingKeys) {
         if (!loadedBlockedUserAccountSettings.has(key) &&
           !pendingBlockedUserAccountSettings.has(key)) {
           blockedSettingsToLoad.add(key);
+        }
+      }
+      for (const key of bonusDisabledSettingKeys) {
+        if (!loadedBonusDisabledUserAccountSettings.has(key) &&
+          !pendingBonusDisabledUserAccountSettings.has(key)) {
+          bonusDisabledSettingsToLoad.add(key);
         }
       }
       const tags = getContactVisualTags(identities);
@@ -1136,8 +1168,15 @@
       row.removeAttribute("data-extension-contact-active");
       const isBlocked = blockedSettingKeys.some((key) =>
         blockedUserAccountSettings.has(key));
-      const visualTags = [tag, isBlocked ? "blocked" : null].filter(Boolean);
+      const isBonusDisabled = bonusDisabledSettingKeys.some((key) =>
+        bonusDisabledUserAccountSettings.has(key));
+      const visualTags = [
+        tag,
+        isBlocked ? "blocked" : null,
+        isBonusDisabled ? "bonus-disabled" : null
+      ].filter(Boolean);
       visualCell.toggleAttribute("data-extension-user-blocked", isBlocked);
+      visualCell.toggleAttribute("data-extension-bonus-disabled", isBonusDisabled);
       if (visualTags.length) {
         visualCell.setAttribute("data-extension-contact-tag", visualTags.join(" "));
         visualCell.toggleAttribute(
@@ -1168,6 +1207,26 @@
         ))
         .finally(() => {
           for (const key of keys) pendingBlockedUserAccountSettings.delete(key);
+        });
+    }
+    if (bonusDisabledSettingsToLoad.size) {
+      const keys = [...bonusDisabledSettingsToLoad];
+      for (const key of keys) pendingBonusDisabledUserAccountSettings.add(key);
+      void stateStorage.get(keys)
+        .then((stored) => {
+          for (const key of keys) {
+            loadedBonusDisabledUserAccountSettings.add(key);
+            if (stored[key] === true) bonusDisabledUserAccountSettings.add(key);
+            else bonusDisabledUserAccountSettings.delete(key);
+          }
+          scheduleContactTagScan();
+        })
+        .catch((error) => console.error(
+          "[Ganamos balance extension] No se pudo cargar la marca Bonos Desactivados de los chats visibles.",
+          error
+        ))
+        .finally(() => {
+          for (const key of keys) pendingBonusDisabledUserAccountSettings.delete(key);
         });
     }
   }
@@ -2176,6 +2235,10 @@
     void savePendingWithdrawals();
   }
 
+  function getPendingWithdrawalAge(createdAt, now = Date.now()) {
+    return `${Math.floor(Math.max(0, now - createdAt) / 60_000)}m`;
+  }
+
   function renderPendingWithdrawals() {
     const host = document.getElementById(PENDING_WITHDRAWALS_HOST_ID);
     if (!host || !pendingWithdrawalsToggle || !pendingWithdrawalsList) return;
@@ -2186,13 +2249,22 @@
       ? ""
       : "none";
     const count = pendingWithdrawals.length;
-    pendingWithdrawalsToggle.textContent = `${count} retiros pendientes`;
+    const now = Date.now();
+    const longestPendingAge = pendingWithdrawals.reduce(
+      (longest, withdrawal) => Math.max(longest, now - withdrawal.createdAt),
+      0
+    );
+    const longestPendingAgeLabel = pendingWithdrawals.length
+      ? ` · ${Math.floor(Math.max(0, longestPendingAge) / 60_000)}m`
+      : "";
+    pendingWithdrawalsToggle.textContent =
+      `${count} retiros pendientes${longestPendingAgeLabel}`;
     pendingWithdrawalsToggle.setAttribute("aria-expanded", String(pendingWithdrawalsExpanded));
     pendingWithdrawalsList.hidden = !pendingWithdrawalsExpanded;
     if (!pendingWithdrawalsExpanded) return;
     const signature = JSON.stringify(
-      pendingWithdrawals.map(({ id, name, accounts, balances }) =>
-        [id, name, accounts, balances])
+      pendingWithdrawals.map(({ id, name, accounts, balances, createdAt }) =>
+        [id, name, accounts, balances, getPendingWithdrawalAge(createdAt, now)])
     );
     if (signature === pendingWithdrawalsRenderedSignature) return;
     pendingWithdrawalsList.replaceChildren();
@@ -2208,6 +2280,10 @@
         username.textContent = line;
         contact.append(username);
       }
+      const age = document.createElement("span");
+      age.className = "pending-withdrawals-age";
+      age.textContent = getPendingWithdrawalAge(withdrawal.createdAt, now);
+      age.setAttribute("aria-label", `Pendiente hace ${age.textContent}`);
       const complete = document.createElement("button");
       complete.type = "button";
       complete.className = "pending-withdrawals-complete";
@@ -2221,7 +2297,7 @@
       icon.append(path);
       complete.append(icon);
       complete.addEventListener("click", () => completePendingWithdrawal(withdrawal.id));
-      row.append(contact, complete);
+      row.append(contact, age, complete);
       pendingWithdrawalsList.append(row);
     }
     pendingWithdrawalsRenderedSignature = signature;
@@ -2258,6 +2334,9 @@
       pendingWithdrawalsExpanded = !pendingWithdrawalsExpanded;
       renderPendingWithdrawals();
     });
+    if (pendingWithdrawalsTimer === null) {
+      pendingWithdrawalsTimer = window.setInterval(renderPendingWithdrawals, 60_000);
+    }
     pendingWithdrawalsList = document.createElement("div");
     pendingWithdrawalsList.className = "pending-withdrawals-list";
     pendingWithdrawalsList.setAttribute("role", "list");
@@ -4875,11 +4954,6 @@
       for (const button of withdrawalLimitShortcuts.querySelectorAll("button")) {
         const amount = Number(button.dataset.amount);
         button.setAttribute("aria-pressed", String(amount === currentValue));
-        if (amount === 150000 && currentValue !== null && currentValue !== amount) {
-          button.dataset.comparison = currentValue < amount ? "below" : "above";
-        } else {
-          delete button.dataset.comparison;
-        }
       }
     };
     for (const amount of withdrawalLimitPresets) {
@@ -8461,6 +8535,11 @@
       const namesByPlatform = [];
       result ||= {};
       result.errors ||= {};
+      const hasEnrolledProfileName = typeof result.profileName === "string" &&
+        Boolean(result.profileName.trim());
+      const profileName = hasEnrolledProfileName
+        ? result.profileName.trim()
+        : name;
       for (const platform of ["ganamos", "multipanel"]) {
         const names = result?.[platform];
         if (!Array.isArray(names)) {
@@ -8469,7 +8548,12 @@
         }
         for (const username of names) {
           if (typeof username === "string" && username.includes(digits)) {
-            namesByPlatform.push({ username, platform, destinationId, sourceName: name });
+            namesByPlatform.push({
+              username,
+              platform,
+              destinationId,
+              sourceName: profileName
+            });
           }
         }
       }
@@ -8516,7 +8600,9 @@
         row.className = "contact-user-search-row";
         const pcLabel = document.createElement("span");
         pcLabel.className = "contact-user-search-pc";
-        pcLabel.textContent = `${name}: `;
+        pcLabel.textContent = `${hasEnrolledProfileName
+          ? "Perfil de Publicidad"
+          : "Destino configurado"} · ${profileName}: `;
         row.append(pcLabel);
         namesByPlatform.forEach(({ username, platform }, index) => {
           if (index) row.append(document.createTextNode(" / "));
@@ -8527,9 +8613,9 @@
           usernameLabel.dataset.platform = platform;
           usernameLabel.setAttribute(
             "aria-label",
-            `${platform === "ganamos" ? "Ganamos" : "MultiPanel"}: ${username}`
+            `${platform === "ganamos" ? "Ganamos" : "MultiPanel"}: ${username}, encontrado en ${profileName}`
           );
-          usernameLabel.title = username;
+          usernameLabel.title = `${username} · ${profileName}`;
           usernameLabel.addEventListener("click", () =>
             void copyContactValue(
               host,
@@ -8580,15 +8666,21 @@
               type: "REMOTE_USER_SEARCH_REQUEST",
               data: { destinationId: destination.id, digits }
             });
-            if (!response?.ok) throw new Error(response?.error || "La búsqueda remota no se completó.");
-            return { destination, result: response };
+            if (!response?.ok) {
+              throw new Error(response?.error || "La búsqueda remota no se completó.");
+            }
+            return { name: destination.name, destinationId: destination.id, result: response };
           } catch (error) {
-            return { destination, error: error.message || "No se pudo consultar la PC." };
+            return {
+              name: destination.name,
+              destinationId: destination.id,
+              error: error.message || "No se pudo consultar la PC."
+            };
           }
         }));
         if (!isCurrentContact()) return;
-        for (const { destination, result, error } of results) {
-          await appendSearchResult(destination.name, result, error, destination.id);
+        for (const { name, destinationId, result, error } of results) {
+          await appendSearchResult(name, result, error, destinationId);
         }
       } else {
         const response = await chrome.runtime.sendMessage({
@@ -8598,7 +8690,11 @@
         if (!isCurrentContact()) return;
         if (!response?.ok) throw new Error(response?.error || "La búsqueda en esta PC no se completó.");
         dismissToast(`user-search:local:${digits}`);
-        await appendSearchResult("Esta PC", response);
+        const profileSettings = await stateStorage.get("whatsappProfileName");
+        const localProfileName = typeof profileSettings.whatsappProfileName === "string"
+          ? profileSettings.whatsappProfileName.trim() || "Perfil actual"
+          : "Perfil actual";
+        await appendSearchResult(localProfileName, response);
       }
     } catch (error) {
       if (!isCurrentContact()) return;

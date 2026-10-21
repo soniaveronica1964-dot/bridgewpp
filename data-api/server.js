@@ -239,7 +239,7 @@ function buildReport(payload) {
       "bridgeRole", "bridgeToken", "ganamosUserId", "ganamosSuffix",
       "multiPanelSuffix", "userCreationPassword", "remoteCreateDestinations",
       "multiPanelSession", "activeBonusConfig", "hiddenAdvertisingProfiles", "contactFlowCounters",
-      "contactVisualTags",
+      "contactVisualTags", "whatsappProfileName",
       "agentBalanceView", "agentBalancesMinimized", "platformOutageConfig"
     ].includes(entry.key) && !isUserAccountSettingKey(entry.key)) {
       unknownKeyCount++;
@@ -357,6 +357,7 @@ const PROFILE_SETTING_KEYS = new Set([
   "activeBonusConfig",
   "hiddenAdvertisingProfiles",
   "platformOutageConfig",
+  "whatsappProfileName",
   "agentBalanceView",
   "agentBalancesMinimized"
 ]);
@@ -779,6 +780,11 @@ async function writeExtensionState(pool, config, identity, changes, removes, exp
       key.startsWith(USER_ACCOUNT_SETTING_PREFIX) &&
       !validateUserAccountSettingValue(key, value))) {
     throw new ApiError(400, "invalid_state", "Una configuración de usuario compartida no es válida.");
+  }
+  if (Object.hasOwn(changes, "whatsappProfileName") &&
+    (typeof changes.whatsappProfileName !== "string" ||
+      changes.whatsappProfileName.length > 40)) {
+    throw new ApiError(400, "invalid_state", "El nombre del perfil de WhatsApp no es válido.");
   }
   const hiddenAdvertisingProfiles = changes.hiddenAdvertisingProfiles;
   if (Object.hasOwn(changes, "hiddenAdvertisingProfiles") &&
@@ -2067,6 +2073,7 @@ function createDataApiServer({ pool, config }) {
     const result = await pool.query(`
       SELECT p.profile_id, p.workspace_id, p.device_id, p.installation_id,
              p.source_extension, p.is_workspace_admin,
+             d.display_name,
              p.revoked_at_ms AS profile_revoked_at_ms,
              d.revoked_at_ms AS device_revoked_at_ms,
              d.device_proof_ciphertext, w.server_id
@@ -2204,6 +2211,7 @@ function createDataApiServer({ pool, config }) {
           workspaceId: identity.workspace_id,
           profileId: identity.profile_id,
           deviceId: identity.device_id,
+          displayName: identity.display_name,
           installationId: identity.installation_id,
           sourceExtensionId: identity.source_extension,
           enrolled: true,

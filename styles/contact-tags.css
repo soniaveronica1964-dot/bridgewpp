@@ -17,6 +17,15 @@
   ) !important;
 }
 
+#pane-side [data-testid="cell-frame-container"][data-extension-contact-tag~="bonus-disabled"],
+#pane-side [role="row"][data-extension-contact-tag~="bonus-disabled"],
+#pane-side [role="listitem"][data-extension-contact-tag~="bonus-disabled"],
+#pane-side [data-extension-bonus-disabled="true"] {
+  border: 2px solid #fadb14 !important;
+  border-radius: 8px !important;
+  box-sizing: border-box !important;
+}
+
 #pane-side [data-testid="cell-frame-container"][data-extension-contact-tag~="blocked"],
 #pane-side [role="row"][data-extension-contact-tag~="blocked"],
 #pane-side [role="listitem"][data-extension-contact-tag~="blocked"] {

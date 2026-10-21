@@ -4,6 +4,7 @@ const tokenInput = document.querySelector("#token");
 const ganamosSuffixInput = document.querySelector("#ganamosSuffix");
 const multiPanelSuffixInput = document.querySelector("#multiPanelSuffix");
 const userCreationPasswordInput = document.querySelector("#userCreationPassword");
+const whatsappProfileNameInput = document.querySelector("#whatsappProfileName");
 const hint = document.querySelector("#hint");
 const status = document.querySelector("#status");
 const backupForm = document.querySelector("#backupForm");
@@ -965,6 +966,7 @@ document.querySelector("#settings").addEventListener("submit", async (event) => 
   const token = tokenInput.value.trim();
   const ganamosSuffix = ganamosSuffixInput.value.trim().toLowerCase();
   const multiPanelSuffix = multiPanelSuffixInput.value.trim().toLowerCase();
+  const whatsappProfileName = whatsappProfileNameInput.value.trim();
   if (!["standalone", "primary", "secondary"].includes(role)) {
     status.textContent = "Elegí un modo válido.";
     return;
@@ -976,6 +978,10 @@ document.querySelector("#settings").addEventListener("submit", async (event) => 
   if (!/^[a-z]$/.test(ganamosSuffix) || !/^[a-z]$/.test(multiPanelSuffix) ||
     ganamosSuffix === multiPanelSuffix) {
     status.textContent = "Ingresá una sola letra para cada plataforma y asegurate de que sean distintas.";
+    return;
+  }
+  if (whatsappProfileName.length > 40) {
+    status.textContent = "El nombre del perfil de WhatsApp admite hasta 40 caracteres.";
     return;
   }
   let remoteDestinations;
@@ -1009,6 +1015,7 @@ document.querySelector("#settings").addEventListener("submit", async (event) => 
       ganamosSuffix,
       multiPanelSuffix,
       userCreationPassword: userCreationPasswordInput.value,
+      whatsappProfileName,
       remoteCreateDestinations: remoteDestinations
     });
     const removedOrigins = previousOrigins.filter((origin) => !origins.includes(origin));
@@ -1026,9 +1033,10 @@ stateStorage.get([
   "ganamosSuffix",
   "multiPanelSuffix",
   "userCreationPassword",
+  "whatsappProfileName",
   "remoteCreateDestinations"
 ])
-  .then(({ bridgeRole, bridgeToken, ganamosUserId, ganamosSuffix, multiPanelSuffix, userCreationPassword, remoteCreateDestinations }) => {
+  .then(({ bridgeRole, bridgeToken, ganamosUserId, ganamosSuffix, multiPanelSuffix, userCreationPassword, whatsappProfileName, remoteCreateDestinations }) => {
     roleInput.value = ["primary", "secondary"].includes(bridgeRole) ? bridgeRole : "standalone";
     ganamosUserIdInput.value = /^\d+$/.test(String(ganamosUserId ?? ""))
       ? String(ganamosUserId)
@@ -1037,6 +1045,9 @@ stateStorage.get([
     ganamosSuffixInput.value = typeof ganamosSuffix === "string" ? ganamosSuffix : "f";
     multiPanelSuffixInput.value = typeof multiPanelSuffix === "string" ? multiPanelSuffix : "y";
     userCreationPasswordInput.value = typeof userCreationPassword === "string" ? userCreationPassword : "";
+    whatsappProfileNameInput.value = typeof whatsappProfileName === "string"
+      ? whatsappProfileName
+      : "";
     populateRemoteDestinations(Array.isArray(remoteCreateDestinations) ? remoteCreateDestinations : []);
     updateHint();
   })

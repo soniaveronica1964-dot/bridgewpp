@@ -985,9 +985,10 @@ async function findMultiPanelUsersByDigits(digits) {
 }
 
 async function searchUsersByDigits(digits) {
-  const [ganamosResult, multipanelResult] = await Promise.allSettled([
+  const [ganamosResult, multipanelResult, identityResult] = await Promise.allSettled([
     findGanamosUsersByDigits(digits),
-    findMultiPanelUsersByDigits(digits)
+    findMultiPanelUsersByDigits(digits),
+    requestDataApi("/v1/identity")
   ]);
   const errors = {};
   if (ganamosResult.status === "rejected") {
@@ -996,8 +997,21 @@ async function searchUsersByDigits(digits) {
   if (multipanelResult.status === "rejected") {
     errors.multipanel = multipanelResult.reason?.message || "Error de búsqueda en MultiPanel.";
   }
+  let profileName = null;
+  if (identityResult.status === "fulfilled" &&
+    typeof identityResult.value?.displayName === "string" &&
+    identityResult.value.displayName.trim()) {
+    profileName = identityResult.value.displayName.trim();
+  } else if (identityResult.status === "rejected" &&
+    identityResult.reason?.status !== 401) {
+    console.error(
+      "[Ganamos balance extension] No se pudo consultar el nombre del perfil enrolado para la búsqueda de usuarios.",
+      identityResult.reason
+    );
+  }
   return {
     ok: true,
+    profileName,
     ganamos: ganamosResult.status === "fulfilled" ? ganamosResult.value : [],
     multipanel: multipanelResult.status === "fulfilled" ? multipanelResult.value : [],
     errors
