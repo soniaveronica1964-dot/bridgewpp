@@ -16,7 +16,6 @@ const ALLOWED_REQUEST_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
   "USER_SEARCH_REQUEST",
-  "USER_SEARCH_PROFILE_REQUEST",
   "SPORT_BETS_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
@@ -47,8 +46,6 @@ const waitingPlatformOutagePolls = [];
 const waitingHiddenAdvertisingProfilesPolls = [];
 const pendingRequests = new Map();
 const remoteNonces = new Map();
-const secondaryClients = new Map();
-const waitingSecondaryPolls = new Map();
 
 function isLoopback(remoteAddress) {
   return remoteAddress === "127.0.0.1" ||
@@ -182,171 +179,6 @@ function waitForTask(response, origin) {
     clearTimeout(poll.timer);
     const index = waitingPolls.indexOf(poll);
     if (index !== -1) waitingPolls.splice(index, 1);
-  });
-}
-
-function waitForSecondaryTask(response, origin, clientId) {
-  const client = secondaryClients.get(clientId) || { queue: [] };
-  client.lastSeen = Date.now();
-  secondaryClients.set(clientId, client);
-  const queued = client.queue.shift();
-  if (queued) {
-    sendJson(response, 200, { ok: true, task: queued }, origin);
-    return;
-  }
-  const previous = waitingSecondaryPolls.get(clientId);
-  if (previous) {
-    clearTimeout(previous.timer);
-    previous.finish(null);
-  }
-  const poll = {
-    finish: (task) => sendJson(response, 200, { ok: true, task }, origin),
-    timer: setTimeout(() => {
-      if (waitingSecondaryPolls.get(clientId) === poll) {
-        waitingSecondaryPolls.delete(clientId);
-      }
-      poll.finish(null);
-    }, POLL_TIMEOUT_MS)
-  };
-  waitingSecondaryPolls.set(clientId, poll);
-  response.on("close", () => {
-    clearTimeout(poll.timer);
-    if (waitingSecondaryPolls.get(clientId) === poll) {
-      waitingSecondaryPolls.delete(clientId);
-    }
-  });
-}
-
-function enqueueSecondaryTask(clientId, task) {
-  const client = secondaryClients.get(clientId);
-  if (!client) return;
-  const poll = waitingSecondaryPolls.get(clientId);
-  if (poll) {
-    clearTimeout(poll.timer);
-    waitingSecondaryPolls.delete(clientId);
-    poll.finish(task);
-    return;
-  }
-  client.queue.push(task);
-}
-
-function removeQueuedSecondaryTask(taskId) {
-  for (const client of secondaryClients.values()) {
-    client.queue = client.queue.filter(({ id }) => id !== taskId);
-  }
-}
-
-function mergeSearchResults(primaryResult, secondaryResults, missingSecondaryCount = 0) {
-  const results = [primaryResult, ...secondaryResults];
-  const merged = {
-    ok: true,
-    profiles: results.map((result) => ({
-      ok: result.ok !== false,
-      profileName: typeof result.profileName === "string" ? result.profileName : null,
-      ...(typeof result.error === "string" ? { error: result.error } : {}),
-      ganamos: Array.isArray(result.ganamos) ? result.ganamos : [],
-      multipanel: Array.isArray(result.multipanel) ? result.multipanel : [],
-      errors: result.errors && typeof result.errors === "object" ? result.errors : {}
-    })),
-    missingSecondaryCount
-  };
-  merged.profiles[0].profileRole = "primary";
-  for (const profile of merged.profiles.slice(1)) profile.profileRole = "secondary";
-  return merged;
-}
-
-function submitTaskAndWait(task, timeoutError) {
-  return new Promise((resolve) => {
-    const isSearch = ["USER_SEARCH_REQUEST", "USER_SEARCH_PROFILE_REQUEST"]
-      .includes(task.message.type);
-    const staleClientIds = [...secondaryClients]
-      .filter(([, client]) => Date.now() - client.lastSeen >= 45_000)
-      .map(([clientId]) => clientId);
-    for (const clientId of staleClientIds) {
-      secondaryClients.delete(clientId);
-      const poll = waitingSecondaryPolls.get(clientId);
-      if (poll) {
-        clearTimeout(poll.timer);
-        waitingSecondaryPolls.delete(clientId);
-        poll.finish(null);
-      }
-    }
-    const secondaryIds = isSearch
-      ? [...secondaryClients]
-        .filter(([, client]) => Date.now() - client.lastSeen < 45_000)
-        .map(([clientId]) => clientId)
-      : [];
-    const pending = {
-      primaryResult: null,
-      secondaryResults: new Map(),
-      expectedSecondaryIds: new Set(secondaryIds),
-      finish: (value) => {
-        clearTimeout(timeout);
-        pendingRequests.delete(task.id);
-        removeQueuedSecondaryTask(task.id);
-        resolve(value);
-      },
-      completePrimary: (result) => {
-        if (!isSearch) {
-          pending.finish(result);
-          return;
-        }
-        pending.primaryResult = result;
-        const candidateSource = task.message.type === "USER_SEARCH_PROFILE_REQUEST"
-          ? task.message.data
-          : result;
-        const candidates = {
-          ganamos: [...new Set((Array.isArray(candidateSource?.ganamos) ? candidateSource.ganamos : [])
-            .filter((username) => typeof username === "string" && username.length > 0 && username.length <= 64))],
-          multipanel: [...new Set((Array.isArray(candidateSource?.multipanel) ? candidateSource.multipanel : [])
-            .filter((username) => typeof username === "string" && username.length > 0 && username.length <= 64))]
-        };
-        if (!candidates.ganamos.length && !candidates.multipanel.length) {
-          pending.expectedSecondaryIds.clear();
-        }
-        for (const clientId of pending.expectedSecondaryIds) {
-          enqueueSecondaryTask(clientId, {
-            id: task.id,
-            expiresAt: task.expiresAt,
-            message: {
-              type: "USER_SEARCH_PROFILE_REQUEST",
-              data: candidates
-            }
-          });
-        }
-        if (pending.secondaryResults.size === pending.expectedSecondaryIds.size) {
-          pending.finish(mergeSearchResults(
-            result,
-            [...pending.secondaryResults.values()]
-          ));
-        }
-      },
-      completeSecondary: (clientId, result) => {
-        if (!pending.expectedSecondaryIds.has(clientId)) return false;
-        pending.secondaryResults.set(clientId, result);
-        if (pending.primaryResult &&
-          pending.secondaryResults.size === pending.expectedSecondaryIds.size) {
-          pending.finish(mergeSearchResults(
-            pending.primaryResult,
-            [...pending.secondaryResults.values()]
-          ));
-        }
-        return true;
-      }
-    };
-    const timeout = setTimeout(() => {
-      if (pending.primaryResult) {
-        pending.finish(mergeSearchResults(
-          pending.primaryResult,
-          [...pending.secondaryResults.values()],
-          pending.expectedSecondaryIds.size - pending.secondaryResults.size
-        ));
-        return;
-      }
-      pending.finish({ ok: false, error: timeoutError });
-    }, REQUEST_TIMEOUT_MS);
-    pendingRequests.set(task.id, pending);
-    deliverTask(task);
   });
 }
 
@@ -694,47 +526,6 @@ async function handleRequest(request, response) {
     return;
   }
 
-  if (url.pathname === "/v1/secondary/next" && request.method === "GET") {
-    if (role !== "client") {
-      sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden recibir búsquedas." }, origin);
-      return;
-    }
-    const clientId = url.searchParams.get("clientId") || "";
-    if (!/^[a-f0-9-]{36}$/i.test(clientId)) {
-      sendJson(response, 400, { ok: false, error: "La identidad del perfil secundario no es válida." }, origin);
-      return;
-    }
-    waitForSecondaryTask(response, origin, clientId);
-    return;
-  }
-
-  if (url.pathname === "/v1/secondary/complete" && request.method === "POST") {
-    if (role !== "client") {
-      sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden completar búsquedas." }, origin);
-      return;
-    }
-    let body;
-    try {
-      body = await readJson(request);
-    } catch (error) {
-      sendJson(response, 400, { ok: false, error: error.message }, origin);
-      return;
-    }
-    const pending = pendingRequests.get(body?.id);
-    if (!/^[a-f0-9-]{36}$/i.test(body?.clientId || "") ||
-      !pending || !pending.expectedSecondaryIds.has(body.clientId) ||
-      !body.result || typeof body.result.ok !== "boolean" ||
-      pending.secondaryResults.has(body.clientId)) {
-      sendJson(response, 404, { ok: false, error: "La búsqueda secundaria ya no está pendiente." }, origin);
-      return;
-    }
-    pending.completeSecondary(body.clientId, body.result);
-    const client = secondaryClients.get(body.clientId);
-    if (client) client.lastSeen = Date.now();
-    sendJson(response, 200, { ok: true }, origin);
-    return;
-  }
-
   if (url.pathname === "/v1/request" && request.method === "POST") {
     if (role !== "client") {
       sendJson(response, 403, { ok: false, error: "El perfil principal no debe reenviar solicitudes." }, origin);
@@ -763,10 +554,25 @@ async function handleRequest(request, response) {
       message: body.message,
       expiresAt: Date.now() + REQUEST_TIMEOUT_MS
     };
-    const result = await submitTaskAndWait(
-      task,
-      "Se agotó el tiempo de espera del perfil principal. Verificá el estado antes de repetir la operación."
-    );
+    const result = await new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        pendingRequests.delete(body.id);
+        const queuedIndex = queuedRequests.findIndex((queued) => queued.id === body.id);
+        if (queuedIndex !== -1) queuedRequests.splice(queuedIndex, 1);
+        resolve({
+          ok: false,
+          error: "Se agotó el tiempo de espera del perfil principal. Verificá el estado antes de repetir la operación."
+        });
+      }, REQUEST_TIMEOUT_MS);
+      pendingRequests.set(body.id, {
+        finish: (value) => {
+          clearTimeout(timeout);
+          pendingRequests.delete(body.id);
+          resolve(value);
+        }
+      });
+      deliverTask(task);
+    });
     sendJson(response, 200, result, origin);
     return;
   }
@@ -788,7 +594,7 @@ async function handleRequest(request, response) {
       sendJson(response, 404, { ok: false, error: "La solicitud ya no está pendiente." }, origin);
       return;
     }
-    pending.completePrimary(body.result);
+    pending.finish(body.result);
     primaryLastSeen = Date.now();
     sendJson(response, 200, { ok: true }, origin);
     return;
@@ -810,13 +616,6 @@ function validateRemoteMessage(message) {
   }
   if (message?.type === "USER_SEARCH_REQUEST") {
     return /^\d{4}$/.test(message.data?.digits || "");
-  }
-  if (message?.type === "USER_SEARCH_PROFILE_REQUEST") {
-    const isValidUserList = (list) => Array.isArray(list) && list.length <= 500 &&
-      list.every((username) =>
-        typeof username === "string" && username.length > 0 && username.length <= 64);
-    return message.data && isValidUserList(message.data.ganamos) &&
-      isValidUserList(message.data.multipanel);
   }
   return ["AGENT_BALANCE_REQUEST", "MULTIPANEL_AGENT_BALANCE_REQUEST"]
     .includes(message?.type) && message.data === undefined;
@@ -924,22 +723,29 @@ async function handleRemoteCreateRequest(request, response) {
       type: "USER_SEARCH_REQUEST",
       data: { digits: body.message.data.digits }
     };
-  } else if (body.message.type === "USER_SEARCH_PROFILE_REQUEST") {
-    message = {
-      type: "USER_SEARCH_PROFILE_REQUEST",
-      data: {
-        ganamos: [...new Set(body.message.data.ganamos)],
-        multipanel: [...new Set(body.message.data.multipanel)]
-      }
-    };
   } else {
     message = { type: body.message.type };
   }
   const task = { id: body.id, expiresAt: Date.now() + REQUEST_TIMEOUT_MS, message };
-  const result = await submitTaskAndWait(
-    task,
-    "Se agotó el tiempo de espera de la PC destino. Verificá el resultado en esa PC antes de volver a intentarlo."
-  );
+  const result = await new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingRequests.delete(body.id);
+      const queuedIndex = queuedRequests.findIndex((queued) => queued.id === body.id);
+      if (queuedIndex !== -1) queuedRequests.splice(queuedIndex, 1);
+      resolve({
+        ok: false,
+        error: "Se agotó el tiempo de espera de la PC destino. Verificá el resultado en esa PC antes de volver a intentarlo."
+      });
+    }, REQUEST_TIMEOUT_MS);
+    pendingRequests.set(body.id, {
+      finish: (value) => {
+        clearTimeout(timeout);
+        pendingRequests.delete(body.id);
+        resolve(value);
+      }
+    });
+    deliverTask(task);
+  });
   sendSignedRemoteJson(response, result, origin, timestamp, nonce);
 }
 

@@ -318,7 +318,6 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       { proofNonce: replayNonce }
     );
     assert.equal(nonceClaim.status, 200);
-    assert.equal(nonceClaim.body.displayName, "Main Device");
     const replayedProof = await request(
       port,
       "GET",

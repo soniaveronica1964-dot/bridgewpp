@@ -52,15 +52,11 @@
       <label for="userCreationPassword">Contraseña automática para nuevos usuarios</label>
       <input id="userCreationPassword" name="userCreationPassword" type="password" autocomplete="new-password">
       <p class="hint">El perfil que ejecuta el alta usa esta contraseña para Ganamos y MultiPanel, también para solicitudes de perfiles secundarios.</p>
-      <h2>Perfil de WhatsApp de esta PC</h2>
-      <label for="whatsappProfileName">Nombre alternativo del perfil (opcional)</label>
-      <input id="whatsappProfileName" maxlength="40" autocomplete="off" placeholder="Por ejemplo: WhatsApp Ventas">
-      <p class="hint">“Usuarios encontrados” muestra automáticamente el nombre usado en Estadísticas de Publicidad al enrolar esta PC/perfil. Este nombre alternativo solo se usa si el perfil no está enrolado.</p>
-      <h2>Otros perfiles de WhatsApp (opcional)</h2>
-      <p class="hint">Agregá aquí cada otra PC/perfil a consultar. Si está enrolado, “Usuarios encontrados” muestra el mismo nombre usado en Estadísticas de Publicidad; si no, usa el nombre visible de este destino como alternativa. En cada PC destino, habilitá “Permitir altas remotas” en el menú del bridge. Configurá su dirección privada, el remoteCreateToken de credentials.json y los sufijos de esa PC. Permití el puerto 32146 en el firewall solo para redes privadas.</p>
+      <h2>Destinos de creación remota de este perfil Chrome (opcional)</h2>
+      <p class="hint">Esta lista es privada de este perfil Chrome; otros perfiles no la heredan. En cada PC destino, habilitá “Permitir altas remotas” en el menú del bridge. Configurá aquí su dirección privada, el remoteCreateToken de credentials.json y los sufijos de esa PC. Permití el puerto 32146 en el firewall solo para redes privadas.</p>
       <fieldset>
-        <legend>Perfil WhatsApp remoto 1</legend>
-        <label for="remoteName1">Nombre del perfil</label>
+        <legend>Destino 1</legend>
+        <label for="remoteName1">Nombre visible</label>
         <input id="remoteName1" autocomplete="off">
         <label for="remoteUrl1">Dirección (por ejemplo, http://192.168.1.6:32146)</label>
         <input id="remoteUrl1" inputmode="url" autocomplete="url">
@@ -72,8 +68,8 @@
         <input id="remoteMultiPanelSuffix1" maxlength="1" pattern="[A-Za-z]">
       </fieldset>
       <fieldset>
-        <legend>Perfil WhatsApp remoto 2</legend>
-        <label for="remoteName2">Nombre del perfil</label>
+        <legend>Destino 2</legend>
+        <label for="remoteName2">Nombre visible</label>
         <input id="remoteName2" autocomplete="off">
         <label for="remoteUrl2">Dirección (por ejemplo, http://192.168.1.18:32146)</label>
         <input id="remoteUrl2" inputmode="url" autocomplete="url">
@@ -85,8 +81,8 @@
         <input id="remoteMultiPanelSuffix2" maxlength="1" pattern="[A-Za-z]">
       </fieldset>
       <fieldset>
-        <legend>Perfil WhatsApp remoto 3</legend>
-        <label for="remoteName3">Nombre del perfil</label>
+        <legend>Destino 3</legend>
+        <label for="remoteName3">Nombre visible</label>
         <input id="remoteName3" autocomplete="off">
         <label for="remoteUrl3">Dirección (por ejemplo, http://192.168.1.X:32146)</label>
         <input id="remoteUrl3" inputmode="url" autocomplete="url">

@@ -1091,53 +1091,6 @@
     return bestMatch;
   }
 
-  function findKnownUsersInSidebar(users) {
-    const sidebar = document.querySelector("#pane-side");
-    if (!sidebar) {
-      return { ok: false, error: "No se pudo leer la lista de chats de WhatsApp en este perfil." };
-    }
-    const rows = [...sidebar.querySelectorAll('[role="row"][data-testid^="list-item-"]')];
-    if (!rows.length) rows.push(...sidebar.querySelectorAll(
-      '[data-testid="cell-frame-container"], [role="listitem"]'
-    ));
-    if (!rows.length) {
-      return { ok: false, error: "La lista de chats de WhatsApp todavía no está cargada en esta pestaña." };
-    }
-    const found = { ganamos: new Set(), multipanel: new Set() };
-    const requested = {
-      ganamos: new Map(users.ganamos.map((username) => [username.normalize("NFC").toLowerCase(), username])),
-      multipanel: new Map(users.multipanel.map((username) => [username.normalize("NFC").toLowerCase(), username]))
-    };
-    for (const row of rows) {
-      const usernames = getSidebarPlatformUsernames(row);
-      for (const platform of ["ganamos", "multipanel"]) {
-        const username = usernames[platform];
-        if (typeof username !== "string") continue;
-        const match = requested[platform].get(username.normalize("NFC").toLowerCase());
-        if (match) found[platform].add(match);
-      }
-    }
-    return {
-      ok: true,
-      ganamos: [...found.ganamos],
-      multipanel: [...found.multipanel]
-    };
-  }
-
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message?.type !== "WHATSAPP_SEARCH_KNOWN_USERS") return;
-    const users = message.users;
-    const isValidList = (list) => Array.isArray(list) && list.length <= 500 &&
-      list.every((username) =>
-        typeof username === "string" && username.length > 0 && username.length <= 64);
-    if (sender.id !== chrome.runtime.id ||
-      !users || !isValidList(users.ganamos) || !isValidList(users.multipanel)) {
-      sendResponse({ ok: false, error: "La solicitud de búsqueda local no es válida." });
-      return;
-    }
-    sendResponse(findKnownUsersInSidebar(users));
-  });
-
   function getSidebarContactIdentity(row) {
     const usernames = getSidebarPlatformUsernames(row);
     const titleElement = row.querySelector('[data-testid="cell-frame-title"]');
@@ -8568,33 +8521,6 @@
     const isCurrentContact = () =>
       document.getElementById(HOST_ID) === host && host.dataset.accounts === accountsKey;
     const appendSearchResult = async (name, result, requestError = null, destinationId = null) => {
-      if (Array.isArray(result?.profiles)) {
-        for (const profile of result.profiles) {
-          const profileName = typeof profile.profileName === "string" &&
-            profile.profileName.trim()
-            ? profile.profileName.trim()
-            : profile.profileRole === "primary" || result.profiles.length === 1
-              ? name
-              : "Perfil de WhatsApp sin nombre";
-          if (profile.ok === false) {
-            await appendSearchResult(
-              profileName,
-              null,
-              profile.error || "No se pudo completar la búsqueda en este perfil.",
-              destinationId
-            );
-          } else {
-            await appendSearchResult(profileName, profile, null, destinationId);
-          }
-        }
-        if (result.missingSecondaryCount > 0) {
-          const error = document.createElement("div");
-          error.className = "contact-user-search-error";
-          error.textContent = `No respondieron ${result.missingSecondaryCount} perfiles secundarios.`;
-          resultsContainer.append(error);
-        }
-        return;
-      }
       if (requestError) {
         console.error(`[Ganamos balance extension] No se pudieron buscar usuarios en ${name}.`, requestError);
         showToast(host, name, String(requestError), "error", `user-search:${name}:${digits}`);
@@ -8609,11 +8535,6 @@
       const namesByPlatform = [];
       result ||= {};
       result.errors ||= {};
-      const hasEnrolledProfileName = typeof result.profileName === "string" &&
-        Boolean(result.profileName.trim());
-      const profileName = hasEnrolledProfileName
-        ? result.profileName.trim()
-        : name;
       for (const platform of ["ganamos", "multipanel"]) {
         const names = result?.[platform];
         if (!Array.isArray(names)) {
@@ -8622,12 +8543,7 @@
         }
         for (const username of names) {
           if (typeof username === "string" && username.includes(digits)) {
-            namesByPlatform.push({
-              username,
-              platform,
-              destinationId,
-              sourceName: profileName
-            });
+            namesByPlatform.push({ username, platform, destinationId, sourceName: name });
           }
         }
       }
@@ -8674,7 +8590,7 @@
         row.className = "contact-user-search-row";
         const pcLabel = document.createElement("span");
         pcLabel.className = "contact-user-search-pc";
-        pcLabel.textContent = `${profileName}: `;
+        pcLabel.textContent = `${name}: `;
         row.append(pcLabel);
         namesByPlatform.forEach(({ username, platform }, index) => {
           if (index) row.append(document.createTextNode(" / "));
@@ -8685,9 +8601,9 @@
           usernameLabel.dataset.platform = platform;
           usernameLabel.setAttribute(
             "aria-label",
-            `${platform === "ganamos" ? "Ganamos" : "MultiPanel"}: ${username}, encontrado en ${profileName}`
+            `${platform === "ganamos" ? "Ganamos" : "MultiPanel"}: ${username}`
           );
-          usernameLabel.title = `${username} · ${profileName}`;
+          usernameLabel.title = username;
           usernameLabel.addEventListener("click", () =>
             void copyContactValue(
               host,
@@ -8731,56 +8647,32 @@
         : [];
       if (!isCurrentContact()) return;
 
-      const response = await chrome.runtime.sendMessage({
-        type: "USER_SEARCH_REQUEST",
-        data: { digits }
-      });
-      if (!isCurrentContact()) return;
-      if (!response?.ok) throw new Error(response?.error || "La búsqueda en el perfil principal no se completó.");
-      dismissToast(`user-search:local:${digits}`);
-      const profileSettings = await stateStorage.get("whatsappProfileName");
-      const localProfileName = typeof profileSettings.whatsappProfileName === "string"
-        ? profileSettings.whatsappProfileName.trim() || "Perfil actual"
-        : "Perfil actual";
-      await appendSearchResult(localProfileName, response);
-
       if (destinations.length) {
-        const primaryProfile = Array.isArray(response.profiles)
-          ? response.profiles.find((profile) => profile.profileRole === "primary") || response.profiles[0]
-          : response;
-        const knownUsers = {
-          ganamos: [...new Set((Array.isArray(primaryProfile?.ganamos) ? primaryProfile.ganamos : [])
-            .filter((username) => typeof username === "string" && username.includes(digits)))],
-          multipanel: [...new Set((Array.isArray(primaryProfile?.multipanel) ? primaryProfile.multipanel : [])
-            .filter((username) => typeof username === "string" && username.includes(digits)))]
-        };
-        if (knownUsers.ganamos.length || knownUsers.multipanel.length) {
-          const results = await Promise.all(destinations.map(async (destination) => {
-            try {
-              const response = await chrome.runtime.sendMessage({
-                type: "REMOTE_USER_PROFILE_SEARCH_REQUEST",
-                data: {
-                  destinationId: destination.id,
-                  ...knownUsers
-                }
-              });
-              if (!response?.ok) {
-                throw new Error(response?.error || "La verificación remota no se completó.");
-              }
-              return { name: destination.name, destinationId: destination.id, result: response };
-            } catch (error) {
-              return {
-                name: destination.name,
-                destinationId: destination.id,
-                error: error.message || "No se pudo consultar la PC."
-              };
-            }
-          }));
-          if (!isCurrentContact()) return;
-          for (const { name, destinationId, result, error } of results) {
-            await appendSearchResult(name, result, error, destinationId);
+        const results = await Promise.all(destinations.map(async (destination) => {
+          try {
+            const response = await chrome.runtime.sendMessage({
+              type: "REMOTE_USER_SEARCH_REQUEST",
+              data: { destinationId: destination.id, digits }
+            });
+            if (!response?.ok) throw new Error(response?.error || "La búsqueda remota no se completó.");
+            return { destination, result: response };
+          } catch (error) {
+            return { destination, error: error.message || "No se pudo consultar la PC." };
           }
+        }));
+        if (!isCurrentContact()) return;
+        for (const { destination, result, error } of results) {
+          await appendSearchResult(destination.name, result, error, destination.id);
         }
+      } else {
+        const response = await chrome.runtime.sendMessage({
+          type: "USER_SEARCH_REQUEST",
+          data: { digits }
+        });
+        if (!isCurrentContact()) return;
+        if (!response?.ok) throw new Error(response?.error || "La búsqueda en esta PC no se completó.");
+        dismissToast(`user-search:local:${digits}`);
+        await appendSearchResult("Esta PC", response);
       }
     } catch (error) {
       if (!isCurrentContact()) return;

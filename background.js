@@ -32,8 +32,6 @@ let extensionStateCache = {};
 const withdrawalUserCache = new Map();
 let profileRuntimeStatePromise = null;
 let dataProfileSelectorPromise = null;
-let cachedWhatsAppProfileName = null;
-let cachedWhatsAppProfileNameUntil = 0;
 const extensionStateOnChanged = {
   addListener(listener) {
     stateChangedListeners.add(listener);
@@ -986,63 +984,10 @@ async function findMultiPanelUsersByDigits(digits) {
   return [...records.values()];
 }
 
-async function searchUsersByKnownNames(data, tabId) {
-  const ganamos = Array.isArray(data?.ganamos) ? data.ganamos : [];
-  const multipanel = Array.isArray(data?.multipanel) ? data.multipanel : [];
-  const profileNamePromise = getCurrentWhatsAppProfileName();
-  const tabs = await chrome.tabs.query({ url: `${WHATSAPP_ORIGIN}/*` });
-  const tabIds = [...new Set([
-    ...(Number.isInteger(tabId) && tabId >= 0 ? [tabId] : []),
-    ...tabs.map((tab) => tab.id).filter((id) => Number.isInteger(id) && id >= 0)
-  ])];
-  if (!tabIds.length) {
-    throw new Error("No hay una pestaña activa de WhatsApp Web para consultar este perfil.");
-  }
-
-  let lastError = null;
-  let contacts;
-  for (const candidateTabId of tabIds) {
-    try {
-      const response = await chrome.tabs.sendMessage(candidateTabId, {
-        type: "WHATSAPP_SEARCH_KNOWN_USERS",
-        users: { ganamos, multipanel }
-      });
-      if (!response?.ok) {
-        lastError = new Error(response?.error || "La lista de chats todavía no está disponible.");
-        continue;
-      }
-      if (!Array.isArray(response.ganamos) || !Array.isArray(response.multipanel)) {
-        lastError = new Error("El perfil devolvió una lista de contactos con formato no válido.");
-        continue;
-      }
-      contacts = response;
-      break;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  if (!contacts) {
-    throw new Error(
-      lastError?.message ||
-      "No se pudo leer la lista de chats de WhatsApp en ninguna pestaña de este perfil."
-    );
-  }
-
-  const profileName = await profileNamePromise;
-  return {
-    ok: true,
-    profileName,
-    ganamos: contacts.ganamos,
-    multipanel: contacts.multipanel,
-    errors: {}
-  };
-}
-
 async function searchUsersByDigits(digits) {
-  const [ganamosResult, multipanelResult, profileNameResult] = await Promise.allSettled([
+  const [ganamosResult, multipanelResult] = await Promise.allSettled([
     findGanamosUsersByDigits(digits),
-    findMultiPanelUsersByDigits(digits),
-    getCurrentWhatsAppProfileName()
+    findMultiPanelUsersByDigits(digits)
   ]);
   const errors = {};
   if (ganamosResult.status === "rejected") {
@@ -1053,51 +998,10 @@ async function searchUsersByDigits(digits) {
   }
   return {
     ok: true,
-    profileName: profileNameResult.status === "fulfilled" ? profileNameResult.value : null,
     ganamos: ganamosResult.status === "fulfilled" ? ganamosResult.value : [],
     multipanel: multipanelResult.status === "fulfilled" ? multipanelResult.value : [],
     errors
   };
-}
-
-function isValidKnownUserList(usernames) {
-  return Array.isArray(usernames) && usernames.length <= 500 &&
-    usernames.every((username) =>
-      typeof username === "string" && username.length > 0 && username.length <= 64);
-}
-
-async function getCurrentWhatsAppProfileName() {
-  if (Date.now() < cachedWhatsAppProfileNameUntil) return cachedWhatsAppProfileName;
-  let profileName = null;
-  try {
-    const identity = await requestDataApi("/v1/identity");
-    if (typeof identity?.displayName === "string" && identity.displayName.trim()) {
-      profileName = identity.displayName.trim();
-    }
-  } catch (error) {
-    if (error?.status !== 401) {
-      console.error(
-        "[Ganamos balance extension] No se pudo consultar el nombre del perfil enrolado.",
-        error
-      );
-    }
-  }
-  if (!profileName) {
-    try {
-      const stored = await getExtensionState("whatsappProfileName");
-      profileName = typeof stored.whatsappProfileName === "string"
-        ? stored.whatsappProfileName.trim() || null
-        : null;
-    } catch (error) {
-      console.error(
-        "[Ganamos balance extension] No se pudo cargar el nombre alternativo del perfil de WhatsApp.",
-        error
-      );
-    }
-  }
-  cachedWhatsAppProfileName = profileName;
-  cachedWhatsAppProfileNameUntil = Date.now() + (profileName ? 5 * 60_000 : 30_000);
-  return profileName;
 }
 
 async function getMultiPanelBalance(data) {
@@ -1508,7 +1412,6 @@ const API_MESSAGE_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
   "USER_SEARCH_REQUEST",
-  "USER_SEARCH_PROFILE_REQUEST",
   "SPORT_BETS_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
@@ -1776,17 +1679,6 @@ async function sendRequestThroughBridge(message) {
   });
 }
 
-async function getSecondarySearchWorkerId() {
-  const key = "bridgeSecondarySearchWorkerId";
-  const stored = await chrome.storage.local.get(key);
-  if (typeof stored[key] === "string" && /^[a-f0-9-]{36}$/i.test(stored[key])) {
-    return stored[key];
-  }
-  const clientId = crypto.randomUUID();
-  await chrome.storage.local.set({ [key]: clientId });
-  return clientId;
-}
-
 function getRemoteCreateOrigin(value) {
   let url;
   try {
@@ -1861,11 +1753,6 @@ async function sendRemoteOperation(destinationId, message, timeoutMs = 95_000) {
   } else if (message.type === "USER_SEARCH_REQUEST") {
     if (!/^\d{4}$/.test(message.data?.digits || "")) {
       throw new Error("La búsqueda remota requiere exactamente cuatro números.");
-    }
-  } else if (message.type === "USER_SEARCH_PROFILE_REQUEST") {
-    if (!isValidKnownUserList(message.data?.ganamos) ||
-      !isValidKnownUserList(message.data?.multipanel)) {
-      throw new Error("La lista de usuarios encontrados para consultar no es válida.");
     }
   } else if (!["AGENT_BALANCE_REQUEST", "MULTIPANEL_AGENT_BALANCE_REQUEST"].includes(message.type) ||
     message.data !== undefined) {
@@ -1997,28 +1884,11 @@ async function getRemoteUserSearch(data) {
   }, 95_000);
 }
 
-async function getRemoteKnownUsersSearch(data) {
-  if (!isValidKnownUserList(data?.ganamos) || !isValidKnownUserList(data?.multipanel)) {
-    throw new Error("La lista de usuarios encontrados para consultar no es válida.");
-  }
-  return sendRemoteOperation(data.destinationId, {
-    type: "USER_SEARCH_PROFILE_REQUEST",
-    data: {
-      ganamos: [...new Set(data.ganamos)],
-      multipanel: [...new Set(data.multipanel)]
-    }
-  }, 95_000);
-}
-
 function validateApiMessage(message, suffixes) {
   if (!API_MESSAGE_TYPES.has(message?.type)) return false;
   if (message.type === "AGENT_BALANCE_REQUEST" ||
     message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return true;
   if (message.type === "USER_SEARCH_REQUEST") return /^\d{4}$/.test(message.data?.digits || "");
-  if (message.type === "USER_SEARCH_PROFILE_REQUEST") {
-    return isValidKnownUserList(message.data?.ganamos) &&
-      isValidKnownUserList(message.data?.multipanel);
-  }
 
   const platform = message.data?.platform || "ganamos";
   if (message.type === "SPORT_BETS_REQUEST") {
@@ -2050,12 +1920,11 @@ function validateApiMessage(message, suffixes) {
   return validateTransaction({ ...message.data, platform }, suffixes);
 }
 
-async function executeApiMessage(message, senderTabId = null) {
+async function executeApiMessage(message) {
   const suffixes = [
     "AGENT_BALANCE_REQUEST",
     "MULTIPANEL_AGENT_BALANCE_REQUEST",
-    "USER_SEARCH_REQUEST",
-    "USER_SEARCH_PROFILE_REQUEST"
+    "USER_SEARCH_REQUEST"
   ].includes(message.type)
     ? null
     : await getPlatformSuffixes();
@@ -2065,9 +1934,6 @@ async function executeApiMessage(message, senderTabId = null) {
   if (message.type === "AGENT_BALANCE_REQUEST") return getGanamosAgentBalance();
   if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return getMultiPanelAgentBalance();
   if (message.type === "USER_SEARCH_REQUEST") return searchUsersByDigits(message.data.digits);
-  if (message.type === "USER_SEARCH_PROFILE_REQUEST") {
-    return searchUsersByKnownNames(message.data, senderTabId);
-  }
   if (message.type === "SPORT_BETS_REQUEST") {
     return message.data.platform === "multipanel"
       ? getMultiPanelActiveSportBets(message.data)
@@ -2415,62 +2281,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     getBridgeSettings().then(({ role }) => {
       if (role !== "primary") throw new Error("Este perfil no está configurado como principal.");
-      return executeApiMessage(message.message, sender.tab?.id);
+      return executeApiMessage(message.message);
     }).then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudo ejecutar la solicitud en el perfil principal." }));
-    return true;
-  }
-
-  if (message?.type === "BRIDGE_SECONDARY_SEARCH_POLL" ||
-    message?.type === "BRIDGE_SECONDARY_SEARCH_COMPLETE") {
-    if (!isWhatsAppSender(sender)) {
-      sendResponse({ ok: false, error: "Solicitud de búsqueda secundaria no válida." });
-      return;
-    }
-    getBridgeSettings().then(async ({ role, token }) => {
-      if (role !== "secondary" || !token) {
-        throw new Error("Este perfil no está configurado como secundario.");
-      }
-      const clientId = await getSecondarySearchWorkerId();
-      if (message.type === "BRIDGE_SECONDARY_SEARCH_POLL") {
-        return bridgeFetch(
-          `/v1/secondary/next?clientId=${encodeURIComponent(clientId)}`,
-          token,
-          { timeoutMs: 25_000 }
-        );
-      }
-      return bridgeFetch("/v1/secondary/complete", token, {
-        method: "POST",
-        timeoutMs: 10_000,
-        body: { id: message.id, clientId, result: message.result }
-      });
-    }).then(sendResponse)
-      .catch((error) => sendResponse({
-        ok: false,
-        error: error.message || "Falló la comunicación de búsqueda del perfil secundario."
-      }));
-    return true;
-  }
-
-  if (message?.type === "BRIDGE_SECONDARY_SEARCH_EXECUTE") {
-    if (!isWhatsAppSender(sender)) {
-      sendResponse({ ok: false, error: "Solicitud de búsqueda secundaria no válida." });
-      return;
-    }
-    getBridgeSettings().then(({ role }) => {
-      if (role !== "secondary" || message.message?.type !== "USER_SEARCH_PROFILE_REQUEST") {
-        throw new Error("El perfil secundario solo puede ejecutar búsquedas autorizadas.");
-      }
-      const users = message.message.data || {};
-      if (!isValidKnownUserList(users.ganamos) || !isValidKnownUserList(users.multipanel)) {
-        throw new Error("La lista de usuarios para verificar no es válida.");
-      }
-      return searchUsersByKnownNames(users, sender.tab?.id);
-    }).then(sendResponse)
-      .catch((error) => sendResponse({
-        ok: false,
-        error: error.message || "No se pudo buscar en el perfil secundario."
-      }));
     return true;
   }
 
@@ -2517,20 +2330,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getRemoteUserSearch(message.data || {})
       .then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message || "No se pudieron buscar usuarios en la PC destino." }));
-    return true;
-  }
-
-  if (message?.type === "REMOTE_USER_PROFILE_SEARCH_REQUEST") {
-    if (!isWhatsAppSender(sender)) {
-      sendResponse({ ok: false, error: "Solicitud no válida o enviada desde una página no autorizada." });
-      return;
-    }
-    getRemoteKnownUsersSearch(message.data || {})
-      .then(sendResponse)
-      .catch((error) => sendResponse({
-        ok: false,
-        error: error.message || "No se pudieron verificar los usuarios encontrados en la PC destino."
-      }));
     return true;
   }
 
