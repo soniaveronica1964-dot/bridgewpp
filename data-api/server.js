@@ -7,7 +7,7 @@ const { parsePhoneNumberFromString } = require("libphonenumber-js");
 const { canonicalJson, decryptValue, encryptValue, sha256Hex, validatePayload } = require("./archive");
 
 const API_VERSION = 1;
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 45 * 60_000;
 const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
 const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 12 * 60 * 60 * 1000;
@@ -176,7 +176,7 @@ function sendJson(response, status, body, origin, allowedOrigin) {
 function getRoute(request) {
   const url = new URL(request.url, "https://localhost");
   const stateReadQuery = request.method === "GET" &&
-    ["/v1/state", "/v1/state/changes", "/v1/movements", "/v1/advertising-stats"]
+    ["/v1/state", "/v1/state/changes", "/v1/movements", "/v1/advertising-stats", "/v1/withdrawals"]
       .includes(url.pathname);
   if (url.hash || url.search && !stateReadQuery) {
     throw new ApiError(400, "invalid_url", "La ruta de la solicitud no es válida.");
@@ -2421,6 +2421,110 @@ function createDataApiServer({ pool, config }) {
         }
         const state = await readExtensionState(pool, config, identity, keys);
         sendJson(response, 200, { ok: true, ...state }, origin, extensionId && `chrome-extension://${extensionId}`);
+        return;
+      }
+
+      if (route === "/v1/withdrawals" && request.method === "POST") {
+        const identity = await authenticate(request);
+        const body = requireObjectBody(await readJson(request));
+        if (Object.keys(body).some((key) =>
+          !["withdrawalId", "username", "createdAt", "completedAt"].includes(key)) ||
+          typeof body.withdrawalId !== "string" || !body.withdrawalId.trim() ||
+          body.withdrawalId.length > 512 || /[\u0000-\u001f\u007f]/.test(body.withdrawalId) ||
+          typeof body.username !== "string" || !body.username.trim() ||
+          body.username.length > 512 || /[\u0000-\u001f\u007f]/.test(body.username) ||
+          !Number.isSafeInteger(body.createdAt) || body.createdAt < 0 ||
+          !Number.isSafeInteger(body.completedAt) || body.completedAt < body.createdAt ||
+          body.completedAt > Date.now() + 60_000) {
+          throw new ApiError(400, "invalid_withdrawal", "Los datos del retiro completado no son válidos.");
+        }
+        const now = Date.now();
+        const inserted = await pool.query(`
+          INSERT INTO completed_withdrawals (
+            workspace_id, withdrawal_id, source_profile_id, username,
+            created_at_ms, completed_at_ms, recorded_at_ms
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (workspace_id, withdrawal_id) DO NOTHING
+          RETURNING source_profile_id::text AS profile_id, username,
+                    created_at_ms, completed_at_ms
+        `, [
+          identity.workspace_id,
+          body.withdrawalId.trim(),
+          identity.profile_id,
+          body.username.trim(),
+          body.createdAt,
+          body.completedAt,
+          now
+        ]);
+        let record = inserted.rows[0];
+        if (!record) {
+          const existing = await pool.query(`
+            SELECT source_profile_id::text AS profile_id, username,
+                   created_at_ms, completed_at_ms
+            FROM completed_withdrawals
+            WHERE workspace_id = $1 AND withdrawal_id = $2
+          `, [identity.workspace_id, body.withdrawalId.trim()]);
+          record = existing.rows[0];
+          if (!record) throw new Error("No se pudo confirmar el retiro registrado.");
+        }
+        sendJson(response, 201, { ok: true, recorded: true }, origin, extensionId && `chrome-extension://${extensionId}`);
+        return;
+      }
+
+      if (route === "/v1/withdrawals" && request.method === "GET") {
+        const identity = await authenticate(request);
+        const query = new URL(request.url, "https://localhost").searchParams;
+        if ([...query.keys()].some((key) => !["from", "to"].includes(key)) ||
+          query.getAll("from").length > 1 || query.getAll("to").length > 1 ||
+          query.has("from") !== query.has("to")) {
+          throw new ApiError(400, "invalid_withdrawal_query", "Los filtros del historial no son válidos.");
+        }
+        const fromValue = query.get("from");
+        const toValue = query.get("to");
+        const from = fromValue === null ? null : Number(fromValue);
+        const to = toValue === null ? null : Number(toValue);
+        if ((fromValue !== null && (!/^\d+$/.test(fromValue) || !Number.isSafeInteger(from))) ||
+          (toValue !== null && (!/^\d+$/.test(toValue) || !Number.isSafeInteger(to))) ||
+          from !== null && to !== null && (from < 0 || to <= from)) {
+          throw new ApiError(400, "invalid_withdrawal_query", "El rango de fechas no es válido.");
+        }
+        const result = await pool.query(`
+          SELECT withdrawals.withdrawal_id,
+                 withdrawals.username,
+                 withdrawals.created_at_ms,
+                 withdrawals.completed_at_ms,
+                 withdrawals.source_profile_id::text AS profile_id,
+                 devices.display_name AS profile_name
+          FROM completed_withdrawals AS withdrawals
+          JOIN extension_profiles AS profiles
+            ON profiles.profile_id = withdrawals.source_profile_id
+           AND profiles.workspace_id = withdrawals.workspace_id
+          JOIN enrolled_devices AS devices
+            ON devices.device_id = profiles.device_id
+           AND devices.workspace_id = profiles.workspace_id
+          WHERE withdrawals.workspace_id = $1
+            AND ($2::bigint IS NULL OR withdrawals.created_at_ms >= $2)
+            AND ($3::bigint IS NULL OR withdrawals.created_at_ms < $3)
+          ORDER BY withdrawals.created_at_ms DESC, withdrawals.withdrawal_id DESC
+        `, [identity.workspace_id, from, to]);
+        const withdrawals = result.rows.map((row) => {
+          const createdAt = Number(row.created_at_ms);
+          const completedAt = Number(row.completed_at_ms);
+          if (!Number.isSafeInteger(createdAt) || !Number.isSafeInteger(completedAt)) {
+            throw new Error("La API encontró un retiro con fechas fuera del rango admitido.");
+          }
+          return {
+            withdrawalId: row.withdrawal_id,
+            username: row.username,
+            createdAt,
+            completedAt,
+            durationMs: completedAt - createdAt,
+            profileId: row.profile_id,
+            profileName: row.profile_name
+          };
+        });
+        sendJson(response, 200, { ok: true, withdrawals }, origin, extensionId && `chrome-extension://${extensionId}`);
         return;
       }
 

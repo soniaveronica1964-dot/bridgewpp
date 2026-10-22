@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$requiredSchemaVersion = 11
 $supportDirectory = Join-Path $env:LOCALAPPDATA 'BridgeWppDataApi'
 $logPath = Join-Path $supportDirectory 'keepalive.log'
 $taskName = 'BridgeWpp Data API'
@@ -14,7 +15,8 @@ function Get-HealthResponse($healthUri) {
     $health = Invoke-RestMethod -Uri $healthUri -Method Get -TimeoutSec 5
     return @{
       Responded = $true
-      Healthy = $health.status -eq 'healthy' -and $health.schemaVersion -eq 10
+      Healthy = $health.status -eq 'healthy' -and
+        $health.schemaVersion -eq $requiredSchemaVersion
       Detail = "HTTP 200, schema $($health.schemaVersion)"
     }
   } catch {
@@ -116,4 +118,4 @@ if (-not $probe.Healthy -or -not $listener) {
   throw "Recovery was requested for '$taskName', but API health was not confirmed within 30 seconds. $($probe.Detail)"
 }
 
-Write-KeepaliveLog "RECOVERY_REQUESTED '$taskName'; API healthy on schema 9 (PID $($listener.OwningProcess))."
+Write-KeepaliveLog "RECOVERY_REQUESTED '$taskName'; API healthy on schema $requiredSchemaVersion (PID $($listener.OwningProcess))."

@@ -97,7 +97,8 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
     { version: 7, name: "advertising_movements" },
     { version: 8, name: "contact_flow_event_counts" },
     { version: 9, name: "contact_flow_event_sources" },
-    { version: 10, name: "stable_movement_accounts" }
+    { version: 10, name: "stable_movement_accounts" },
+    { version: 11, name: "completed_withdrawals" }
   ]);
   assert.match(migrations[0].sql, /CREATE TABLE agent_movements/);
   assert.match(migrations[0].sql, /value_ciphertext BYTEA NOT NULL/);
@@ -116,6 +117,9 @@ test("loads unique versioned SQL migrations in numeric order", async () => {
   assert.match(migrations[8].sql, /ADD COLUMN source_profile_id UUID REFERENCES extension_profiles/);
   assert.match(migrations[9].sql, /ADD COLUMN account_ids TEXT\[\] NOT NULL DEFAULT '\{\}'/);
   assert.match(migrations[9].sql, /jsonb_build_object\('accountIds'/);
+  assert.match(migrations[10].sql, /CREATE TABLE completed_withdrawals/);
+  assert.match(migrations[10].sql, /FOREIGN KEY \(source_profile_id, workspace_id\)/);
+  assert.match(migrations[10].sql, /completed_withdrawals_by_creation/);
 });
 
 test("normalizes common Argentine mobile formats to one WhatsApp number", () => {

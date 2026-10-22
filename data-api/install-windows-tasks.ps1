@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$requiredSchemaVersion = 11
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principalCheck = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -26,8 +27,8 @@ if (-not $config.ApiHost -or -not $config.ApiPort -or
 }
 $healthUri = "https://$($config.ApiHost):$($config.ApiPort)/health"
 $health = Invoke-RestMethod -Uri $healthUri -Method Get -TimeoutSec 8
-if ($health.status -ne 'healthy' -or $health.schemaVersion -ne 10) {
-  throw 'La API existente no está saludable con el esquema 10. No se reemplazaron las tareas.'
+if ($health.status -ne 'healthy' -or $health.schemaVersion -ne $requiredSchemaVersion) {
+  throw "La API existente no está saludable con el esquema $requiredSchemaVersion. No se reemplazaron las tareas."
 }
 
 Copy-Item -LiteralPath $launcherSourcePath -Destination $launcherPath -Force
@@ -90,11 +91,13 @@ do {
   } catch {
     $health = $null
   }
-} while (($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 10) -and
+} while (($null -eq $health -or $health.status -ne 'healthy' -or
+    $health.schemaVersion -ne $requiredSchemaVersion) -and
   (Get-Date) -lt $deadline)
 
-if ($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 10) {
-  throw 'Las tareas se instalaron, pero la API no confirmó salud con el esquema 10.'
+if ($null -eq $health -or $health.status -ne 'healthy' -or
+  $health.schemaVersion -ne $requiredSchemaVersion) {
+  throw "Las tareas se instalaron, pero la API no confirmó salud con el esquema $requiredSchemaVersion."
 }
 
 Write-Output 'Tareas instaladas: BridgeWpp Data API (inicio del sistema/logon) y BridgeWpp Data API Keepalive (comprobación cada minuto).'

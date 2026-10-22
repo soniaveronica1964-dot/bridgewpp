@@ -2152,6 +2152,84 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "WITHDRAWAL_RECORD") {
+    if (!isStateStorageSender(sender)) {
+      sendResponse({ ok: false, error: "El origen no está autorizado para registrar retiros." });
+      return;
+    }
+    const withdrawal = message.withdrawal;
+    if (!withdrawal || typeof withdrawal !== "object" || Array.isArray(withdrawal) ||
+      Object.keys(withdrawal).some((key) =>
+        !["withdrawalId", "username", "createdAt", "completedAt"].includes(key)) ||
+      typeof withdrawal.withdrawalId !== "string" || !withdrawal.withdrawalId.trim() ||
+      withdrawal.withdrawalId.length > 512 ||
+      /[\u0000-\u001f\u007f]/.test(withdrawal.withdrawalId) ||
+      typeof withdrawal.username !== "string" || !withdrawal.username.trim() ||
+      withdrawal.username.length > 512 ||
+      /[\u0000-\u001f\u007f]/.test(withdrawal.username) ||
+      !Number.isSafeInteger(withdrawal.createdAt) || withdrawal.createdAt < 0 ||
+      !Number.isSafeInteger(withdrawal.completedAt) ||
+      withdrawal.completedAt < withdrawal.createdAt ||
+      withdrawal.completedAt > Date.now() + 60_000) {
+      sendResponse({ ok: false, error: "Los datos del retiro completado no son válidos." });
+      return;
+    }
+    requestDataApi("/v1/withdrawals", {
+      method: "POST",
+      body: {
+        withdrawalId: withdrawal.withdrawalId.trim(),
+        username: withdrawal.username.trim(),
+        createdAt: withdrawal.createdAt,
+        completedAt: withdrawal.completedAt
+      }
+    })
+      .then((result) => {
+        if (result.recorded !== true) {
+          throw new Error("La API PostgreSQL no confirmó el registro del retiro.");
+        }
+        sendResponse({ ok: true });
+      })
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo registrar el retiro completado."
+      }));
+    return true;
+  }
+
+  if (message?.type === "WITHDRAWALS_GET") {
+    if (!isStateStorageSender(sender)) {
+      sendResponse({ ok: false, error: "El origen no está autorizado para consultar retiros." });
+      return;
+    }
+    const filters = message.filters && typeof message.filters === "object" &&
+      !Array.isArray(message.filters) ? message.filters : {};
+    if (Object.keys(filters).some((key) => !["from", "to"].includes(key)) ||
+      Object.hasOwn(filters, "from") !== Object.hasOwn(filters, "to") ||
+      Object.hasOwn(filters, "from") &&
+        (!Number.isSafeInteger(filters.from) || filters.from < 0 ||
+          !Number.isSafeInteger(filters.to) || filters.to <= filters.from)) {
+      sendResponse({ ok: false, error: "Los filtros del historial de retiros no son válidos." });
+      return;
+    }
+    const query = new URLSearchParams();
+    if (Object.hasOwn(filters, "from")) {
+      query.set("from", String(filters.from));
+      query.set("to", String(filters.to));
+    }
+    requestDataApi(`/v1/withdrawals${query.size ? `?${query}` : ""}`)
+      .then((result) => {
+        if (!Array.isArray(result.withdrawals)) {
+          throw new Error("La API PostgreSQL devolvió un historial de retiros incompleto.");
+        }
+        sendResponse({ ok: true, withdrawals: result.withdrawals });
+      })
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudieron consultar los retiros."
+      }));
+    return true;
+  }
+
   if (message?.type === "MULTIPANEL_SESSION_UPDATE") {
     if (sender.frameId !== 0 || getSenderOrigin(sender) !== MULTIPANEL_WEB_ORIGIN ||
       !isValidMultiPanelSession(message.session)) {

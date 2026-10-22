@@ -71,6 +71,7 @@
   let pendingWithdrawalsRenderedSignature = null;
   let pendingWithdrawalsTimer = null;
   let pendingWithdrawalBalanceRefreshInProgress = false;
+  const pendingWithdrawalCompletions = new Set();
   let contactVisualTags = {};
   const blockedUserAccountSettings = new Set();
   const loadedBlockedUserAccountSettings = new Set();
@@ -108,6 +109,58 @@
         input?.focus();
       });
     });
+  }
+
+  function getCalendarDayFilter(daysAgo) {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - daysAgo);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { from: start.getTime(), to: end.getTime() };
+  }
+
+  function getCalendarWeekFilter(weeksAgo = 0) {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const daysSinceMonday = (start.getDay() + 6) % 7;
+    start.setDate(start.getDate() - daysSinceMonday - weeksAgo * 7);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 7);
+    return { from: start.getTime(), to: end.getTime() };
+  }
+
+  function getCalendarMonthFilter(monthsAgo = 0) {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth() - monthsAgo, 1);
+    const end = new Date(now.getFullYear(), now.getMonth() - monthsAgo + 1, 1);
+    return { from: start.getTime(), to: end.getTime() };
+  }
+
+  function getCalendarShiftFilter(startHour, endHour) {
+    const start = new Date();
+    start.setHours(startHour, 0, 0, 0);
+    const end = new Date(start);
+    end.setHours(endHour, 0, 0, 0);
+    return { from: start.getTime(), to: end.getTime() };
+  }
+
+  function getAnalyticsPeriodOptions(includeShifts = false) {
+    const options = [
+      ["today", "Hoy", () => getCalendarDayFilter(0)],
+      ["yesterday", "Ayer", () => getCalendarDayFilter(1)],
+      ["current-week", "Sem. Act", () => getCalendarWeekFilter()],
+      ["previous-week", "Sem Pas", () => getCalendarWeekFilter(1)],
+      ["current-month", "Mes. Act", () => getCalendarMonthFilter()],
+      ["previous-month", "Mes. Pas", () => getCalendarMonthFilter(1)],
+      ["all", "Todo", () => includeShifts ? {} : { days: null }]
+    ];
+    if (includeShifts) options.push(
+      ["night-shift", "Turno Noche", () => getCalendarShiftFilter(0, 8)],
+      ["morning-shift", "Turno Mañana", () => getCalendarShiftFilter(8, 16)],
+      ["afternoon-shift", "Turno Tarde", () => getCalendarShiftFilter(16, 24)]
+    );
+    return options;
   }
 
   stateStorage.get(["ganamosSuffix", "multiPanelSuffix"])
@@ -2143,6 +2196,7 @@
       return accounts.map(({ username, balance, checked }) =>
         `${username} (${balance === null ? checked ? "saldo no disponible" : "consultando saldo" : `$${formatBalance(balance)}`})`);
     }
+
     const aboveThreshold = accounts.filter(({ balance }) =>
       balance !== null && balance > PENDING_WITHDRAWAL_BALANCE_THRESHOLD);
     const selected = aboveThreshold.length
@@ -2155,6 +2209,13 @@
         `${username} ($${formatBalance(balance)})`);
     }
     return accounts.map(({ username }) => `${username} (saldo no disponible)`);
+  }
+
+  function getPendingWithdrawalUsername(withdrawal) {
+    const usernames = ["ganamos", "multipanel"]
+      .map((platform) => withdrawal.accounts?.[platform]?.trim())
+      .filter(Boolean);
+    return usernames.length ? usernames.join(" / ") : withdrawal.name;
   }
 
   function savePendingWithdrawals() {
@@ -2187,24 +2248,16 @@
   }
 
   function trackPendingWithdrawal(details) {
-    if (!pendingWithdrawalsLoaded) return;
+    if (!pendingWithdrawalsLoaded || !details.contact.identity) return;
     const now = Date.now();
     if (now - details.timestamp > PENDING_WITHDRAWAL_MESSAGE_MAX_AGE_MS ||
       details.timestamp > now + CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS) return;
     const messageText = normalizeWithdrawalMessageText(details.text);
     if (messageText.includes("proxima victoria")) {
-      let pendingIndex = -1;
-      for (let index = pendingWithdrawals.length - 1; index >= 0; index--) {
-        if (pendingWithdrawals[index].identity === details.contact.identity) {
-          pendingIndex = index;
-          break;
-        }
-      }
-      if (pendingIndex >= 0) {
-        pendingWithdrawals.splice(pendingIndex, 1);
-        renderPendingWithdrawals();
-        void savePendingWithdrawals();
-      }
+      const withdrawal = [...pendingWithdrawals].reverse().find(
+        (pending) => pending.identity === details.contact.identity
+      );
+      if (withdrawal) void completePendingWithdrawal(withdrawal.id, details.timestamp);
       return;
     }
     if (!messageText.includes("muchas gracias por su paciencia") ||
@@ -2218,21 +2271,44 @@
       accounts: details.contact.accounts,
       balances: getPendingWithdrawalBalancesFromOpenContact(details.contact),
       status: "Pendiente",
-      createdAt: now
+      createdAt: details.timestamp
     });
     renderPendingWithdrawals();
     void savePendingWithdrawals();
     void refreshPendingWithdrawalBalances();
   }
 
-  function completePendingWithdrawal(id) {
-    const pendingIndex = pendingWithdrawals.findIndex(
-      (withdrawal) => withdrawal.id === id
-    );
-    if (pendingIndex < 0) return;
-    pendingWithdrawals.splice(pendingIndex, 1);
-    renderPendingWithdrawals();
-    void savePendingWithdrawals();
+  async function completePendingWithdrawal(id, completedAt = Date.now()) {
+    const withdrawal = pendingWithdrawals.find((pending) => pending.id === id);
+    if (!withdrawal || pendingWithdrawalCompletions.has(id)) return;
+    pendingWithdrawalCompletions.add(id);
+    try {
+      await stateStorage.recordWithdrawal({
+        withdrawalId: withdrawal.id,
+        username: getPendingWithdrawalUsername(withdrawal),
+        createdAt: withdrawal.createdAt,
+        completedAt
+      });
+      const pendingIndex = pendingWithdrawals.findIndex((pending) => pending.id === id);
+      if (pendingIndex < 0) return;
+      pendingWithdrawals.splice(pendingIndex, 1);
+      renderPendingWithdrawals();
+      await savePendingWithdrawals();
+    } catch (error) {
+      console.error(
+        `[Ganamos balance extension] No se pudo registrar el retiro completado de ${withdrawal.name}.`,
+        error
+      );
+      showToast(
+        null,
+        "Historial de retiros",
+        error.message || "No se pudo registrar el retiro completado.",
+        "error",
+        "withdrawal-history"
+      );
+    } finally {
+      pendingWithdrawalCompletions.delete(id);
+    }
   }
 
   function getPendingWithdrawalAge(createdAt, now = Date.now()) {
@@ -2441,7 +2517,6 @@
           { chatTitle: chatTitleText, messageIds }
         );
       }
-      return null;
     }
     const timestamp = parseIncomingMessageTimestamp(match[1]);
     const textElements = messageContainer.querySelectorAll(
@@ -4168,19 +4243,20 @@
     outageLabel.setAttribute("role", "status");
     outageLabel.setAttribute("aria-live", "polite");
     const createIndicator = (name, label, paths) => {
-      const indicator = document.createElement(name === "advertising" ? "button" : "span");
-      if (name === "advertising") {
+      const isButton = name === "advertising" || name === "withdrawals";
+      const indicator = document.createElement(isButton ? "button" : "span");
+      if (isButton) {
         indicator.type = "button";
-        indicator.addEventListener("click", () => createAdvertisingAnalyticsDialog(host));
+        indicator.addEventListener("click", () => name === "withdrawals"
+          ? createWithdrawalHistoryDialog(host)
+          : createAdvertisingAnalyticsDialog(host));
       }
       indicator.className = `active-bonus-indicator active-bonus-indicator--${name}`;
-      indicator.title = name === "advertising"
-        ? "Publicidad activa: abrir estadísticas"
+      indicator.title = isButton
+        ? `${label}: abrir ${name === "withdrawals" ? "historial" : "estadísticas"}`
         : label;
-      indicator.setAttribute("aria-label", name === "advertising"
-        ? `${label}: abrir estadísticas`
-        : label);
-      if (name !== "advertising") indicator.setAttribute("role", "img");
+      indicator.setAttribute("aria-label", indicator.title);
+      if (!isButton) indicator.setAttribute("role", "img");
       const indicatorIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       indicatorIcon.setAttribute("viewBox", "0 0 24 24");
       indicatorIcon.setAttribute("aria-hidden", "true");
@@ -4195,6 +4271,13 @@
     };
     indicators.append(
       outageLabel,
+      createIndicator("withdrawals", "Retiros", [
+        "M6 3h12v18H6z",
+        "M9 8h6",
+        "M9 12h6",
+        "M9 16h3",
+        "M16 16h2"
+      ]),
       createIndicator("advertising", "Publicidad activa", [
         "M3 11v2h3l11 5V6L6 11H3Z",
         "M6 13l2 6h4l-2.7-4.8",
@@ -5717,6 +5800,368 @@
     close.focus();
   }
 
+  function createWithdrawalHistoryDialog(host) {
+    const shadow = host.shadowRoot;
+    if (!shadow || shadow.querySelector(".advertising-analytics-backdrop")) return;
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "advertising-analytics-backdrop";
+    let closeDialog = () => backdrop.remove();
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) closeDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "advertising-analytics-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "withdrawal-history-title");
+    registerModalEscapeHandler(dialog, () => closeDialog());
+
+    const header = document.createElement("header");
+    header.className = "advertising-analytics-header";
+    const title = document.createElement("h2");
+    title.id = "withdrawal-history-title";
+    title.textContent = "Historial de retiros";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "advertising-analytics-close";
+    close.textContent = "×";
+    close.title = "Cerrar historial";
+    close.setAttribute("aria-label", close.title);
+    close.addEventListener("click", () => closeDialog());
+    header.append(title, close);
+
+    const periods = document.createElement("div");
+    periods.className = "advertising-analytics-periods";
+    const customRange = document.createElement("div");
+    customRange.className = "advertising-analytics-custom-range";
+    customRange.hidden = true;
+    const fromLabel = document.createElement("label");
+    fromLabel.textContent = "Desde";
+    const fromInput = document.createElement("input");
+    fromInput.type = "datetime-local";
+    fromInput.setAttribute("aria-label", "Fecha y hora desde");
+    fromLabel.append(fromInput);
+    const toLabel = document.createElement("label");
+    toLabel.textContent = "Hasta";
+    const toInput = document.createElement("input");
+    toInput.type = "datetime-local";
+    toInput.setAttribute("aria-label", "Fecha y hora hasta");
+    toLabel.append(toInput);
+    const rangeError = document.createElement("span");
+    rangeError.className = "advertising-analytics-range-error";
+    rangeError.setAttribute("role", "alert");
+    customRange.append(fromLabel, toLabel, rangeError);
+
+    const tabs = document.createElement("div");
+    tabs.className = "advertising-analytics-tabs";
+    tabs.classList.add("withdrawal-history-tabs");
+    tabs.setAttribute("role", "group");
+    tabs.setAttribute("aria-label", "Vista del historial de retiros");
+    const body = document.createElement("div");
+    body.className = "advertising-analytics-body";
+    const tabButtons = new Map();
+    let requestSequence = 0;
+    let activeTab = "all";
+    let activeFilters = {};
+    let activePeriod = "today";
+    let loadedWithdrawals = null;
+    let hiddenProfileIds = [];
+
+    const render = () => {
+      if (!loadedWithdrawals) return;
+      renderWithdrawalHistory(loadedWithdrawals, body, activeTab, hiddenProfileIds);
+    };
+    for (const [name, label] of [["all", "Todos"], ["profile", "P/Panel"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.setAttribute("aria-pressed", String(name === activeTab));
+      button.addEventListener("click", () => {
+        activeTab = name;
+        for (const [tabName, tabButton] of tabButtons) {
+          tabButton.setAttribute("aria-pressed", String(tabName === activeTab));
+        }
+        render();
+      });
+      tabButtons.set(name, button);
+      tabs.append(button);
+    }
+
+    const formatDateTimeInput = (date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+    const setRangeInputs = (filters) => {
+      if (!Number.isSafeInteger(filters.from) || !Number.isSafeInteger(filters.to)) return;
+      fromInput.value = formatDateTimeInput(new Date(filters.from));
+      toInput.value = formatDateTimeInput(new Date(filters.to - 60_000));
+    };
+    const load = async (filters, period) => {
+      const currentRequest = ++requestSequence;
+      activeFilters = filters;
+      activePeriod = period;
+      loadedWithdrawals = null;
+      for (const button of periods.querySelectorAll("button")) {
+        button.setAttribute("aria-pressed", String(button.dataset.period === period));
+      }
+      rangeError.textContent = "";
+      body.replaceChildren();
+      const loading = document.createElement("p");
+      loading.className = "advertising-analytics-state advertising-analytics-loading";
+      loading.textContent = "Cargando retiros...";
+      body.append(loading);
+      try {
+        const settings = await stateStorage.get([HIDDEN_ADVERTISING_PROFILES_KEY]);
+        const savedProfileIds = settings[HIDDEN_ADVERTISING_PROFILES_KEY] ?? [];
+        if (!Array.isArray(savedProfileIds) || savedProfileIds.length > 1000 ||
+          savedProfileIds.some((profileId) =>
+            typeof profileId !== "string" || !PROFILE_ID_PATTERN.test(profileId)) ||
+          new Set(savedProfileIds).size !== savedProfileIds.length) {
+          throw new Error("La configuración de paneles minimizados no es válida.");
+        }
+        const withdrawals = await stateStorage.getWithdrawals(filters);
+        if (!Array.isArray(withdrawals) || withdrawals.some((withdrawal) =>
+          !withdrawal || typeof withdrawal.withdrawalId !== "string" ||
+          typeof withdrawal.username !== "string" ||
+          !Number.isSafeInteger(withdrawal.createdAt) ||
+          !Number.isSafeInteger(withdrawal.completedAt) ||
+          !Number.isSafeInteger(withdrawal.durationMs) ||
+          typeof withdrawal.profileId !== "string" ||
+          typeof withdrawal.profileName !== "string")) {
+          throw new Error("La API de datos devolvió un historial de retiros incompleto.");
+        }
+        if (!backdrop.isConnected || currentRequest !== requestSequence) return;
+        hiddenProfileIds = savedProfileIds;
+        loadedWithdrawals = withdrawals;
+        render();
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo cargar el historial de retiros.", error);
+        if (!backdrop.isConnected || currentRequest !== requestSequence) return;
+        const failure = document.createElement("p");
+        failure.className = "advertising-analytics-state advertising-analytics-error";
+        failure.textContent =
+          `No se pudo cargar el historial: ${error.message || "error desconocido."}`;
+        body.replaceChildren(failure);
+      }
+    };
+
+    for (const [period, label, getFilter] of getAnalyticsPeriodOptions(true)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.period = period;
+      button.textContent = label;
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", () => {
+        const filters = getFilter();
+        setRangeInputs(filters);
+        void load(filters, period);
+      });
+      periods.append(button);
+    }
+    const customButton = document.createElement("button");
+    customButton.type = "button";
+    customButton.dataset.period = "custom";
+    customButton.textContent = "Personalizado";
+    customButton.setAttribute("aria-expanded", "false");
+    customButton.setAttribute("aria-pressed", "false");
+    customButton.addEventListener("click", () => {
+      customRange.hidden = !customRange.hidden;
+      customButton.setAttribute("aria-expanded", String(!customRange.hidden));
+      customButton.setAttribute("aria-pressed", String(!customRange.hidden));
+      if (!customRange.hidden) fromInput.focus();
+    });
+    periods.append(customButton);
+
+    const parseDate = (value) => {
+      if (!value) return null;
+      const parts = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+      if (!parts) return null;
+      const [, year, month, day, hour, minute] = parts.map(Number);
+      const date = new Date(year, month - 1, day, hour, minute);
+      return date.getFullYear() === year &&
+        date.getMonth() === month - 1 &&
+        date.getDate() === day &&
+        date.getHours() === hour &&
+        date.getMinutes() === minute
+        ? date
+        : null;
+    };
+    const updateCustomRange = () => {
+      const start = parseDate(fromInput.value);
+      const selectedEnd = parseDate(toInput.value);
+      const showRangeError = (message) => {
+        requestSequence += 1;
+        rangeError.textContent = message;
+        if (!body.querySelector(".advertising-analytics-loading")) return;
+        const state = document.createElement("p");
+        state.className = "advertising-analytics-state";
+        state.textContent = "Completá un rango válido para cargar los retiros.";
+        body.replaceChildren(state);
+      };
+      if (!start || !selectedEnd) {
+        showRangeError("Seleccioná ambas fechas para ver los retiros.");
+        return;
+      }
+      if (start > selectedEnd) {
+        showRangeError("La fecha desde debe ser anterior o igual a la fecha hasta.");
+        return;
+      }
+      const endOfToday = new Date();
+      endOfToday.setHours(23, 59, 0, 0);
+      if (selectedEnd > endOfToday) {
+        showRangeError("La fecha hasta no puede ser futura.");
+        return;
+      }
+      rangeError.textContent = "";
+      void load({ from: start.getTime(), to: selectedEnd.getTime() + 60_000 }, "custom");
+    };
+    const today = new Date();
+    const maxToday = new Date(today);
+    maxToday.setHours(23, 59, 0, 0);
+    toInput.max = formatDateTimeInput(maxToday);
+    fromInput.value = formatDateTimeInput(new Date(today.getFullYear(), today.getMonth(), today.getDate()));
+    toInput.value = formatDateTimeInput(today);
+    fromInput.addEventListener("change", updateCustomRange);
+    toInput.addEventListener("change", updateCustomRange);
+
+    const handleHiddenProfilesChanged = (changes, areaName) => {
+      if (areaName !== "local" || !changes[HIDDEN_ADVERTISING_PROFILES_KEY] ||
+        !backdrop.isConnected) return;
+      void load(activeFilters, activePeriod);
+    };
+    stateStorage.onChanged.addListener(handleHiddenProfilesChanged);
+    closeDialog = () => {
+      stateStorage.onChanged.removeListener(handleHiddenProfilesChanged);
+      backdrop.remove();
+    };
+    dialog.append(header, periods, customRange, tabs, body);
+    backdrop.append(dialog);
+    shadow.append(backdrop);
+    void load(getCalendarDayFilter(0), "today");
+  }
+
+  function renderWithdrawalHistory(withdrawals, body, activeTab, hiddenProfileIds) {
+    body.replaceChildren();
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "advertising-analytics-table-wrap";
+    const table = document.createElement("table");
+    const head = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    const labels = activeTab === "profile"
+      ? ["Fecha y hora", "Usuario", "Tiempo hasta completar"]
+      : ["Fecha y hora", "Usuario", "Tiempo hasta completar", "Computadora"];
+    for (const label of labels) {
+      const cell = document.createElement("th");
+      cell.textContent = label;
+      headerRow.append(cell);
+    }
+    head.append(headerRow);
+    table.append(head);
+    const bodyRows = document.createElement("tbody");
+    const dateTime = new Intl.DateTimeFormat("es-AR", {
+      dateStyle: "short",
+      timeStyle: "short"
+    });
+    const duration = (milliseconds) => {
+      const minutes = Math.floor(milliseconds / 60_000);
+      const hours = Math.floor(minutes / 60);
+      return hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
+    };
+    const appendRecord = (withdrawal) => {
+      const row = document.createElement("tr");
+      const values = [
+        dateTime.format(new Date(withdrawal.createdAt)),
+        withdrawal.username,
+        duration(withdrawal.durationMs),
+        ...(activeTab === "profile" ? [] : [withdrawal.profileName])
+      ];
+      for (const value of values) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      }
+      bodyRows.append(row);
+    };
+    const orderedWithdrawals = [...withdrawals].sort(
+      (first, second) => second.createdAt - first.createdAt
+    );
+
+    if (activeTab === "profile") {
+      const grouped = new Map();
+      for (const withdrawal of orderedWithdrawals) {
+        const id = withdrawal.profileId;
+        if (!grouped.has(id)) {
+          grouped.set(id, {
+            name: withdrawal.profileName,
+            minimized: hiddenProfileIds.includes(id),
+            withdrawals: []
+          });
+        }
+        grouped.get(id).withdrawals.push(withdrawal);
+      }
+      if (!grouped.size) {
+        const empty = document.createElement("p");
+        empty.className = "advertising-analytics-state";
+        empty.textContent = "No hay retiros registrados en este período.";
+        body.append(empty);
+        return;
+      }
+      const appendPanelGroup = (title, minimized) => {
+        const panels = [...grouped.values()]
+          .filter((panel) => panel.minimized === minimized);
+        if (!panels.length) return;
+        const section = document.createElement("section");
+        section.className = "advertising-analytics-section";
+        const heading = document.createElement("h3");
+        heading.textContent = title;
+        section.append(heading);
+        for (const panel of panels) {
+          const panelHeading = document.createElement("p");
+          panelHeading.className = "withdrawal-history-panel-name";
+          panelHeading.textContent = `${panel.name} · ${panel.withdrawals.length} retiros`;
+          section.append(panelHeading);
+          const panelWrap = document.createElement("div");
+          panelWrap.className = "advertising-analytics-table-wrap";
+          const panelTable = table.cloneNode(true);
+          const panelBody = document.createElement("tbody");
+          for (const withdrawal of panel.withdrawals) {
+            const row = document.createElement("tr");
+            for (const value of [
+              dateTime.format(new Date(withdrawal.createdAt)),
+              withdrawal.username,
+              duration(withdrawal.durationMs)
+            ]) {
+              const cell = document.createElement("td");
+              cell.textContent = value;
+              row.append(cell);
+            }
+            panelBody.append(row);
+          }
+          panelTable.append(panelBody);
+          panelWrap.append(panelTable);
+          section.append(panelWrap);
+        }
+        body.append(section);
+      };
+      appendPanelGroup("Paneles activos", false);
+      appendPanelGroup("Paneles minimizados", true);
+      return;
+    }
+
+    if (!orderedWithdrawals.length) {
+      const emptyRow = document.createElement("tr");
+      const emptyCell = document.createElement("td");
+      emptyCell.colSpan = labels.length;
+      emptyCell.textContent = "No hay retiros registrados en este período.";
+      emptyRow.append(emptyCell);
+      bodyRows.append(emptyRow);
+    } else {
+      for (const withdrawal of orderedWithdrawals) appendRecord(withdrawal);
+    }
+    table.append(bodyRows);
+    tableWrap.append(table);
+    body.append(tableWrap);
+  }
+
   function createAdvertisingAnalyticsDialog(host) {
     const shadow = host.shadowRoot;
     if (!shadow) return;
@@ -5925,40 +6370,9 @@
       stateStorage.onChanged.removeListener(handleHiddenProfilesChanged);
       backdrop.remove();
     };
-    const getCalendarDayFilter = (daysAgo) => {
-      const start = new Date();
-      start.setHours(0, 0, 0, 0);
-      start.setDate(start.getDate() - daysAgo);
-      const end = new Date(start);
-      end.setDate(end.getDate() + 1);
-      return { from: start.getTime(), to: end.getTime() };
-    };
-    const getCalendarWeekFilter = (weeksAgo = 0) => {
-      const start = new Date();
-      start.setHours(0, 0, 0, 0);
-      const daysSinceMonday = (start.getDay() + 6) % 7;
-      start.setDate(start.getDate() - daysSinceMonday - weeksAgo * 7);
-      const end = new Date(start);
-      end.setDate(end.getDate() + 7);
-      return { from: start.getTime(), to: end.getTime() };
-    };
-    const getCalendarMonthFilter = (monthsAgo = 0) => {
-      const now = new Date();
-      const start = new Date(now.getFullYear(), now.getMonth() - monthsAgo, 1);
-      const end = new Date(now.getFullYear(), now.getMonth() - monthsAgo + 1, 1);
-      return { from: start.getTime(), to: end.getTime() };
-    };
     const formatDateTime = (date) =>
       `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-    for (const [period, label, getFilter] of [
-      ["today", "Hoy", () => getCalendarDayFilter(0)],
-      ["yesterday", "Ayer", () => getCalendarDayFilter(1)],
-      ["current-week", "Sem. Act", () => getCalendarWeekFilter()],
-      ["previous-week", "Sem Pas", () => getCalendarWeekFilter(1)],
-      ["current-month", "Mes. Act", () => getCalendarMonthFilter()],
-      ["previous-month", "Mes. Pas", () => getCalendarMonthFilter(1)],
-      ["all", "Todo", () => ({ days: null })]
-    ]) {
+    for (const [period, label, getFilter] of getAnalyticsPeriodOptions()) {
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.period = period;

@@ -336,7 +336,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\data-api\install-windo
 Al aplicar una versión nueva del servicio, ejecutar también el actualizador
 desde la carpeta del repositorio, como administrador con la misma cuenta. Este
 aplica las migraciones PostgreSQL, reinicia únicamente el proceso que ejecuta
-el `server.js` configurado y confirma `/health` con el esquema requerido:
+el `server.js` configurado y confirma `/health` con el esquema 11 (incluida la
+migración del historial de retiros):
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\data-api\update-windows-api.ps1
@@ -983,6 +984,11 @@ Reglas para esta tabla:
   esos casos.
 - No usar `ON DELETE CASCADE` desde contactos o alias hacia movimientos. El
   historial nunca debe desaparecer por borrar una entidad secundaria.
+
+La migración 011 agrega `completed_withdrawals`, un historial del workspace
+con el usuario, la fecha de inicio y la fecha de finalización de cada retiro.
+Cada fila se atribuye al perfil autenticado que registró la finalización y la
+clave del mensaje de retiro hace que los reintentos no dupliquen registros.
 
 ### Compatibilidad de claves desconocidas
 

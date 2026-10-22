@@ -592,7 +592,7 @@
 
 .active-bonus-indicators {
   position: absolute;
-  top: -74px;
+  top: -108px;
   left: 1px;
   display: grid;
   justify-items: center;
@@ -627,7 +627,8 @@
   color: #667270;
 }
 
-.active-bonus-indicator--advertising {
+.active-bonus-indicator--advertising,
+.active-bonus-indicator--withdrawals {
   box-sizing: border-box;
   width: 23px;
   height: 23px;
@@ -642,8 +643,21 @@
   color: #a3e4fa;
 }
 
+.active-bonus-indicator--withdrawals {
+  color: #667270;
+}
+
+.active-bonus-indicator--withdrawals:hover {
+  color: #a3aeac;
+}
+
 .active-bonus-indicator--advertising:focus-visible {
   outline: 2px solid #70c9e8;
+  outline-offset: 2px;
+}
+
+.active-bonus-indicator--withdrawals:focus-visible {
+  outline: 2px solid #8b9694;
   outline-offset: 2px;
 }
 
@@ -679,6 +693,12 @@
 
 :host([data-active-advertising="true"]) .active-bonus-indicator--advertising {
   color: #62c6f2;
+}
+
+.withdrawal-history-panel-name {
+  margin: 8px 0 0;
+  color: #e1e8e6;
+  font-weight: 600;
 }
 
 :host([data-bonus-type="double"]) .active-bonus-button[aria-pressed="true"],
@@ -720,7 +740,7 @@
 }
 
 :host([data-bonus-type="none"]) .active-bonus-indicators {
-  top: -54px;
+  top: -88px;
 }
 
 :host([data-bonus-type="double"]) .active-bonus-button svg {
@@ -3519,6 +3539,10 @@ input::placeholder {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
+}
+
+.withdrawal-history-tabs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .advertising-analytics-tabs button {

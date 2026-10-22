@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$requiredSchemaVersion = 11
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principalCheck = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -99,10 +100,11 @@ do {
     $health = $null
   }
 } while (($null -eq $health -or $health.status -ne 'healthy' -or
-    $health.schemaVersion -ne 10) -and (Get-Date) -lt $deadline)
+    $health.schemaVersion -ne $requiredSchemaVersion) -and (Get-Date) -lt $deadline)
 
-if ($null -eq $health -or $health.status -ne 'healthy' -or $health.schemaVersion -ne 10) {
-  throw "La API no confirmó salud con el esquema 10. Revisá $supportDirectory\api.log."
+if ($null -eq $health -or $health.status -ne 'healthy' -or
+  $health.schemaVersion -ne $requiredSchemaVersion) {
+  throw "La API no confirmó salud con el esquema $requiredSchemaVersion. Revisá $supportDirectory\api.log."
 }
 
 Write-Output "API actualizada y saludable con esquema $($health.schemaVersion): $healthUri"

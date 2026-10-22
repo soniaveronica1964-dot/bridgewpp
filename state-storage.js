@@ -65,6 +65,13 @@
       });
       return response.stats;
     },
+    async recordWithdrawal(withdrawal) {
+      return send("WITHDRAWAL_RECORD", { withdrawal });
+    },
+    async getWithdrawals(filters = {}) {
+      const response = await send("WITHDRAWALS_GET", { filters });
+      return response.withdrawals;
+    },
     set(changes) {
       return send("STATE_SET", {
         changes,

@@ -249,7 +249,7 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     await migrate(pool, migrations);
     const health = await request(port, "GET", "/health", undefined, null, extensionId);
     assert.equal(health.status, 200);
-    assert.equal(health.body.schemaVersion, 10);
+    assert.equal(health.body.schemaVersion, 11);
     const migratedBonus = await pool.query(`
       SELECT value_json FROM app_settings
       WHERE profile_id = $1 AND setting_key = 'activeBonusConfig'
@@ -850,6 +850,59 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.deepEqual(excludedProfileStats.body.hiddenProfiles, [{
       profile_id: main.identity.profileId,
       display_name: "Main Device"
+    }]);
+    const withdrawalCreatedAt = Date.now() - 10 * 60_000;
+    const withdrawal = {
+      withdrawalId: crypto.randomUUID(),
+      username: "jeni8777f",
+      createdAt: withdrawalCreatedAt,
+      completedAt: withdrawalCreatedAt + 4 * 60_000
+    };
+    const recordedWithdrawal = await request(
+      port,
+      "POST",
+      "/v1/withdrawals",
+      withdrawal,
+      main.credential,
+      extensionId
+    );
+    assert.equal(recordedWithdrawal.status, 201, JSON.stringify(recordedWithdrawal.body));
+    assert.equal(recordedWithdrawal.body.recorded, true);
+    const duplicateWithdrawal = await request(
+      port,
+      "POST",
+      "/v1/withdrawals",
+      withdrawal,
+      main.credential,
+      extensionId
+    );
+    assert.equal(duplicateWithdrawal.status, 201);
+    const retriedWithdrawal = await request(
+      port,
+      "POST",
+      "/v1/withdrawals",
+      { ...withdrawal, username: "different-user" },
+      main.credential,
+      extensionId
+    );
+    assert.equal(retriedWithdrawal.status, 201);
+    const withdrawalHistory = await request(
+      port,
+      "GET",
+      `/v1/withdrawals?from=${withdrawalCreatedAt}&to=${withdrawalCreatedAt + 1}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(withdrawalHistory.status, 200, JSON.stringify(withdrawalHistory.body));
+    assert.deepEqual(withdrawalHistory.body.withdrawals, [{
+      withdrawalId: withdrawal.withdrawalId,
+      username: "jeni8777f",
+      createdAt: withdrawalCreatedAt,
+      completedAt: withdrawal.completedAt,
+      durationMs: 4 * 60_000,
+      profileId: main.identity.profileId,
+      profileName: "Main Device"
     }]);
     const invalidCustomAdvertisingStats = await request(
       port,
