@@ -2426,7 +2426,7 @@ function createDataApiServer({ pool, config }) {
 
       if (route === "/v1/withdrawals" && request.method === "POST") {
         const identity = await authenticate(request);
-        const body = requireObjectBody(await readJson(request));
+        const body = requireObjectBody(await parseBody(request));
         if (Object.keys(body).some((key) =>
           !["withdrawalId", "username", "createdAt", "completedAt"].includes(key)) ||
           typeof body.withdrawalId !== "string" || !body.withdrawalId.trim() ||
@@ -2489,7 +2489,8 @@ function createDataApiServer({ pool, config }) {
           from !== null && to !== null && (from < 0 || to <= from)) {
           throw new ApiError(400, "invalid_withdrawal_query", "El rango de fechas no es válido.");
         }
-        const result = await pool.query(`
+        const [result, profileResult] = await Promise.all([
+          pool.query(`
           SELECT withdrawals.withdrawal_id,
                  withdrawals.username,
                  withdrawals.created_at_ms,
@@ -2507,7 +2508,18 @@ function createDataApiServer({ pool, config }) {
             AND ($2::bigint IS NULL OR withdrawals.created_at_ms >= $2)
             AND ($3::bigint IS NULL OR withdrawals.created_at_ms < $3)
           ORDER BY withdrawals.created_at_ms DESC, withdrawals.withdrawal_id DESC
-        `, [identity.workspace_id, from, to]);
+          `, [identity.workspace_id, from, to]),
+          pool.query(`
+            SELECT profiles.profile_id::text AS profile_id,
+                   devices.display_name AS profile_name
+            FROM extension_profiles AS profiles
+            JOIN enrolled_devices AS devices
+              ON devices.device_id = profiles.device_id
+             AND devices.workspace_id = profiles.workspace_id
+            WHERE profiles.workspace_id = $1
+            ORDER BY devices.display_name, profiles.profile_id
+          `, [identity.workspace_id])
+        ]);
         const withdrawals = result.rows.map((row) => {
           const createdAt = Number(row.created_at_ms);
           const completedAt = Number(row.completed_at_ms);
@@ -2524,7 +2536,11 @@ function createDataApiServer({ pool, config }) {
             profileName: row.profile_name
           };
         });
-        sendJson(response, 200, { ok: true, withdrawals }, origin, extensionId && `chrome-extension://${extensionId}`);
+        sendJson(response, 200, {
+          ok: true,
+          withdrawals,
+          profiles: profileResult.rows
+        }, origin, extensionId && `chrome-extension://${extensionId}`);
         return;
       }
 

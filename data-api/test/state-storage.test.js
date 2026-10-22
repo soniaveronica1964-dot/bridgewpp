@@ -15,7 +15,11 @@ test("extension storage adapter routes reads and revisioned writes through the s
     { ok: true, stats: { summary: { deposits: "2" }, platforms: [], profiles: [] } },
     { ok: true, stats: { summary: { deposits: "1" }, platforms: [], profiles: [] } },
     { ok: true, recorded: true },
-    { ok: true, withdrawals: [{ username: "jeni8777f", durationMs: 240_000 }] },
+    {
+      ok: true,
+      withdrawals: [{ username: "jeni8777f", durationMs: 240_000 }],
+      profiles: [{ profile_id: "33333333-3333-4333-8333-333333333333", profile_name: "PC 1" }]
+    },
     { ok: true, revision: 8, changeRevision: 12 },
     { ok: true, revision: 9, changeRevision: 13 }
   ];
@@ -78,8 +82,9 @@ test("extension storage adapter routes reads and revisioned writes through the s
     completedAt: 241000
   });
   const withdrawals = await context.stateStorage.getWithdrawals({ from: 1000, to: 2000 });
-  assert.equal(withdrawals[0].username, "jeni8777f");
-  assert.equal(withdrawals[0].durationMs, 240_000);
+  assert.equal(withdrawals.withdrawals[0].username, "jeni8777f");
+  assert.equal(withdrawals.withdrawals[0].durationMs, 240_000);
+  assert.equal(withdrawals.profiles[0].profile_name, "PC 1");
   await context.stateStorage.set({ activeBonusConfig: { enabled: true } });
   await context.stateStorage.remove("activeBonusConfig");
 

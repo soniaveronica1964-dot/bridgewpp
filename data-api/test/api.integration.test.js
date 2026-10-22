@@ -904,6 +904,10 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       profileId: main.identity.profileId,
       profileName: "Main Device"
     }]);
+    assert.deepEqual(withdrawalHistory.body.profiles, [{
+      profile_id: main.identity.profileId,
+      profile_name: "Main Device"
+    }]);
     const invalidCustomAdvertisingStats = await request(
       port,
       "GET",

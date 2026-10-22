@@ -2218,10 +2218,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     requestDataApi(`/v1/withdrawals${query.size ? `?${query}` : ""}`)
       .then((result) => {
-        if (!Array.isArray(result.withdrawals)) {
+        if (!Array.isArray(result.withdrawals) || !Array.isArray(result.profiles)) {
           throw new Error("La API PostgreSQL devolvió un historial de retiros incompleto.");
         }
-        sendResponse({ ok: true, withdrawals: result.withdrawals });
+        sendResponse({
+          ok: true,
+          withdrawals: result.withdrawals,
+          profiles: result.profiles
+        });
       })
       .catch((error) => sendResponse({
         ok: false,

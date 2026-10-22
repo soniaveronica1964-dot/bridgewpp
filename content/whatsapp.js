@@ -137,30 +137,16 @@
     return { from: start.getTime(), to: end.getTime() };
   }
 
-  function getCalendarShiftFilter(startHour, endHour) {
-    const start = new Date();
-    start.setHours(startHour, 0, 0, 0);
-    const end = new Date(start);
-    end.setHours(endHour, 0, 0, 0);
-    return { from: start.getTime(), to: end.getTime() };
-  }
-
-  function getAnalyticsPeriodOptions(includeShifts = false) {
-    const options = [
+  function getAnalyticsPeriodOptions() {
+    return [
       ["today", "Hoy", () => getCalendarDayFilter(0)],
       ["yesterday", "Ayer", () => getCalendarDayFilter(1)],
       ["current-week", "Sem. Act", () => getCalendarWeekFilter()],
       ["previous-week", "Sem Pas", () => getCalendarWeekFilter(1)],
       ["current-month", "Mes. Act", () => getCalendarMonthFilter()],
       ["previous-month", "Mes. Pas", () => getCalendarMonthFilter(1)],
-      ["all", "Todo", () => includeShifts ? {} : { days: null }]
+      ["all", "Todo", () => ({ days: null })]
     ];
-    if (includeShifts) options.push(
-      ["night-shift", "Turno Noche", () => getCalendarShiftFilter(0, 8)],
-      ["morning-shift", "Turno Mañana", () => getCalendarShiftFilter(8, 16)],
-      ["afternoon-shift", "Turno Tarde", () => getCalendarShiftFilter(16, 24)]
-    );
-    return options;
   }
 
   stateStorage.get(["ganamosSuffix", "multiPanelSuffix"])
@@ -5833,6 +5819,10 @@
 
     const periods = document.createElement("div");
     periods.className = "advertising-analytics-periods";
+    const shifts = document.createElement("div");
+    shifts.className = "advertising-analytics-periods withdrawal-history-shifts";
+    shifts.setAttribute("role", "group");
+    shifts.setAttribute("aria-label", "Filtrar por turno");
     const customRange = document.createElement("div");
     customRange.className = "advertising-analytics-custom-range";
     customRange.hidden = true;
@@ -5865,12 +5855,34 @@
     let activeTab = "all";
     let activeFilters = {};
     let activePeriod = "today";
+    const selectedShifts = new Set();
     let loadedWithdrawals = null;
+    let profiles = [];
     let hiddenProfileIds = [];
+    let canManageHiddenProfiles = true;
+    let profileVisibilitySaveInProgress = false;
 
     const render = () => {
       if (!loadedWithdrawals) return;
-      renderWithdrawalHistory(loadedWithdrawals, body, activeTab, hiddenProfileIds);
+      const filteredWithdrawals = selectedShifts.size === 0 || selectedShifts.size === 3
+        ? loadedWithdrawals
+        : loadedWithdrawals.filter((withdrawal) => {
+          const hour = new Date(withdrawal.createdAt).getHours();
+          return selectedShifts.has("night") && hour < 8 ||
+            selectedShifts.has("morning") && hour >= 8 && hour < 16 ||
+            selectedShifts.has("afternoon") && hour >= 16;
+        });
+      renderWithdrawalHistory(
+        filteredWithdrawals,
+        profiles,
+        body,
+        activeTab,
+        hiddenProfileIds,
+        canManageHiddenProfiles,
+        profileVisibilitySaveInProgress,
+        changeHiddenProfile,
+        invertHiddenProfiles
+      );
     };
     for (const [name, label] of [["all", "Todos"], ["profile", "P/Panel"]]) {
       const button = document.createElement("button");
@@ -5910,7 +5922,10 @@
       loading.textContent = "Cargando retiros...";
       body.append(loading);
       try {
-        const settings = await stateStorage.get([HIDDEN_ADVERTISING_PROFILES_KEY]);
+        const settings = await stateStorage.get([
+          HIDDEN_ADVERTISING_PROFILES_KEY,
+          "bridgeRole"
+        ]);
         const savedProfileIds = settings[HIDDEN_ADVERTISING_PROFILES_KEY] ?? [];
         if (!Array.isArray(savedProfileIds) || savedProfileIds.length > 1000 ||
           savedProfileIds.some((profileId) =>
@@ -5918,7 +5933,8 @@
           new Set(savedProfileIds).size !== savedProfileIds.length) {
           throw new Error("La configuración de paneles minimizados no es válida.");
         }
-        const withdrawals = await stateStorage.getWithdrawals(filters);
+        const history = await stateStorage.getWithdrawals(filters);
+        const { withdrawals } = history;
         if (!Array.isArray(withdrawals) || withdrawals.some((withdrawal) =>
           !withdrawal || typeof withdrawal.withdrawalId !== "string" ||
           typeof withdrawal.username !== "string" ||
@@ -5929,8 +5945,16 @@
           typeof withdrawal.profileName !== "string")) {
           throw new Error("La API de datos devolvió un historial de retiros incompleto.");
         }
+        if (!Array.isArray(history.profiles) || history.profiles.some((profile) =>
+          !profile || typeof profile.profile_id !== "string" ||
+          !PROFILE_ID_PATTERN.test(profile.profile_id) ||
+          typeof profile.profile_name !== "string")) {
+          throw new Error("La API de datos devolvió una lista de paneles incompleta.");
+        }
         if (!backdrop.isConnected || currentRequest !== requestSequence) return;
         hiddenProfileIds = savedProfileIds;
+        canManageHiddenProfiles = settings.bridgeRole !== "secondary";
+        profiles = history.profiles;
         loadedWithdrawals = withdrawals;
         render();
       } catch (error) {
@@ -5943,19 +5967,114 @@
         body.replaceChildren(failure);
       }
     };
+    const changeHiddenProfile = async (profileIds, shouldHide) => {
+      if (!canManageHiddenProfiles || profileVisibilitySaveInProgress) return;
+      profileVisibilitySaveInProgress = true;
+      render();
+      try {
+        const targets = Array.isArray(profileIds) ? profileIds : [profileIds];
+        const next = new Set(hiddenProfileIds);
+        for (const profileId of targets) {
+          if (shouldHide) next.add(profileId);
+          else next.delete(profileId);
+        }
+        await stateStorage.set({
+          [HIDDEN_ADVERTISING_PROFILES_KEY]: [...next].sort()
+        });
+        hiddenProfileIds = [...next].sort();
+        profileVisibilitySaveInProgress = false;
+        render();
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo guardar la configuración de paneles minimizados.", error);
+        const failure = document.createElement("p");
+        failure.className = "advertising-analytics-state advertising-analytics-error";
+        failure.textContent =
+          `No se pudo guardar la configuración: ${error.message || "error desconocido."}`;
+        body.replaceChildren(failure);
+      } finally {
+        profileVisibilitySaveInProgress = false;
+      }
+    };
+    const invertHiddenProfiles = async () => {
+      if (!canManageHiddenProfiles || profileVisibilitySaveInProgress) return;
+      profileVisibilitySaveInProgress = true;
+      render();
+      try {
+        const hidden = new Set(hiddenProfileIds);
+        const groups = new Map();
+        for (const profile of profiles) {
+          if (profile.profile_name.trim().toLocaleLowerCase() === "publi") continue;
+          const key = profile.profile_name.trim().toLocaleLowerCase();
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(profile.profile_id);
+        }
+        const next = new Set(hiddenProfileIds);
+        for (const profileIds of groups.values()) {
+          const groupIsHidden = profileIds.some((profileId) => hidden.has(profileId));
+          for (const profileId of profileIds) {
+            if (groupIsHidden) next.delete(profileId);
+            else next.add(profileId);
+          }
+        }
+        const nextProfileIds = [...next].sort();
+        await stateStorage.set({
+          [HIDDEN_ADVERTISING_PROFILES_KEY]: nextProfileIds
+        });
+        hiddenProfileIds = nextProfileIds;
+        profileVisibilitySaveInProgress = false;
+        render();
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo invertir la selección de paneles.", error);
+        const failure = document.createElement("p");
+        failure.className = "advertising-analytics-state advertising-analytics-error";
+        failure.textContent =
+          `No se pudo invertir la selección: ${error.message || "error desconocido."}`;
+        body.replaceChildren(failure);
+      } finally {
+        profileVisibilitySaveInProgress = false;
+      }
+    };
+    const handleHiddenProfilesChanged = (changes, areaName) => {
+      if (areaName !== "local" || !changes[HIDDEN_ADVERTISING_PROFILES_KEY] ||
+        profileVisibilitySaveInProgress || !backdrop.isConnected) return;
+      void load(activeFilters, activePeriod);
+    };
+    stateStorage.onChanged.addListener(handleHiddenProfilesChanged);
+    closeDialog = () => {
+      stateStorage.onChanged.removeListener(handleHiddenProfilesChanged);
+      backdrop.remove();
+    };
 
-    for (const [period, label, getFilter] of getAnalyticsPeriodOptions(true)) {
+    for (const [period, label, getFilter] of getAnalyticsPeriodOptions()) {
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.period = period;
       button.textContent = label;
       button.setAttribute("aria-pressed", "false");
       button.addEventListener("click", () => {
-        const filters = getFilter();
+        const filters = period === "all" ? {} : getFilter();
         setRangeInputs(filters);
         void load(filters, period);
       });
       periods.append(button);
+    }
+    for (const [shift, label] of [
+      ["night", "Turno Noche"],
+      ["morning", "Turno Mañana"],
+      ["afternoon", "Turno Tarde"]
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.shift = shift;
+      button.textContent = label;
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", () => {
+        if (selectedShifts.has(shift)) selectedShifts.delete(shift);
+        else selectedShifts.add(shift);
+        button.setAttribute("aria-pressed", String(selectedShifts.has(shift)));
+        render();
+      });
+      shifts.append(button);
     }
     const customButton = document.createElement("button");
     customButton.type = "button";
@@ -6023,23 +6142,23 @@
     fromInput.addEventListener("change", updateCustomRange);
     toInput.addEventListener("change", updateCustomRange);
 
-    const handleHiddenProfilesChanged = (changes, areaName) => {
-      if (areaName !== "local" || !changes[HIDDEN_ADVERTISING_PROFILES_KEY] ||
-        !backdrop.isConnected) return;
-      void load(activeFilters, activePeriod);
-    };
-    stateStorage.onChanged.addListener(handleHiddenProfilesChanged);
-    closeDialog = () => {
-      stateStorage.onChanged.removeListener(handleHiddenProfilesChanged);
-      backdrop.remove();
-    };
-    dialog.append(header, periods, customRange, tabs, body);
+    dialog.append(header, periods, shifts, customRange, tabs, body);
     backdrop.append(dialog);
     shadow.append(backdrop);
     void load(getCalendarDayFilter(0), "today");
   }
 
-  function renderWithdrawalHistory(withdrawals, body, activeTab, hiddenProfileIds) {
+  function renderWithdrawalHistory(
+    withdrawals,
+    profiles,
+    body,
+    activeTab,
+    hiddenProfileIds,
+    canManageHiddenProfiles,
+    profileVisibilitySaveInProgress,
+    onToggleProfile,
+    onInvertProfiles
+  ) {
     body.replaceChildren();
     const tableWrap = document.createElement("div");
     tableWrap.className = "advertising-analytics-table-wrap";
@@ -6066,6 +6185,12 @@
       const hours = Math.floor(minutes / 60);
       return hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
     };
+    const durationClass = (milliseconds) => {
+      if (milliseconds < 10 * 60_000) return "withdrawal-duration--fast";
+      if (milliseconds < 15 * 60_000) return "withdrawal-duration--moderate";
+      if (milliseconds <= 20 * 60_000) return "withdrawal-duration--slow";
+      return "withdrawal-duration--late";
+    };
     const appendRecord = (withdrawal) => {
       const row = document.createElement("tr");
       const values = [
@@ -6074,76 +6199,148 @@
         duration(withdrawal.durationMs),
         ...(activeTab === "profile" ? [] : [withdrawal.profileName])
       ];
-      for (const value of values) {
+      for (const [index, value] of values.entries()) {
         const cell = document.createElement("td");
         cell.textContent = value;
+        if (index === 2) {
+          cell.classList.add(durationClass(withdrawal.durationMs));
+        }
         row.append(cell);
       }
       bodyRows.append(row);
     };
-    const orderedWithdrawals = [...withdrawals].sort(
+    const hiddenIds = new Set(hiddenProfileIds);
+    const groupsByName = new Map();
+    const profileGroupsById = new Map();
+    for (const profile of profiles) {
+      const name = profile.profile_name.trim();
+      const key = name.toLocaleLowerCase();
+      if (!groupsByName.has(key)) {
+        groupsByName.set(key, {
+          profileName: name,
+          profileIds: [],
+          hidden: false
+        });
+      }
+      const group = groupsByName.get(key);
+      group.profileIds.push(profile.profile_id);
+      group.hidden ||= hiddenIds.has(profile.profile_id);
+      profileGroupsById.set(profile.profile_id, group);
+    }
+    const profileGroups = [...groupsByName.values()];
+    const visibleWithdrawals = withdrawals.filter((withdrawal) => {
+      const group = profileGroupsById.get(withdrawal.profileId);
+      return group ? !group.hidden : !hiddenIds.has(withdrawal.profileId);
+    });
+    const orderedWithdrawals = [...visibleWithdrawals].sort(
       (first, second) => second.createdAt - first.createdAt
     );
 
     if (activeTab === "profile") {
-      const grouped = new Map();
-      for (const withdrawal of orderedWithdrawals) {
-        const id = withdrawal.profileId;
-        if (!grouped.has(id)) {
-          grouped.set(id, {
-            name: withdrawal.profileName,
-            minimized: hiddenProfileIds.includes(id),
-            withdrawals: []
-          });
-        }
-        grouped.get(id).withdrawals.push(withdrawal);
-      }
-      if (!grouped.size) {
-        const empty = document.createElement("p");
-        empty.className = "advertising-analytics-state";
-        empty.textContent = "No hay retiros registrados en este período.";
-        body.append(empty);
-        return;
-      }
-      const appendPanelGroup = (title, minimized) => {
-        const panels = [...grouped.values()]
-          .filter((panel) => panel.minimized === minimized);
-        if (!panels.length) return;
+      const eligibleProfiles = profileGroups.filter(
+        (group) => group.profileName.toLocaleLowerCase() !== "publi"
+      );
+      const appendPanelSettings = (title, hidden) => {
+        const panelList = eligibleProfiles.filter(
+          (group) => group.hidden === hidden
+        );
+        if (!panelList.length) return;
         const section = document.createElement("section");
-        section.className = "advertising-analytics-section";
+        section.className = "advertising-analytics-section advertising-analytics-minimized";
         const heading = document.createElement("h3");
         heading.textContent = title;
         section.append(heading);
-        for (const panel of panels) {
-          const panelHeading = document.createElement("p");
-          panelHeading.className = "withdrawal-history-panel-name";
-          panelHeading.textContent = `${panel.name} · ${panel.withdrawals.length} retiros`;
-          section.append(panelHeading);
-          const panelWrap = document.createElement("div");
-          panelWrap.className = "advertising-analytics-table-wrap";
-          const panelTable = table.cloneNode(true);
-          const panelBody = document.createElement("tbody");
-          for (const withdrawal of panel.withdrawals) {
-            const row = document.createElement("tr");
-            for (const value of [
-              dateTime.format(new Date(withdrawal.createdAt)),
-              withdrawal.username,
-              duration(withdrawal.durationMs)
-            ]) {
-              const cell = document.createElement("td");
-              cell.textContent = value;
-              row.append(cell);
-            }
-            panelBody.append(row);
-          }
-          panelTable.append(panelBody);
-          panelWrap.append(panelTable);
-          section.append(panelWrap);
+        const buttons = document.createElement("div");
+        buttons.className = "advertising-analytics-minimized-buttons";
+        for (const group of panelList) {
+          const action = document.createElement("button");
+          action.type = "button";
+          action.className = "advertising-analytics-profile-action";
+          action.textContent = group.profileName;
+          action.disabled = !canManageHiddenProfiles || profileVisibilitySaveInProgress;
+          action.title = canManageHiddenProfiles
+            ? hidden
+              ? `Habilitar ${group.profileName}`
+              : `Deshabilitar ${group.profileName} en el historial de retiros`
+            : "Solo el perfil principal puede cambiar los paneles.";
+          action.setAttribute("aria-label", action.title);
+          action.addEventListener("click", () => onToggleProfile(group.profileIds, !hidden));
+          buttons.append(action);
         }
+        section.append(buttons);
         body.append(section);
       };
-      appendPanelGroup("Paneles activos", false);
-      appendPanelGroup("Paneles minimizados", true);
+      appendPanelSettings("Paneles activos", false);
+      appendPanelSettings("Paneles deshabilitados", true);
+      const invert = document.createElement("button");
+      invert.type = "button";
+      invert.className = "advertising-analytics-profile-action advertising-analytics-invert";
+      invert.textContent = "Invertir selección";
+      invert.disabled = !canManageHiddenProfiles || profileVisibilitySaveInProgress ||
+        !eligibleProfiles.length;
+      invert.title = canManageHiddenProfiles
+        ? "Deshabilitar los paneles activos y habilitar los deshabilitados."
+        : "Solo el perfil principal puede cambiar los paneles.";
+      invert.addEventListener("click", () => onInvertProfiles());
+      body.append(invert);
+      if (!canManageHiddenProfiles) {
+        const note = document.createElement("p");
+        note.className = "advertising-analytics-note";
+        note.textContent = "La configuración de paneles se hereda del perfil principal.";
+        body.append(note);
+      }
+
+      const activeProfiles = eligibleProfiles.filter((group) => !group.hidden);
+      for (const group of activeProfiles) {
+        const groupProfileIds = new Set(group.profileIds);
+        const profileWithdrawals = orderedWithdrawals.filter(
+          (withdrawal) => groupProfileIds.has(withdrawal.profileId)
+        );
+        const section = document.createElement("section");
+        section.className = "advertising-analytics-section";
+        const heading = document.createElement("h3");
+        heading.textContent = `${group.profileName} · ${profileWithdrawals.length} retiros`;
+        section.append(heading);
+        if (!profileWithdrawals.length) {
+          const empty = document.createElement("p");
+          empty.className = "advertising-analytics-state";
+          empty.textContent = "Sin retiros registrados en este período.";
+          section.append(empty);
+          body.append(section);
+          continue;
+        }
+        const panelWrap = document.createElement("div");
+        panelWrap.className = "advertising-analytics-table-wrap";
+        const panelTable = table.cloneNode(true);
+        const panelBody = document.createElement("tbody");
+        for (const withdrawal of profileWithdrawals) {
+          const row = document.createElement("tr");
+          const values = [
+            dateTime.format(new Date(withdrawal.createdAt)),
+            withdrawal.username,
+            duration(withdrawal.durationMs)
+          ];
+          for (const [index, value] of values.entries()) {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            if (index === 2) {
+              cell.classList.add(durationClass(withdrawal.durationMs));
+            }
+            row.append(cell);
+          }
+          panelBody.append(row);
+        }
+        panelTable.append(panelBody);
+        panelWrap.append(panelTable);
+        section.append(panelWrap);
+        body.append(section);
+      }
+      if (!eligibleProfiles.length) {
+        const empty = document.createElement("p");
+        empty.className = "advertising-analytics-state";
+        empty.textContent = "No hay paneles disponibles.";
+        body.append(empty);
+      }
       return;
     }
 
@@ -6315,13 +6512,16 @@
         body.replaceChildren(failure);
       }
     };
-    const changeHiddenProfile = async (profileId) => {
+    const changeHiddenProfile = async (profileIds, shouldHide) => {
       if (!canManageHiddenProfiles || profileVisibilitySaveInProgress) return;
       profileVisibilitySaveInProgress = true;
       try {
+        const targets = Array.isArray(profileIds) ? profileIds : [profileIds];
         const next = new Set(hiddenProfileIds);
-        if (next.has(profileId)) next.delete(profileId);
-        else next.add(profileId);
+        for (const profileId of targets) {
+          if (shouldHide) next.add(profileId);
+          else next.delete(profileId);
+        }
         await stateStorage.set({
           [HIDDEN_ADVERTISING_PROFILES_KEY]: [...next].sort()
         });
@@ -6342,10 +6542,26 @@
       if (!canManageHiddenProfiles || profileVisibilitySaveInProgress) return;
       profileVisibilitySaveInProgress = true;
       try {
-        const activeProfileIds = (loadedStats?.profiles || [])
-          .map((profile) => profile.profile_id);
+        const hidden = new Set(hiddenProfileIds);
+        const groups = new Map();
+        for (const profile of [
+          ...(loadedStats?.profiles || []),
+          ...(loadedStats?.hiddenProfiles || [])
+        ]) {
+          const key = profile.display_name.trim().toLocaleLowerCase();
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(profile.profile_id);
+        }
+        const next = new Set(hiddenProfileIds);
+        for (const profileIds of groups.values()) {
+          const groupIsHidden = profileIds.some((profileId) => hidden.has(profileId));
+          for (const profileId of profileIds) {
+            if (groupIsHidden) next.delete(profileId);
+            else next.add(profileId);
+          }
+        }
         await stateStorage.set({
-          [HIDDEN_ADVERTISING_PROFILES_KEY]: [...new Set(activeProfileIds)].sort()
+          [HIDDEN_ADVERTISING_PROFILES_KEY]: [...next].sort()
         });
         profileVisibilitySaveInProgress = false;
         await load(activeFilters, activePeriod);
@@ -6563,7 +6779,41 @@
         getName: (row) => row.display_name,
         profiles: true
       };
-    const { title: titleText, rows, getName, profiles } = tableConfig;
+    const { title: titleText, getName, profiles } = tableConfig;
+    let { rows } = tableConfig;
+    if (profiles) {
+      const groupedRows = new Map();
+      for (const row of rows) {
+        const name = getName(row).trim();
+        const key = name.toLocaleLowerCase();
+        if (!groupedRows.has(key)) {
+          groupedRows.set(key, {
+            ...row,
+            display_name: name,
+            profileIds: [],
+            deposits: 0,
+            customers: 0,
+            returning_customers: 0,
+            transaction_minor: 0,
+            bonus_minor: 0,
+            credited_minor: 0
+          });
+        }
+        const group = groupedRows.get(key);
+        group.profileIds.push(row.profile_id);
+        for (const field of [
+          "deposits",
+          "customers",
+          "returning_customers",
+          "transaction_minor",
+          "bonus_minor",
+          "credited_minor"
+        ]) {
+          group[field] += Number(row[field] || 0);
+        }
+      }
+      rows = [...groupedRows.values()];
+    }
     const section = document.createElement("section");
     section.className = "advertising-analytics-section";
     const titleElement = document.createElement("h3");
@@ -6597,6 +6847,14 @@
       emptyRow.append(emptyCell);
       tableBody.append(emptyRow);
     }
+    const profileIdsForName = (name) => {
+      const key = name.trim().toLocaleLowerCase();
+      return [...new Set([
+        ...(stats.profiles || []),
+        ...(stats.hiddenProfiles || [])
+      ].filter((profile) => profile.display_name.trim().toLocaleLowerCase() === key)
+        .map((profile) => profile.profile_id))];
+    };
     for (const row of rows) {
       const tableRow = document.createElement("tr");
       for (const value of [
@@ -6622,7 +6880,8 @@
           ? `Minimizar ${getName(row)}`
           : "Solo el perfil principal puede cambiar los paneles minimizados.";
         minimize.setAttribute("aria-label", minimize.title);
-        minimize.addEventListener("click", () => onToggleProfile(row.profile_id));
+        minimize.addEventListener("click", () =>
+          onToggleProfile(profileIdsForName(getName(row)), true));
         actionCell.append(minimize);
         tableRow.append(actionCell);
       }
@@ -6656,11 +6915,30 @@
       minimizedTitle.textContent = "Paneles minimizados";
       const minimizedButtons = document.createElement("div");
       minimizedButtons.className = "advertising-analytics-minimized-buttons";
-      const hiddenNames = new Map(
-        (stats.hiddenProfiles || []).map((profile) => [profile.profile_id, profile.display_name])
-      );
+      const hiddenNames = new Map();
+      for (const profile of stats.hiddenProfiles || []) {
+        const key = profile.display_name.trim().toLocaleLowerCase();
+        if (!hiddenNames.has(key)) hiddenNames.set(key, {
+          name: profile.display_name.trim(),
+          profileIds: []
+        });
+        hiddenNames.get(key).profileIds.push(profile.profile_id);
+      }
       for (const profileId of hiddenProfileIds) {
-        const profileName = hiddenNames.get(profileId) || "Panel no disponible";
+        const profile = (stats.hiddenProfiles || []).find(
+          (hiddenProfile) => hiddenProfile.profile_id === profileId
+        );
+        const key = profile?.display_name.trim().toLocaleLowerCase() || `unknown:${profileId}`;
+        if (!hiddenNames.has(key)) hiddenNames.set(key, {
+          name: profile?.display_name.trim() || "Panel no disponible",
+          profileIds: [profileId]
+        });
+        if (!hiddenNames.get(key).profileIds.includes(profileId)) {
+          hiddenNames.get(key).profileIds.push(profileId);
+        }
+      }
+      for (const group of hiddenNames.values()) {
+        const profileName = group.name;
         const restore = document.createElement("button");
         restore.type = "button";
         restore.className = "advertising-analytics-profile-action";
@@ -6670,7 +6948,9 @@
           ? `Devolver ${profileName} a la lista`
           : "Solo el perfil principal puede cambiar los paneles minimizados.";
         restore.setAttribute("aria-label", restore.title);
-        restore.addEventListener("click", () => onToggleProfile(profileId));
+        restore.addEventListener("click", () => onToggleProfile([
+          ...new Set([...group.profileIds, ...profileIdsForName(profileName)])
+        ], false));
         minimizedButtons.append(restore);
       }
       const invert = document.createElement("button");

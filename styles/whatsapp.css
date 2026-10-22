@@ -3535,6 +3535,11 @@ input::placeholder {
   gap: 6px;
 }
 
+.withdrawal-history-shifts {
+  padding-top: 8px;
+  border-top: 1px solid #303a39;
+}
+
 .advertising-analytics-tabs {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3738,6 +3743,22 @@ input::placeholder {
 .advertising-analytics-table-wrap th:not(:first-child) {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.advertising-analytics-table-wrap td.withdrawal-duration--fast {
+  color: #55d89a;
+}
+
+.advertising-analytics-table-wrap td.withdrawal-duration--moderate {
+  color: #f2d35e;
+}
+
+.advertising-analytics-table-wrap td.withdrawal-duration--slow {
+  color: #ff9e45;
+}
+
+.advertising-analytics-table-wrap td.withdrawal-duration--late {
+  color: #ff6b6b;
 }
 
 .advertising-analytics-table-wrap tbody tr:last-child td {

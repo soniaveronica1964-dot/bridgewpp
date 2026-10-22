@@ -70,7 +70,10 @@
     },
     async getWithdrawals(filters = {}) {
       const response = await send("WITHDRAWALS_GET", { filters });
-      return response.withdrawals;
+      return {
+        withdrawals: response.withdrawals,
+        profiles: response.profiles
+      };
     },
     set(changes) {
       return send("STATE_SET", {
