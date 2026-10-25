@@ -92,11 +92,15 @@
   }
 
   function findVisibleEmptyStatusPrompt() {
-    return [...document.querySelectorAll('[data-testid], [role], button, main')]
-      .find((element) =>
-        isVisible(element) &&
-        hasNormalizedLabel(element, /haz clic para anadir una actualizacion de estado/i)
-      ) || null;
+    const promptPattern = /haz clic para anadir una actualizacion de estado/i;
+    return [...document.querySelectorAll('[data-testid="status-header"], main')]
+      .find((element) => {
+        if (!isVisible(element)) return false;
+        const text = element.innerText || "";
+        return promptPattern.test(
+          text.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        );
+      }) || null;
   }
 
   function findOwnStatusHeader() {
