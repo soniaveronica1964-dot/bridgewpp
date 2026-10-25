@@ -12,6 +12,9 @@ const REMOTE_CREATE_PORT = 32146;
 const REQUEST_TIMEOUT_MS = 90_000;
 const POLL_TIMEOUT_MS = 20_000;
 const REMOTE_REQUEST_MAX_AGE_MS = 5 * 60_000;
+const STATUS_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const STATUS_REQUEST_MAX_BYTES = Math.ceil(STATUS_IMAGE_MAX_BYTES / 3) * 4 + 64 * 1024;
+const STATUS_JOB_TIMEOUT_MS = 10 * 60_000;
 const ALLOWED_REQUEST_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
@@ -44,8 +47,14 @@ const waitingPolls = [];
 const waitingBonusConfigPolls = [];
 const waitingPlatformOutagePolls = [];
 const waitingHiddenAdvertisingProfilesPolls = [];
+const waitingStatusUpdatePolls = [];
 const pendingRequests = new Map();
 const remoteNonces = new Map();
+const statusUpdateJobs = new Map();
+const lastSeenStatusProfiles = new Map();
+const statusProfileRevisions = new Map();
+let statusUpdateRevision = 0;
+let latestStatusUpdate = null;
 
 function isLoopback(remoteAddress) {
   return remoteAddress === "127.0.0.1" ||
@@ -124,13 +133,13 @@ function sendSignedRemoteJson(response, body, origin, timestamp, nonce) {
   response.end(rawBody);
 }
 
-function readRawBody(request) {
+function readRawBody(request, maxBytes = 128 * 1024) {
   return new Promise((resolve, reject) => {
     let body = "";
     request.setEncoding("utf8");
     request.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 128 * 1024) {
+      if (body.length > maxBytes) {
         reject(new Error("La solicitud excede el tamaño permitido."));
         request.destroy();
       }
@@ -140,8 +149,8 @@ function readRawBody(request) {
   });
 }
 
-async function readJson(request) {
-  const body = await readRawBody(request);
+async function readJson(request, maxBytes) {
+  const body = await readRawBody(request, maxBytes);
   try {
     return JSON.parse(body);
   } catch {
@@ -319,6 +328,7 @@ function waitForHiddenAdvertisingProfiles(response, origin, revision) {
     sendJson(response, 200, getHiddenAdvertisingProfilesUpdate(), origin);
     return;
   }
+
   const poll = {
     finish: () => sendJson(response, 200, getHiddenAdvertisingProfilesUpdate(), origin),
     timer: setTimeout(() => {
@@ -336,6 +346,51 @@ function waitForHiddenAdvertisingProfiles(response, origin, revision) {
     clearTimeout(poll.timer);
     const index = waitingHiddenAdvertisingProfilesPolls.indexOf(poll);
     if (index !== -1) waitingHiddenAdvertisingProfilesPolls.splice(index, 1);
+  });
+}
+
+function getStatusUpdateResult(job) {
+  return {
+    ok: true,
+    id: job.id,
+    results: [...job.results.values()],
+    pending: job.targets.filter((profileId) => !job.results.has(profileId)),
+    complete: job.targets.every((profileId) => job.results.has(profileId))
+  };
+}
+
+function waitForStatusUpdate(response, origin, revision, profileId) {
+  lastSeenStatusProfiles.set(profileId, Date.now());
+  const knownRevision = statusProfileRevisions.get(profileId);
+  const profileRevision = Math.max(
+    Number.isSafeInteger(knownRevision) ? knownRevision : statusUpdateRevision,
+    revision
+  );
+  statusProfileRevisions.set(profileId, profileRevision);
+  const latestJob = latestStatusUpdate
+    ? statusUpdateJobs.get(latestStatusUpdate.id)
+    : null;
+  if (latestStatusUpdate && latestJob?.targets.includes(profileId) &&
+    profileRevision < latestStatusUpdate.revision) {
+    statusProfileRevisions.set(profileId, latestStatusUpdate.revision);
+    sendJson(response, 200, latestStatusUpdate, origin);
+    return;
+  }
+  statusProfileRevisions.set(profileId, statusUpdateRevision);
+  const poll = {
+    profileId,
+    finish: (update) => sendJson(response, 200, update, origin),
+    timer: setTimeout(() => {
+      const index = waitingStatusUpdatePolls.indexOf(poll);
+      if (index !== -1) waitingStatusUpdatePolls.splice(index, 1);
+      poll.finish({ ok: true, changed: false, revision: statusUpdateRevision });
+    }, POLL_TIMEOUT_MS)
+  };
+  waitingStatusUpdatePolls.push(poll);
+  response.on("close", () => {
+    clearTimeout(poll.timer);
+    const index = waitingStatusUpdatePolls.indexOf(poll);
+    if (index !== -1) waitingStatusUpdatePolls.splice(index, 1);
   });
 }
 
@@ -383,6 +438,138 @@ async function handleRequest(request, response) {
       ok: true,
       primaryOnline: Date.now() - primaryLastSeen < 45_000
     }, origin);
+    return;
+  }
+
+  if (url.pathname === "/v1/status-update" && request.method === "GET") {
+    if (role !== "client") {
+      sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden recibir la imagen." }, origin);
+      return;
+    }
+    const revision = Number(url.searchParams.get("revision") || 0);
+    const profileId = url.searchParams.get("profileId") || "";
+    if (!Number.isSafeInteger(revision) || revision < 0 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(profileId)) {
+      sendJson(response, 400, { ok: false, error: "Perfil o versión de actualización no válidos." }, origin);
+      return;
+    }
+    waitForStatusUpdate(response, origin, revision, profileId);
+    return;
+  }
+
+  if (url.pathname === "/v1/status-update" && request.method === "POST") {
+    if (role !== "primary") {
+      sendJson(response, 403, { ok: false, error: "Solo el perfil principal puede iniciar un cambio de estado." }, origin);
+      return;
+    }
+    let body;
+    try {
+      body = await readJson(request, STATUS_REQUEST_MAX_BYTES);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message }, origin);
+      return;
+    }
+    if (typeof body?.id !== "string" || !/^[0-9a-f-]{36}$/i.test(body.id) ||
+      typeof body.image !== "string" ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.image) ||
+      statusUpdateJobs.has(body.id)) {
+      sendJson(response, 400, { ok: false, error: "La solicitud de cambio de estado no es válida." }, origin);
+      return;
+    }
+    const image = Buffer.from(body.image, "base64");
+    if (!image.length || image.length > STATUS_IMAGE_MAX_BYTES ||
+      image.toString("base64") !== body.image ||
+      image.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") {
+      sendJson(response, 400, { ok: false, error: "La imagen debe ser un archivo PNG válido de hasta 5 MB." }, origin);
+      return;
+    }
+    const now = Date.now();
+    for (const [jobId, existingJob] of statusUpdateJobs) {
+      if (now >= existingJob.expiresAt) {
+        statusUpdateJobs.delete(jobId);
+        if (latestStatusUpdate?.id === jobId) latestStatusUpdate = null;
+      }
+    }
+    for (const [profileId, seenAt] of lastSeenStatusProfiles) {
+      if (now - seenAt > 45_000) lastSeenStatusProfiles.delete(profileId);
+    }
+    const targets = [...lastSeenStatusProfiles.keys()];
+    const job = {
+      id: body.id,
+      targets,
+      results: new Map(),
+      expiresAt: now + STATUS_JOB_TIMEOUT_MS
+    };
+    statusUpdateJobs.set(body.id, job);
+    latestStatusUpdate = { ok: true, changed: true, revision: ++statusUpdateRevision, id: body.id, image: body.image };
+    const deliveredProfiles = new Set();
+    for (const poll of waitingStatusUpdatePolls.splice(0)) {
+      clearTimeout(poll.timer);
+      if (deliveredProfiles.has(poll.profileId)) {
+        poll.finish({ ok: true, changed: false, revision: statusUpdateRevision });
+      } else {
+        deliveredProfiles.add(poll.profileId);
+        poll.finish(latestStatusUpdate);
+      }
+    }
+    sendJson(response, 200, { ok: true, id: body.id, targets }, origin);
+    return;
+  }
+
+  if (url.pathname === "/v1/status-update-result" && request.method === "GET") {
+    if (role !== "primary") {
+      sendJson(response, 403, { ok: false, error: "Solo el perfil principal puede consultar los resultados." }, origin);
+      return;
+    }
+    const job = statusUpdateJobs.get(url.searchParams.get("id"));
+    if (!job) {
+      sendJson(response, 404, { ok: false, error: "No se encontró el proceso de cambio de estado." }, origin);
+      return;
+    }
+    if (Date.now() >= job.expiresAt) {
+      for (const profileId of job.targets) {
+        if (!job.results.has(profileId)) {
+          job.results.set(profileId, {
+            profileId,
+            ok: false,
+            error: "El perfil secundario no respondió a tiempo."
+          });
+        }
+      }
+    }
+    sendJson(response, 200, getStatusUpdateResult(job), origin);
+    if (job.results.size === job.targets.length) {
+      statusUpdateJobs.delete(job.id);
+      if (latestStatusUpdate?.id === job.id) latestStatusUpdate = null;
+    }
+    return;
+  }
+
+  if (url.pathname === "/v1/status-update-result" && request.method === "POST") {
+    if (role !== "client") {
+      sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden informar el resultado." }, origin);
+      return;
+    }
+    let body;
+    try {
+      body = await readJson(request);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message }, origin);
+      return;
+    }
+    const job = statusUpdateJobs.get(body?.id);
+    if (!job || !job.targets.includes(body?.profileId) ||
+      typeof body.ok !== "boolean" ||
+      (body.error !== undefined && (typeof body.error !== "string" || body.error.length > 300))) {
+      sendJson(response, 400, { ok: false, error: "El resultado del perfil no es válido." }, origin);
+      return;
+    }
+    job.results.set(body.profileId, {
+      profileId: body.profileId,
+      ok: body.ok,
+      ...(body.error ? { error: body.error } : {})
+    });
+    sendJson(response, 200, { ok: true }, origin);
     return;
   }
 

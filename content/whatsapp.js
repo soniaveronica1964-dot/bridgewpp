@@ -5458,6 +5458,132 @@
     });
     void loadSportBetsSetting();
 
+    const openMovementEditDialog = (movement, editButton) => {
+      const editorModal = document.createElement("div");
+      editorModal.className = "modal movement-history-edit-modal";
+      const closeEditor = () => {
+        editorModal.remove();
+        editButton.focus();
+      };
+      registerModalEscapeHandler(editorModal, closeEditor);
+      editorModal.addEventListener("click", (event) => {
+        if (event.target === editorModal) closeEditor();
+      });
+
+      const editor = document.createElement("form");
+      editor.className = "dialog movement-history-edit-dialog";
+      editor.dataset.operation = "movement-edit";
+      editor.setAttribute("role", "dialog");
+      editor.setAttribute("aria-modal", "true");
+      const editorTitle = document.createElement("h2");
+      editorTitle.textContent = "Editar movimiento";
+      const dateLabel = document.createElement("label");
+      dateLabel.textContent = "Fecha y horario";
+      const dateInput = document.createElement("input");
+      dateInput.type = "datetime-local";
+      dateInput.required = true;
+      dateInput.setAttribute("aria-label", "Fecha y horario del movimiento");
+      const movementDate = new Date(movement.timestamp);
+      const localDate = new Date(
+        movement.timestamp - movementDate.getTimezoneOffset() * 60_000
+      );
+      dateInput.value = localDate.toISOString().slice(0, 16);
+      dateLabel.append(dateInput);
+
+      const amountLabel = document.createElement("label");
+      amountLabel.textContent = movement.operation === "deposit" &&
+        Number.isFinite(movement.transactionAmount)
+        ? "Monto de la carga"
+        : "Monto";
+      const amountInput = document.createElement("input");
+      amountInput.type = "number";
+      amountInput.min = "0.01";
+      amountInput.step = "0.01";
+      amountInput.required = true;
+      amountInput.setAttribute("aria-label", amountLabel.textContent);
+      const displayedAmount = movement.operation === "deposit" &&
+        Number.isFinite(movement.transactionAmount)
+        ? movement.transactionAmount
+        : movement.amount;
+      amountInput.value = String(displayedAmount);
+      amountLabel.append(amountInput);
+
+      const error = document.createElement("p");
+      error.className = "movement-history-edit-error";
+      error.setAttribute("role", "alert");
+      error.hidden = true;
+      const actions = document.createElement("div");
+      actions.className = "dialog-actions";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "secondary";
+      cancel.textContent = "Cancelar";
+      cancel.addEventListener("click", closeEditor);
+      const save = document.createElement("button");
+      save.type = "submit";
+      save.textContent = "Guardar cambios";
+      actions.append(cancel, save);
+      editor.append(editorTitle, dateLabel, amountLabel, error, actions);
+      editorModal.append(editor);
+      root.append(editorModal);
+
+      editor.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const amount = Number(amountInput.value);
+        const timestamp = new Date(dateInput.value).getTime();
+        if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(timestamp)) {
+          error.textContent = "Ingresá un horario y un monto válidos.";
+          error.hidden = false;
+          return;
+        }
+        if (host.dataset.accounts !== contactKey) {
+          error.textContent = "El chat cambió; cerrá y volvé a abrir el historial.";
+          error.hidden = false;
+          return;
+        }
+
+        save.disabled = true;
+        cancel.disabled = true;
+        error.hidden = true;
+        const { recordKey, ...record } = movement;
+        const updatedMovement = { ...record, timestamp };
+        if (movement.operation === "deposit" &&
+          Number.isFinite(movement.transactionAmount)) {
+          updatedMovement.transactionAmount = amount;
+          updatedMovement.amount = amount +
+            (Number.isFinite(movement.bonusAmount) ? movement.bonusAmount : 0);
+        } else {
+          updatedMovement.amount = amount;
+        }
+        try {
+          await stateStorage.set({ [recordKey]: updatedMovement });
+          storedMovements = storedMovements.map((candidate) =>
+            candidate.recordKey === recordKey
+              ? { ...updatedMovement, recordKey }
+              : candidate
+          ).sort((first, second) => second.timestamp - first.timestamp);
+          closeEditor();
+          renderMovements();
+          const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+          if (balanceHost && agentBalanceContactKey === contactKey &&
+            isAgentMovementView(agentBalanceView)) {
+            void renderAgentMovements(balanceHost, agentBalanceView);
+          }
+          if (movement.operation === "withdrawal" && host.dataset.accounts === contactKey) {
+            void updateWithdrawalButtonState(host, contactKey);
+            void updateLastWithdrawalDisplay(host, contactKey);
+          }
+        } catch (saveError) {
+          console.error("[Ganamos balance extension] No se pudo editar el movimiento.", saveError);
+          error.textContent = saveError.message || "No se pudo guardar el movimiento.";
+          error.hidden = false;
+          save.disabled = false;
+          cancel.disabled = false;
+        }
+      });
+      dateInput.focus();
+    };
+
     const renderMovements = () => {
       const selectedPlatform = platformSelect.value;
       const titlePlatform = selectedPlatform === "all" ? defaultPlatform : selectedPlatform;
@@ -5665,6 +5791,20 @@
             });
             item.append(confirmMovement);
           }
+          const edit = document.createElement("button");
+          edit.type = "button";
+          edit.className = "movement-history-edit";
+          edit.title = "Editar fecha, horario y monto";
+          edit.setAttribute("aria-label", `Editar fecha, horario y monto del movimiento de $${formatCurrency(movement.amount)}`);
+          const editIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+          editIcon.setAttribute("viewBox", "0 0 24 24");
+          editIcon.setAttribute("aria-hidden", "true");
+          const editPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          editPath.setAttribute("d", "m16.5 3.5 4 4M4 20l4.5-1 11-11a2.12 2.12 0 0 0-3-3l-11 11L4 20Zm0 0h4");
+          editIcon.append(editPath);
+          edit.append(editIcon);
+          edit.addEventListener("click", () => openMovementEditDialog(movement, edit));
+          item.append(edit);
           const remove = document.createElement("button");
           remove.type = "button";
           remove.className = "movement-history-delete";
@@ -7191,7 +7331,9 @@
     const legacy = { ganamos: null, multipanel: null };
     let firstPlatform = null;
     const aliases = contactName.trim().split(/[\s/]+/)
-      .map((part) => part.replace(/^[^\p{L}\p{N}._-]+/u, "").replace(/[./]+$/, ""))
+      .map((part) => part
+        .replace(/^[^\p{L}\p{N}._-]+/u, "")
+        .replace(/[^\p{L}\p{M}\p{N}._-]+$/u, ""))
       .map((part) => part.match(/^([\p{L}\p{M}\p{N}._-]+?)([a-z])(\2*)$/iu))
       .filter(Boolean);
 
@@ -7219,6 +7361,284 @@
       }
     }
     return { ...usernames, legacy, firstPlatform };
+  }
+
+  function normalizeRescheduleUsername(username, suffix) {
+    return username.trim().toLocaleLowerCase()
+      .replace(new RegExp(`${suffix}+$`, "i"), suffix);
+  }
+
+  function getUsernameBase(username, platform) {
+    const suffix = platformSuffixes[platform];
+    return username.replace(new RegExp(`${suffix}+$`, "i"), "");
+  }
+
+  async function searchRescheduleCounterpart(base, platform) {
+    const digitGroups = base.match(/\d{4,}/g) || [];
+    const digits = digitGroups[digitGroups.length - 1]?.slice(-4) || "";
+    if (!digits) {
+      throw new Error("El usuario debe incluir al menos cuatro números consecutivos para buscar su cuenta complementaria.");
+    }
+
+    await loadRemoteCreateDestinations();
+    const profiles = [
+      {
+        name: "Esta PC",
+        suffix: platformSuffixes[platform],
+        request: () => chrome.runtime.sendMessage({
+          type: "USER_SEARCH_REQUEST",
+          data: { digits }
+        })
+      },
+      ...remoteCreateDestinations
+        .filter((destination) =>
+          typeof destination?.id === "string" &&
+          typeof destination.name === "string" &&
+          /^[a-z]$/i.test(destination[
+            platform === "ganamos" ? "ganamosSuffix" : "multiPanelSuffix"
+          ] || ""))
+        .map((destination) => ({
+          name: destination.name,
+          suffix: destination[
+            platform === "ganamos" ? "ganamosSuffix" : "multiPanelSuffix"
+          ].toLowerCase(),
+          request: () => chrome.runtime.sendMessage({
+            type: "REMOTE_USER_SEARCH_REQUEST",
+            data: { destinationId: destination.id, digits }
+          })
+        }))
+    ];
+    const results = await Promise.all(profiles.map(async (profile) => {
+      try {
+        const response = await profile.request();
+        if (!response?.ok) {
+          throw new Error(response?.error || "La búsqueda no se completó.");
+        }
+        const usernames = response[platform];
+        if (!Array.isArray(usernames)) {
+          throw new Error("La respuesta de búsqueda no tiene un formato válido.");
+        }
+        const suffix = profile.suffix;
+        const expected = normalizeRescheduleUsername(`${base}${suffix}`, suffix);
+        const match = usernames.find((username) =>
+          typeof username === "string" &&
+          normalizeRescheduleUsername(username, suffix) === expected);
+        return {
+          username: match || null,
+          error: response.errors?.[platform] || null,
+          profile: profile.name
+        };
+      } catch (error) {
+        return {
+          username: null,
+          error: error.message || "No se pudo completar la búsqueda.",
+          profile: profile.name
+        };
+      }
+    }));
+
+    const found = results.find((result) => result.username);
+    if (found) return found.username;
+    const errors = results.filter((result) => result.error)
+      .map((result) => `${result.profile}: ${result.error}`);
+    if (errors.length) {
+      throw new Error(`No se pudo verificar si existe la cuenta complementaria. ${errors.join(" ")}`);
+    }
+    throw new Error(`No se encontró ${base}${platformSuffixes[platform]} en ${platform === "ganamos" ? "Ganamos" : "MultiPanel"}.`);
+  }
+
+  async function getRescheduledContactName(host) {
+    const title = findContactTitle();
+    const usernames = findPlatformUsernames(title?.textContent || "");
+    const existing = {
+      ganamos: usernames.ganamos || "",
+      multipanel: usernames.multipanel || ""
+    };
+    const presentPlatforms = ["ganamos", "multipanel"]
+      .filter((platform) => existing[platform]);
+    if (!presentPlatforms.length) {
+      throw new Error("No se encontró un usuario de Ganamos o MultiPanel en el nombre del contacto.");
+    }
+
+    const firstPlatform = usernames.firstPlatform || presentPlatforms[0];
+    const secondPlatform = firstPlatform === "ganamos" ? "multipanel" : "ganamos";
+    if (presentPlatforms.length === 2) {
+      return `${existing[firstPlatform]}/${existing[secondPlatform]}`;
+    }
+
+    const sourcePlatform = presentPlatforms[0];
+    const targetPlatform = sourcePlatform === "ganamos" ? "multipanel" : "ganamos";
+    const username = existing[sourcePlatform];
+    const base = getUsernameBase(username, sourcePlatform);
+    if (!base || base === username) {
+      throw new Error(`No se pudo identificar la base del usuario ${username}.`);
+    }
+    const counterpart = await searchRescheduleCounterpart(base, targetPlatform);
+    if (document.getElementById(HOST_ID) !== host ||
+      host.dataset.accounts !== host.dataset.rescheduleAccounts ||
+      normalizeContactDisplayName(findContactTitle()?.textContent || "") !==
+        host.dataset.rescheduleTitle) {
+      throw new Error("El chat cambió durante la búsqueda. Volvé a abrir Reagendar en el contacto correcto.");
+    }
+    return `${username}/${counterpart}`;
+  }
+
+  function normalizeContactDisplayName(value) {
+    return value.replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+      .replace(/\s+/g, " ").trim();
+  }
+
+  function findWhatsAppControls(root, labels) {
+    const expected = new Set(labels.map((label) => label.toLocaleLowerCase()));
+    return [...root.querySelectorAll('button,[role="button"]')]
+      .filter(isRenderedVisible)
+      .filter((control) => [
+        control.getAttribute("aria-label"),
+        control.getAttribute("title"),
+        control.textContent
+      ].some((label) => typeof label === "string" &&
+        expected.has(label.replace(/\s+/g, " ").trim().toLocaleLowerCase())));
+  }
+
+  async function waitForWhatsAppElement(getter, description, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const element = getter();
+      if (element) return element;
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
+    }
+    throw new Error(`No apareció ${description} en WhatsApp.`);
+  }
+
+  function findContactEditorDialog() {
+    return [...document.querySelectorAll(
+      '[role="dialog"],[aria-modal="true"],[data-animate-modal-popup="true"]'
+    )].find((dialog) =>
+      isRenderedVisible(dialog) &&
+      [...dialog.querySelectorAll('input:not([type="hidden"])')].some(isRenderedVisible)) || null;
+  }
+
+  function getContactEditorFieldLabel(input) {
+    return [
+      input.getAttribute("aria-label"),
+      input.getAttribute("placeholder"),
+      ...[...(input.labels || [])].map((label) => label.textContent),
+      input.parentElement?.textContent
+    ].filter(Boolean).join(" ").replace(/\s+/g, " ").toLocaleLowerCase();
+  }
+
+  function setContactEditorField(input, value) {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value"
+    )?.set;
+    if (!setter) throw new Error("No se pudo actualizar el campo del nombre del contacto.");
+    input.focus();
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.blur();
+  }
+
+  async function renameWhatsAppContact(host, expectedName) {
+    const originalTitle = findContactTitle();
+    if (!originalTitle) throw new Error("No se encontró el encabezado del chat abierto.");
+    const expectedTitle = normalizeContactDisplayName(expectedName);
+    const isCurrentContact = () =>
+      document.getElementById(HOST_ID) === host &&
+      host.dataset.accounts === host.dataset.rescheduleAccounts &&
+      normalizeContactDisplayName(findContactTitle()?.textContent || "") ===
+        normalizeContactDisplayName(host.dataset.rescheduleTitle || "");
+    const existingDialog = findContactEditorDialog();
+
+    if (!existingDialog) {
+      const opener = originalTitle.closest('button,[role="button"]') || originalTitle;
+      opener.click();
+    }
+
+    const editButton = await waitForWhatsAppElement(() => {
+      const matches = findWhatsAppControls(document, ["Editar", "Edit"]);
+      return matches.length === 1 ? matches[0] : null;
+    }, "la opción para editar el contacto");
+    if (!isCurrentContact()) {
+      throw new Error("El chat cambió antes de abrir la edición del contacto.");
+    }
+    editButton.click();
+
+    const dialog = await waitForWhatsAppElement(
+      findContactEditorDialog,
+      "el formulario para editar el contacto"
+    );
+    if (!isCurrentContact()) {
+      throw new Error("El chat cambió antes de editar el nombre del contacto.");
+    }
+    const inputs = [...dialog.querySelectorAll('input:not([type="hidden"])')]
+      .filter((input) =>
+        isRenderedVisible(input) &&
+        !input.disabled &&
+        ["text", ""].includes(input.type));
+    if (!inputs.length || inputs.length > 2) {
+      throw new Error("WhatsApp no mostró campos de nombre reconocibles para este contacto.");
+    }
+    const firstName = inputs.find((input) =>
+      /\b(first name|nombre)\b/i.test(getContactEditorFieldLabel(input)));
+    const lastName = inputs.find((input) =>
+      /\b(last name|apellido)\b/i.test(getContactEditorFieldLabel(input)));
+    const firstNameInput = firstName || inputs.find((input) => input !== lastName) || inputs[0];
+    const lastNameInput = lastName || inputs.find((input) => input !== firstNameInput);
+    setContactEditorField(firstNameInput, expectedName);
+    if (lastNameInput) setContactEditorField(lastNameInput, "");
+
+    if (!isCurrentContact()) {
+      throw new Error("El chat cambió antes de guardar el nombre del contacto.");
+    }
+    const saveButtons = findWhatsAppControls(dialog, ["Guardar", "Save"]);
+    if (saveButtons.length !== 1) {
+      throw new Error("No se encontró un único botón para guardar el nombre del contacto.");
+    }
+    saveButtons[0].click();
+    await waitForWhatsAppElement(() => {
+      const title = findContactTitle();
+      return title &&
+        normalizeContactDisplayName(title.textContent || "") === expectedTitle
+        ? title
+        : null;
+    }, "la actualización del nombre del contacto", 15_000);
+  }
+
+  async function rescheduleContact(host) {
+    const title = findContactTitle();
+    if (!title) return;
+    const originalTitle = normalizeContactDisplayName(title.textContent || "");
+    const accountsKey = host.dataset.accounts;
+    const confirmed = window.confirm(
+      "¿Reagendar este contacto? Se buscará la cuenta complementaria y, si existe, el nombre quedará como usuario/usuario."
+    );
+    if (!confirmed) return;
+
+    host.dataset.rescheduleTitle = originalTitle;
+    host.dataset.rescheduleAccounts = accountsKey;
+    const button = host.shadowRoot.querySelector(".reschedule-button");
+    if (button) button.disabled = true;
+    const toastKey = `reschedule:${accountsKey}`;
+    try {
+      showToast(host, originalTitle, "Buscando la cuenta complementaria...", "warning", toastKey);
+      const expectedName = await getRescheduledContactName(host);
+      if (document.getElementById(HOST_ID) !== host ||
+        host.dataset.accounts !== accountsKey ||
+        normalizeContactDisplayName(findContactTitle()?.textContent || "") !== originalTitle) {
+        throw new Error("El chat cambió. Volvé a abrir Reagendar en el contacto correcto.");
+      }
+      await renameWhatsAppContact(host, expectedName);
+      showToast(host, expectedName, `Contacto reagendado como ${expectedName}.`, "success", toastKey);
+    } catch (error) {
+      console.error("[Ganamos balance extension] No se pudo reagendar el contacto.", error);
+      showToast(host, originalTitle, error.message || "No se pudo reagendar el contacto.", "error", toastKey);
+    } finally {
+      if (button?.isConnected) button.disabled = false;
+      delete host.dataset.rescheduleTitle;
+      delete host.dataset.rescheduleAccounts;
+    }
   }
 
   function getOrCreateHost() {
@@ -7264,6 +7684,24 @@
     informationButton.setAttribute("aria-label", "Información de depósitos, retiros y bonos");
     informationButton.hidden = true;
     informationButton.addEventListener("click", () => openUserMovementDialog(host));
+    const rescheduleButton = document.createElement("button");
+    rescheduleButton.type = "button";
+    rescheduleButton.className = "reschedule-button";
+    rescheduleButton.title = "Reagendar contacto";
+    rescheduleButton.setAttribute("aria-label", rescheduleButton.title);
+    rescheduleButton.hidden = true;
+    const rescheduleIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    rescheduleIcon.setAttribute("viewBox", "0 0 24 24");
+    rescheduleIcon.setAttribute("aria-hidden", "true");
+    rescheduleIcon.setAttribute("focusable", "false");
+    const reschedulePerson = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    reschedulePerson.setAttribute(
+      "d",
+      "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 9a7 7 0 0 0-14 0"
+    );
+    rescheduleIcon.append(reschedulePerson);
+    rescheduleButton.append(rescheduleIcon);
+    rescheduleButton.addEventListener("click", () => void rescheduleContact(host));
     const exchangeButton = document.createElement("button");
     exchangeButton.type = "button";
     exchangeButton.className = "exchange-button";
@@ -7453,6 +7891,7 @@
     contactUserSearch.append(contactUserSearchTitle, contactUserSearchResults);
     panel.append(
       informationButton,
+      rescheduleButton,
       exchangeButton,
       withdrawalLimitIndicator,
       passwordResetButton,
@@ -8590,8 +9029,18 @@
     else updateWithdrawalSummary();
     dialog.addEventListener("submit", async (event) => {
       event.preventDefault();
+      let numericAmount = numericInputValue(amountInput);
+      const amountIsEmpty = amountInput.value.trim() === "";
+      const numericBonus = numericInputValue(bonusInput);
+      if (operation === "deposit" && (amountIsEmpty || numericAmount === 0) &&
+        numericBonus !== null && numericBonus >= 1 && hasValidInputPrecision(bonusInput)) {
+        amountInput.value = "1";
+        bonusInput.value = formatBalance(numericBonus - 1);
+        if (bonusPercentInput) bonusPercentInput.value = "";
+        numericAmount = numericInputValue(amountInput);
+        updateDepositSummary();
+      }
       const amount = numericInputString(amountInput);
-      const numericAmount = numericInputValue(amountInput);
       const numericFields = [bonusInput, bonusPercentInput, loadAmountInput, recoveryPercentInput]
         .filter((input) => input?.value);
       const hasInvalidOptionalValue = numericFields.some((input) => {
@@ -9517,6 +9966,7 @@
     contactUserSearch.querySelector(".contact-user-search-results").replaceChildren();
     host.shadowRoot.querySelector(".user-information-button").hidden =
       !hasPlatformUsers && !hasUnblockButton;
+    host.shadowRoot.querySelector(".reschedule-button").hidden = !hasPlatformUsers;
     host.shadowRoot.querySelector(".exchange-button").hidden =
       !usernames?.ganamos || !usernames?.multipanel;
     updateWithdrawalLimitIndicator();

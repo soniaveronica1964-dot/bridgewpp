@@ -3,7 +3,7 @@
   "name": "FutureVip WhatsApp Extension",
   "version": "1.0.0",
   "description": "Consulta y opera saldos de Ganamos y MultiPanel desde WhatsApp Web.",
-  "permissions": ["nativeMessaging", "storage", "clipboardWrite"],
+  "permissions": ["nativeMessaging", "storage", "clipboardWrite", "debugger"],
   "host_permissions": [
     "https://web.whatsapp.com/*",
     "https://bo.casinoenvivo.club/*",
@@ -21,7 +21,7 @@
   "content_scripts": [
     {
       "matches": ["https://web.whatsapp.com/*"],
-      "js": ["state-storage.js", "content/whatsapp.js", "content/bridge.js"],
+      "js": ["state-storage.js", "content/whatsapp.js", "content/status.js", "content/bridge.js"],
       "run_at": "document_idle"
     },
     {

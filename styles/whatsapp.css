@@ -512,6 +512,43 @@
   line-height: 1;
 }
 
+.reschedule-button {
+  position: absolute;
+  z-index: 1;
+  top: -31px;
+  right: 76px;
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 1px solid #53615f;
+  border-radius: 4px;
+  color: #d8e0de;
+  background: #182020;
+}
+
+.reschedule-button:hover:not(:disabled) {
+  border-color: #00a884;
+  background: #263432;
+}
+
+.reschedule-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.reschedule-button[hidden] {
+  display: none !important;
+}
+
 .withdrawal-limit-inline {
   box-sizing: border-box;
   position: absolute;
@@ -2872,6 +2909,36 @@ button:disabled {
   cursor: pointer;
 }
 
+.movement-history-edit {
+  order: 3;
+  flex: 0 0 22px;
+  width: 22px;
+  min-height: 22px;
+  padding: 3px;
+  border: 0;
+  border-radius: 4px;
+  color: #70b7ff;
+  background: transparent;
+  cursor: pointer;
+}
+
+.movement-history-edit svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.movement-history-edit:hover,
+.movement-history-edit:focus-visible {
+  color: #fff;
+  background: #70b7ff33;
+}
+
 .movement-history-confirm {
   order: 3;
   flex: 0 0 22px;
@@ -2901,9 +2968,24 @@ button:disabled {
 }
 
 .movement-history-delete:disabled,
+.movement-history-edit:disabled,
 .movement-history-confirm:disabled {
   opacity: 0.5;
   cursor: wait;
+}
+
+.movement-history-edit-dialog {
+  display: grid;
+  gap: 10px;
+}
+
+.movement-history-edit-dialog h2 {
+  margin: 0;
+}
+
+.movement-history-edit-error {
+  margin: 0;
+  color: #ff9999;
 }
 
 .movement-history-details {

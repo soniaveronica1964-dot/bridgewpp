@@ -194,6 +194,59 @@
     }
   }
 
+  async function getStatusBridgeProfileId() {
+    const stored = await chrome.storage.local.get("statusBridgeProfileId");
+    if (typeof stored.statusBridgeProfileId === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(stored.statusBridgeProfileId)) {
+      return stored.statusBridgeProfileId;
+    }
+    const profileId = crypto.randomUUID();
+    await chrome.storage.local.set({ statusBridgeProfileId: profileId });
+    return profileId;
+  }
+
+  async function runSecondaryStatusUpdateBridge() {
+    const profileId = await getStatusBridgeProfileId();
+    let revision = 0;
+    while (true) {
+      try {
+        const update = await sendRuntimeMessage({
+          type: "BRIDGE_STATUS_UPDATE_POLL",
+          profileId,
+          revision
+        });
+        if (!update?.ok || !Number.isSafeInteger(update.revision) || update.revision < 0) {
+          throw new Error(update?.error || "No se pudo consultar la actualización de estado.");
+        }
+        revision = update.revision;
+        if (!update.changed) continue;
+        let result;
+        try {
+          result = await sendRuntimeMessage({
+            type: "STATUS_UPDATE_EXECUTE",
+            image: update.image
+          });
+        } catch (error) {
+          result = { ok: false, error: error.message || "No se pudo aplicar el cambio de estado." };
+        }
+        const reported = await sendRuntimeMessage({
+          type: "BRIDGE_STATUS_UPDATE_RESULT",
+          id: update.id,
+          profileId,
+          ok: result?.ok === true,
+          ...(!result?.ok ? { error: result?.error || "No se pudo cambiar el estado." } : {})
+        });
+        if (!reported?.ok) {
+          throw new Error(reported?.error || "No se pudo informar el resultado del cambio de estado.");
+        }
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo procesar la actualización de estado.", error);
+        await sleep(5000);
+      }
+    }
+  }
+
   stateStorage.get(["bridgeRole", "bridgeToken"])
     .then(({ bridgeRole, bridgeToken }) => {
       if (bridgeRole === "primary" && typeof bridgeToken === "string" && bridgeToken) {
@@ -205,6 +258,7 @@
         void runSecondaryBonusConfigBridge();
         void runSecondaryAdvertisingProfilesBridge();
         void runSecondaryPlatformOutagesBridge();
+        void runSecondaryStatusUpdateBridge();
       }
     })
     .catch((error) => console.error("[Ganamos balance extension] No se pudo leer el modo del puente.", error));

@@ -23,6 +23,7 @@ const SHARED_STATE_KEYS = new Set([
 const USER_ACCOUNT_SETTING_PREFIX = "userSetting:";
 const PLATFORM_OUTAGE_CONFIG_KEY = "platformOutageConfig";
 const stateChangedListeners = new Set();
+const statusDebuggerSessions = new Map();
 const loadedProfileStateKeys = new Set();
 let cachedStateRevision = null;
 let cachedChangeRevision = null;
@@ -1630,6 +1631,83 @@ async function syncHiddenAdvertisingProfiles(revision) {
   return update;
 }
 
+async function publishStatusUpdate(message) {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "primary" || !token) {
+    throw new Error("Este perfil no está configurado como principal.");
+  }
+  if (typeof message.id !== "string" || !/^[0-9a-f-]{36}$/i.test(message.id) ||
+    typeof message.image !== "string" || message.image.length > 7_100_000) {
+    throw new Error("La solicitud de cambio de estado no es válida.");
+  }
+  return bridgeFetch("/v1/status-update", token, {
+    method: "POST",
+    timeoutMs: 20_000,
+    body: { id: message.id, image: message.image }
+  });
+}
+
+async function pollStatusUpdate(message) {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "secondary" || !token) {
+    throw new Error("Este perfil no está configurado como secundario.");
+  }
+  if (!Number.isSafeInteger(message.revision) || message.revision < 0 ||
+    typeof message.profileId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(message.profileId)) {
+    throw new Error("La consulta de cambios de estado no es válida.");
+  }
+  const { statusBridgeProfileId } = await chrome.storage.local.get("statusBridgeProfileId");
+  if (statusBridgeProfileId !== message.profileId) {
+    throw new Error("La identidad del perfil secundario no coincide.");
+  }
+  return bridgeFetch(
+    `/v1/status-update?revision=${message.revision}&profileId=${encodeURIComponent(message.profileId)}`,
+    token,
+    { timeoutMs: 25_000 }
+  );
+}
+
+async function reportStatusUpdateResult(message) {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "secondary" || !token) {
+    throw new Error("Este perfil no está configurado como secundario.");
+  }
+  if (typeof message.id !== "string" || !/^[0-9a-f-]{36}$/i.test(message.id) ||
+    typeof message.profileId !== "string" || typeof message.ok !== "boolean" ||
+    (message.error !== undefined && typeof message.error !== "string")) {
+    throw new Error("El resultado del cambio de estado no es válido.");
+  }
+  const { statusBridgeProfileId } = await chrome.storage.local.get("statusBridgeProfileId");
+  if (statusBridgeProfileId !== message.profileId) {
+    throw new Error("La identidad del perfil secundario no coincide.");
+  }
+  return bridgeFetch("/v1/status-update-result", token, {
+    method: "POST",
+    timeoutMs: 10_000,
+    body: {
+      id: message.id,
+      profileId: message.profileId,
+      ok: message.ok,
+      ...(message.error ? { error: message.error.slice(0, 300) } : {})
+    }
+  });
+}
+
+async function getStatusUpdateResults(id) {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "primary" || !token) {
+    throw new Error("Este perfil no está configurado como principal.");
+  }
+  if (typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id)) {
+    throw new Error("La consulta de resultados no es válida.");
+  }
+  return bridgeFetch(`/v1/status-update-result?id=${encodeURIComponent(id)}`, token, {
+    timeoutMs: 10_000
+  });
+}
+
 async function bridgeFetch(path, token, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 95_000);
@@ -1974,6 +2052,102 @@ async function runInConfiguredProfile(message) {
   return executeApiMessage(message);
 }
 
+async function startStatusDebuggerSession(tabId) {
+  const { role } = await getBridgeSettings();
+  if (!["primary", "secondary"].includes(role)) {
+    throw new Error("El perfil debe estar configurado como principal o secundario.");
+  }
+  if (statusDebuggerSessions.has(tabId)) {
+    throw new Error("Ya hay una automatización de estados activa en esta pestaña.");
+  }
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+  } catch (error) {
+    throw new Error(
+      `Chrome no permitió controlar esta pestaña. Aceptá el permiso debugger y cerrá DevTools u otra herramienta conectada a la pestaña. ${error.message || ""}`.trim()
+    );
+  }
+  statusDebuggerSessions.set(tabId, true);
+}
+
+async function clickStatusDebuggerTarget(tabId, message) {
+  if (!statusDebuggerSessions.has(tabId)) {
+    throw new Error("La sesión de control de Chrome no está activa.");
+  }
+  if (!Number.isFinite(message.x) || !Number.isFinite(message.y) ||
+    message.x < 0 || message.y < 0 || message.x > 20_000 || message.y > 20_000) {
+    throw new Error("La posición del control de WhatsApp no es válida.");
+  }
+  const target = { tabId };
+  const point = { x: message.x, y: message.y, button: "left" };
+  await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+    ...point,
+    type: "mouseMoved",
+    buttons: 0
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  let pressed = false;
+  try {
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      ...point,
+      type: "mousePressed",
+      clickCount: 1,
+      buttons: 1
+    });
+    pressed = true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } finally {
+    if (pressed) {
+      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+        ...point,
+        type: "mouseReleased",
+        clickCount: 1,
+        buttons: 0
+      });
+    }
+  }
+}
+
+async function pressStatusDebuggerKey(tabId, message) {
+  if (!statusDebuggerSessions.has(tabId)) {
+    throw new Error("La sesión de control de Chrome no está activa.");
+  }
+  if (message.key !== "Escape") {
+    throw new Error("La tecla solicitada no está permitida.");
+  }
+  const target = { tabId };
+  await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Escape",
+    code: "Escape",
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27
+  });
+  await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Escape",
+    code: "Escape",
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27
+  });
+}
+
+async function stopStatusDebuggerSession(tabId) {
+  if (!statusDebuggerSessions.has(tabId)) return;
+  statusDebuggerSessions.delete(tabId);
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch (error) {
+    throw new Error(
+      `No se pudo cerrar la sesión debugger de WhatsApp: ${error.message || "error desconocido."}`
+    );
+  }
+}
+
+chrome.debugger.onDetach.addListener((source) => {
+  if (typeof source.tabId === "number") statusDebuggerSessions.delete(source.tabId);
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "DATA_PROFILE_SELECTOR_GET") {
     if (sender.id !== chrome.runtime.id || sender.frameId !== 0 ||
@@ -2303,6 +2477,69 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ok: false,
         error: error.message || "No se pudo recibir la configuración de paneles minimizados."
       }));
+    return true;
+  }
+
+  if (message?.type === "STATUS_UPDATE_EXECUTE") {
+    if (!isWhatsAppSender(sender) || typeof sender.tab?.id !== "number") {
+      sendResponse({ ok: false, error: "Origen no autorizado para cambiar el estado." });
+      return;
+    }
+    chrome.tabs.sendMessage(sender.tab.id, {
+      type: "STATUS_UPDATE_LOCAL_EXECUTE",
+      image: message.image
+    }).then(sendResponse).catch((error) => sendResponse({
+      ok: false,
+      error: error.message || "No se pudo ejecutar el cambio de estado en WhatsApp Web."
+    }));
+    return true;
+  }
+
+  if ([
+    "STATUS_UPDATE_DEBUGGER_START",
+    "STATUS_UPDATE_DEBUGGER_CLICK",
+    "STATUS_UPDATE_DEBUGGER_KEY",
+    "STATUS_UPDATE_DEBUGGER_STOP"
+  ].includes(message?.type)) {
+    if (!isWhatsAppSender(sender) || typeof sender.tab?.id !== "number") {
+      sendResponse({ ok: false, error: "Origen no autorizado para controlar WhatsApp Web." });
+      return;
+    }
+    const operation = message.type === "STATUS_UPDATE_DEBUGGER_START"
+      ? startStatusDebuggerSession(sender.tab.id)
+      : message.type === "STATUS_UPDATE_DEBUGGER_CLICK"
+        ? clickStatusDebuggerTarget(sender.tab.id, message)
+        : message.type === "STATUS_UPDATE_DEBUGGER_KEY"
+          ? pressStatusDebuggerKey(sender.tab.id, message)
+          : stopStatusDebuggerSession(sender.tab.id);
+    operation.then(() => sendResponse({ ok: true })).catch((error) => sendResponse({
+      ok: false,
+      error: error.message || "No se pudo controlar WhatsApp Web mediante Chrome."
+    }));
+    return true;
+  }
+
+  if ([
+    "BRIDGE_STATUS_UPDATE_PUBLISH",
+    "BRIDGE_STATUS_UPDATE_RESULTS_GET",
+    "BRIDGE_STATUS_UPDATE_POLL",
+    "BRIDGE_STATUS_UPDATE_RESULT"
+  ].includes(message?.type)) {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de cambio de estado no válida." });
+      return;
+    }
+    const operation = message.type === "BRIDGE_STATUS_UPDATE_PUBLISH"
+      ? publishStatusUpdate(message)
+      : message.type === "BRIDGE_STATUS_UPDATE_RESULTS_GET"
+        ? getStatusUpdateResults(message.id)
+        : message.type === "BRIDGE_STATUS_UPDATE_POLL"
+          ? pollStatusUpdate(message)
+          : reportStatusUpdateResult(message);
+    operation.then(sendResponse).catch((error) => sendResponse({
+      ok: false,
+      error: error.message || "No se pudo sincronizar el cambio de estado."
+    }));
     return true;
   }
 
