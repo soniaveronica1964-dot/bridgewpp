@@ -91,6 +91,14 @@
       .find(isVisible) || null;
   }
 
+  function findVisibleEmptyStatusPrompt() {
+    return [...document.querySelectorAll('[data-testid], [role], button, main')]
+      .find((element) =>
+        isVisible(element) &&
+        hasNormalizedLabel(element, /haz clic para anadir una actualizacion de estado/i)
+      ) || null;
+  }
+
   function findOwnStatusHeader() {
     return [...document.querySelectorAll('button[data-testid="status-header"]')]
       .find((element) =>
@@ -483,12 +491,9 @@
 
   function getOwnStatusPresence() {
     const header = findVisibleStatusHeader();
-    if (!header) return "unknown";
+    const emptyPrompt = findVisibleEmptyStatusPrompt();
+    if (!header && !emptyPrompt) return "unknown";
     const thumbnail = findOwnStatusThumbnail();
-    const emptyPrompt = hasNormalizedLabel(
-      header,
-      /haz clic para anadir una actualizacion de estado/i
-    );
     if (thumbnail && emptyPrompt) return "unknown";
     if (thumbnail) return "present";
     if (emptyPrompt) return "empty";
@@ -578,15 +583,16 @@
       const updatedCount = parseStatusCount(currentGroup);
       if (updatedCount && updatedCount.total < previousTotal) return "remaining-statuses";
 
-      if (!currentGroup && findVisibleStatusHeader()) {
-        if (!findOwnStatusThumbnail()) return "no-statuses";
+      if (!currentGroup && !findOwnStatusThumbnail() &&
+        (findVisibleStatusHeader() || findVisibleEmptyStatusPrompt())) {
+        return "no-statuses";
       }
       return null;
     }, "la verificación de que WhatsApp eliminó el estado", 60_000);
 
     if (deletionState === "remaining-statuses") return;
     await waitFor(
-      findVisibleStatusHeader,
+      () => findVisibleStatusHeader() || findVisibleEmptyStatusPrompt(),
       "la lista de estados después de eliminar el único estado",
       30_000
     );

@@ -1045,7 +1045,13 @@ loadCredentials().then(() => {
   const server = http.createServer((request, response) => {
     handleRequest(request, response).catch((error) => {
       if (!response.headersSent) {
-        sendJson(response, 500, { ok: false, error: "Error interno del puente local." }, request.headers.origin);
+        const isAuthorizedStatusUpdate =
+          request.url?.split("?")[0] === "/v1/status-update" &&
+          tokenRole(request) === "primary";
+        const errorMessage = isAuthorizedStatusUpdate && error?.message
+          ? `Error interno del puente local. Detalle: ${error.message}`
+          : "Error interno del puente local.";
+        sendJson(response, 500, { ok: false, error: errorMessage }, request.headers.origin);
       } else {
         response.destroy(error);
       }
