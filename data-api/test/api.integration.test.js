@@ -307,6 +307,16 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     );
     assert.equal(invalidDeviceProof.status, 401);
     assert.equal(invalidDeviceProof.body.code, "invalid_device_proof");
+    const mainIdentity = await request(
+      port,
+      "GET",
+      "/v1/identity",
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(mainIdentity.status, 200, JSON.stringify(mainIdentity.body));
+    assert.equal(mainIdentity.body.profileName, "Main Device");
     const replayNonce = crypto.randomBytes(32).toString("base64url");
     const nonceClaim = await request(
       port,

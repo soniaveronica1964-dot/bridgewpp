@@ -15,6 +15,7 @@ const PROFILE_RUNTIME_STATE_KEYS = [
   "multiPanelSession"
 ];
 const HIDDEN_ADVERTISING_PROFILES_KEY = "hiddenAdvertisingProfiles";
+const STATUS_EXCLUDED_PROFILE_IDS_KEY = "statusExcludedProfileIds";
 const SHARED_STATE_KEYS = new Set([
   "contactFlowCounters",
   "contactVisualTags",
@@ -1489,7 +1490,7 @@ function isValidActiveBonusConfig(config) {
   return totalWeight > 0;
 }
 
-function isValidHiddenAdvertisingProfiles(profileIds) {
+function isValidBridgeProfileIds(profileIds) {
   return Array.isArray(profileIds) &&
     profileIds.length <= 1000 &&
     profileIds.every((profileId) =>
@@ -1497,6 +1498,15 @@ function isValidHiddenAdvertisingProfiles(profileIds) {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
         .test(profileId)) &&
     new Set(profileIds).size === profileIds.length;
+}
+
+async function getStatusExcludedProfileIds() {
+  const stored = await chrome.storage.local.get(STATUS_EXCLUDED_PROFILE_IDS_KEY);
+  const profileIds = stored[STATUS_EXCLUDED_PROFILE_IDS_KEY] ?? [];
+  if (!isValidBridgeProfileIds(profileIds)) {
+    throw new Error("La lista de excepciones de estados no es válida.");
+  }
+  return profileIds;
 }
 
 async function publishActiveBonusConfig() {
@@ -1509,11 +1519,70 @@ async function publishActiveBonusConfig() {
   if (!isValidActiveBonusConfig(config)) {
     throw new Error("La configuración del bono activo no es válida y no se puede sincronizar.");
   }
+  const excludedProfileIds = await getStatusExcludedProfileIds();
   return bridgeFetch("/v1/bonus-config", token, {
     method: "POST",
     timeoutMs: 10_000,
-    body: { config }
+    body: { config, excludedProfileIds }
   });
+}
+
+async function getConnectedStatusProfiles() {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "primary" || !token) {
+    throw new Error("Este perfil no está configurado como principal.");
+  }
+  const [response, excludedProfileIds, primaryProfile] = await Promise.all([
+    bridgeFetch("/v1/status-profiles", token, { timeoutMs: 10_000 }),
+    getStatusExcludedProfileIds(),
+    getEnrolledProfileIdentity()
+  ]);
+  if (!response?.ok || !Array.isArray(response.profiles) ||
+    response.profiles.length > 1000 ||
+    response.profiles.some((profile) =>
+      typeof profile?.profileId !== "string" ||
+      !isValidBridgeProfileIds([profile.profileId]) ||
+      typeof profile.name !== "string" ||
+      !profile.name.trim() || profile.name.length > 120) ||
+    new Set(response.profiles.map((profile) => profile.profileId)).size !==
+      response.profiles.length) {
+    throw new Error(response?.error || "El puente devolvió una lista de perfiles conectados no válida.");
+  }
+  return { profiles: response.profiles, excludedProfileIds, primaryProfile };
+}
+
+async function getEnrolledProfileIdentity() {
+  const identity = await requestDataApi("/v1/identity");
+  if (typeof identity.profileId !== "string" ||
+    !isValidBridgeProfileIds([identity.profileId]) ||
+    typeof identity.profileName !== "string" ||
+    !identity.profileName.trim() || identity.profileName.length > 120) {
+    throw new Error("La API no devolvió la identidad de enrolamiento de este perfil.");
+  }
+  return {
+    profileId: identity.profileId,
+    name: identity.profileName.trim()
+  };
+}
+
+async function setStatusExcludedProfileIds(profileIds) {
+  if (!isValidBridgeProfileIds(profileIds)) {
+    throw new Error("La lista de excepciones de estados no es válida.");
+  }
+  const { role, token } = await getBridgeSettings();
+  if (role !== "primary" || !token) {
+    throw new Error("Este perfil no está configurado como principal.");
+  }
+  await chrome.storage.local.set({
+    [STATUS_EXCLUDED_PROFILE_IDS_KEY]: profileIds
+  });
+  let warning;
+  try {
+    await publishActiveBonusConfig();
+  } catch (error) {
+    warning = `Las excepciones se guardaron, pero no se pudieron sincronizar todavía: ${error.message}`;
+  }
+  return { profileIds, warning };
 }
 
 async function publishHiddenAdvertisingProfiles() {
@@ -1523,7 +1592,7 @@ async function publishHiddenAdvertisingProfiles() {
   }
   const stored = await getExtensionState(HIDDEN_ADVERTISING_PROFILES_KEY);
   const profileIds = stored[HIDDEN_ADVERTISING_PROFILES_KEY] ?? [];
-  if (!isValidHiddenAdvertisingProfiles(profileIds)) {
+  if (!isValidBridgeProfileIds(profileIds)) {
     throw new Error("La lista de paneles minimizados no es válida y no se puede sincronizar.");
   }
   return bridgeFetch("/v1/advertising-hidden-profiles", token, {
@@ -1581,15 +1650,26 @@ async function syncPlatformOutageConfig(revision) {
   return update;
 }
 
-async function syncActiveBonusConfig(revision) {
+async function syncActiveBonusConfig(revision, profileId, profileName) {
   const { role, token } = await getBridgeSettings();
   if (role !== "secondary" || !token) {
     throw new Error("Este perfil no está configurado como secundario.");
   }
-  if (!Number.isSafeInteger(revision) || revision < 0) {
+  if (!Number.isSafeInteger(revision) || revision < 0 ||
+    typeof profileId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(profileId) ||
+    typeof profileName !== "string" || !profileName.trim() ||
+    profileName.length > 120) {
     throw new Error("La versión de configuración recibida no es válida.");
   }
-  const update = await bridgeFetch(`/v1/bonus-config?revision=${revision}`, token, {
+  const { statusBridgeProfileId } = await chrome.storage.local.get("statusBridgeProfileId");
+  if (statusBridgeProfileId !== profileId) {
+    throw new Error("La identidad del perfil secundario no coincide.");
+  }
+  const update = await bridgeFetch(
+    `/v1/bonus-config?revision=${revision}&profileId=${encodeURIComponent(profileId)}&profileName=${encodeURIComponent(profileName.trim())}`,
+    token, {
     timeoutMs: 25_000
   });
   if (!update?.ok || !Number.isSafeInteger(update.revision) || update.revision < 0) {
@@ -1624,7 +1704,7 @@ async function syncHiddenAdvertisingProfiles(revision) {
     throw new Error("El puente devolvió una versión de paneles minimizados no válida.");
   }
   if (!update.changed) return update;
-  if (!isValidHiddenAdvertisingProfiles(update.profileIds)) {
+  if (!isValidBridgeProfileIds(update.profileIds)) {
     throw new Error("El puente devolvió una lista de paneles minimizados no válida.");
   }
   await setExtensionState({ [HIDDEN_ADVERTISING_PROFILES_KEY]: update.profileIds });
@@ -1641,10 +1721,11 @@ async function publishStatusUpdate(message) {
     message.image.length > Math.ceil((10 * 1024 * 1024) / 3) * 4) {
     throw new Error("La solicitud de cambio de estado no es válida.");
   }
+  const excludedProfileIds = await getStatusExcludedProfileIds();
   return bridgeFetch("/v1/status-update", token, {
     method: "POST",
     timeoutMs: 20_000,
-    body: { id: message.id, image: message.image }
+    body: { id: message.id, image: message.image, excludedProfileIds }
   });
 }
 
@@ -1656,7 +1737,9 @@ async function pollStatusUpdate(message) {
   if (!Number.isSafeInteger(message.revision) || message.revision < 0 ||
     typeof message.profileId !== "string" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-      .test(message.profileId)) {
+      .test(message.profileId) ||
+    typeof message.profileName !== "string" || !message.profileName.trim() ||
+    message.profileName.length > 120) {
     throw new Error("La consulta de cambios de estado no es válida.");
   }
   const { statusBridgeProfileId } = await chrome.storage.local.get("statusBridgeProfileId");
@@ -1664,7 +1747,7 @@ async function pollStatusUpdate(message) {
     throw new Error("La identidad del perfil secundario no coincide.");
   }
   return bridgeFetch(
-    `/v1/status-update?revision=${message.revision}&profileId=${encodeURIComponent(message.profileId)}`,
+    `/v1/status-update?revision=${message.revision}&profileId=${encodeURIComponent(message.profileId)}&profileName=${encodeURIComponent(message.profileName.trim())}`,
     token,
     { timeoutMs: 25_000 }
   );
@@ -2444,11 +2527,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false, error: "Solicitud de sincronización no válida." });
       return;
     }
-    syncActiveBonusConfig(message.revision)
+    syncActiveBonusConfig(message.revision, message.profileId, message.profileName)
       .then(sendResponse)
       .catch((error) => sendResponse({
         ok: false,
         error: error.message || "No se pudo recibir la configuración del bono activo."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_STATUS_PROFILES_GET") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de perfiles conectados no válida." });
+      return;
+    }
+    getConnectedStatusProfiles()
+      .then(({ profiles, excludedProfileIds, primaryProfile }) =>
+        sendResponse({ ok: true, profiles, excludedProfileIds, primaryProfile }))
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudieron consultar las excepciones de estados."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_PROFILE_NAME_GET") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de nombre de perfil no válida." });
+      return;
+    }
+    getEnrolledProfileIdentity()
+      .then((primaryProfile) => sendResponse({
+        ok: true,
+        profileId: primaryProfile.profileId,
+        profileName: primaryProfile.name
+      }))
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo consultar el nombre de enrolamiento."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_STATUS_EXCEPTIONS_SET") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de excepciones de estados no válida." });
+      return;
+    }
+    setStatusExcludedProfileIds(message.profileIds)
+      .then(({ profileIds, warning }) => sendResponse({
+        ok: true,
+        excludedProfileIds: profileIds,
+        ...(warning ? { warning } : {})
+      }))
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudieron guardar las excepciones de estados."
       }));
     return true;
   }

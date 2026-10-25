@@ -37,6 +37,8 @@ let credentials;
 let primaryLastSeen = 0;
 let remoteCreateActive = false;
 let activeBonusConfig = null;
+let activeBonusConfigPublished = false;
+let excludedBonusProfileIds = [];
 let activeBonusRevision = 0;
 let platformOutageConfig = { ganamos: false, multipanel: false };
 let platformOutageRevision = 1;
@@ -52,6 +54,7 @@ const pendingRequests = new Map();
 const remoteNonces = new Map();
 const statusUpdateJobs = new Map();
 const lastSeenStatusProfiles = new Map();
+const statusProfileNames = new Map();
 const statusProfileRevisions = new Map();
 let statusUpdateRevision = 0;
 let latestStatusUpdate = null;
@@ -234,7 +237,7 @@ function validateActiveBonusConfig(config) {
   return totalWeight > 0;
 }
 
-function validateHiddenAdvertisingProfiles(profileIds) {
+function validateProfileIds(profileIds) {
   return Array.isArray(profileIds) &&
     profileIds.length <= 1000 &&
     profileIds.every((profileId) =>
@@ -251,7 +254,35 @@ function validatePlatformOutageConfig(config) {
     Object.keys(config).every((key) => ["ganamos", "multipanel"].includes(key));
 }
 
-function getActiveBonusConfigUpdate() {
+function getConnectedStatusProfileIds() {
+  const now = Date.now();
+  for (const [profileId, seenAt] of lastSeenStatusProfiles) {
+    if (now - seenAt > 45_000) {
+      lastSeenStatusProfiles.delete(profileId);
+      statusProfileNames.delete(profileId);
+    }
+  }
+  return [...lastSeenStatusProfiles.keys()].map((profileId) => ({
+    profileId,
+    name: statusProfileNames.get(profileId) || `Perfil ${profileId.slice(0, 8)}`
+  }));
+}
+
+function recordStatusProfile(profileId, profileName) {
+  lastSeenStatusProfiles.set(profileId, Date.now());
+  if (typeof profileName === "string" && profileName.trim() &&
+    profileName.length <= 120) {
+    statusProfileNames.set(profileId, profileName.trim());
+  }
+}
+
+function getActiveBonusConfigUpdate(profileId) {
+  if (profileId && excludedBonusProfileIds.includes(profileId)) {
+    return { ok: true, changed: false, revision: activeBonusRevision };
+  }
+  if (!activeBonusConfigPublished) {
+    return { ok: true, changed: false, revision: activeBonusRevision };
+  }
   return { ok: true, changed: true, revision: activeBonusRevision, config: activeBonusConfig };
 }
 
@@ -289,13 +320,18 @@ function waitForPlatformOutageConfig(response, origin, revision) {
   });
 }
 
-function waitForActiveBonusConfig(response, origin, revision) {
+function waitForActiveBonusConfig(response, origin, revision, profileId) {
+  if (profileId && excludedBonusProfileIds.includes(profileId)) {
+    sendJson(response, 200, getActiveBonusConfigUpdate(profileId), origin);
+    return;
+  }
   if (revision !== activeBonusRevision) {
-    sendJson(response, 200, getActiveBonusConfigUpdate(), origin);
+    sendJson(response, 200, getActiveBonusConfigUpdate(profileId), origin);
     return;
   }
   const poll = {
-    finish: () => sendJson(response, 200, getActiveBonusConfigUpdate(), origin),
+    profileId,
+    finish: () => sendJson(response, 200, getActiveBonusConfigUpdate(profileId), origin),
     timer: setTimeout(() => {
       const index = waitingBonusConfigPolls.indexOf(poll);
       if (index !== -1) waitingBonusConfigPolls.splice(index, 1);
@@ -441,6 +477,18 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (url.pathname === "/v1/status-profiles" && request.method === "GET") {
+    if (role !== "primary") {
+      sendJson(response, 403, { ok: false, error: "Solo el perfil principal puede consultar los perfiles conectados." }, origin);
+      return;
+    }
+    sendJson(response, 200, {
+      ok: true,
+      profiles: getConnectedStatusProfileIds()
+    }, origin);
+    return;
+  }
+
   if (url.pathname === "/v1/status-update" && request.method === "GET") {
     if (role !== "client") {
       sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden recibir la imagen." }, origin);
@@ -448,11 +496,14 @@ async function handleRequest(request, response) {
     }
     const revision = Number(url.searchParams.get("revision") || 0);
     const profileId = url.searchParams.get("profileId") || "";
+    const profileName = url.searchParams.get("profileName") || "";
     if (!Number.isSafeInteger(revision) || revision < 0 ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(profileId)) {
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(profileId) ||
+      !profileName.trim() || profileName.length > 120) {
       sendJson(response, 400, { ok: false, error: "Perfil o versión de actualización no válidos." }, origin);
       return;
     }
+    recordStatusProfile(profileId, profileName);
     waitForStatusUpdate(response, origin, revision, profileId);
     return;
   }
@@ -472,6 +523,8 @@ async function handleRequest(request, response) {
     if (typeof body?.id !== "string" || !/^[0-9a-f-]{36}$/i.test(body.id) ||
       typeof body.image !== "string" ||
       !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.image) ||
+      (Object.hasOwn(body || {}, "excludedProfileIds") &&
+        !validateProfileIds(body.excludedProfileIds)) ||
       statusUpdateJobs.has(body.id)) {
       sendJson(response, 400, { ok: false, error: "La solicitud de cambio de estado no es válida." }, origin);
       return;
@@ -490,10 +543,10 @@ async function handleRequest(request, response) {
         if (latestStatusUpdate?.id === jobId) latestStatusUpdate = null;
       }
     }
-    for (const [profileId, seenAt] of lastSeenStatusProfiles) {
-      if (now - seenAt > 45_000) lastSeenStatusProfiles.delete(profileId);
-    }
-    const targets = [...lastSeenStatusProfiles.keys()];
+    const excludedProfileIds = body.excludedProfileIds || [];
+    const targets = getConnectedStatusProfileIds()
+      .map(({ profileId }) => profileId)
+      .filter((profileId) => !excludedProfileIds.includes(profileId));
     const job = {
       id: body.id,
       targets,
@@ -505,6 +558,10 @@ async function handleRequest(request, response) {
     const deliveredProfiles = new Set();
     for (const poll of waitingStatusUpdatePolls.splice(0)) {
       clearTimeout(poll.timer);
+      if (!job.targets.includes(poll.profileId)) {
+        poll.finish({ ok: true, changed: false, revision: statusUpdateRevision });
+        continue;
+      }
       if (deliveredProfiles.has(poll.profileId)) {
         poll.finish({ ok: true, changed: false, revision: statusUpdateRevision });
       } else {
@@ -579,11 +636,18 @@ async function handleRequest(request, response) {
       return;
     }
     const revision = Number(url.searchParams.get("revision") || 0);
-    if (!Number.isSafeInteger(revision) || revision < 0) {
+    const profileId = url.searchParams.get("profileId");
+    if (!Number.isSafeInteger(revision) || revision < 0 ||
+      profileId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(profileId)) {
       sendJson(response, 400, { ok: false, error: "Versión de configuración no válida." }, origin);
       return;
     }
-    waitForActiveBonusConfig(response, origin, revision);
+    const profileName = url.searchParams.get("profileName");
+    if (profileId && profileName && profileName.trim() && profileName.length <= 120) {
+      recordStatusProfile(profileId, profileName);
+    }
+    waitForActiveBonusConfig(response, origin, revision, profileId);
     return;
   }
 
@@ -599,13 +663,20 @@ async function handleRequest(request, response) {
       sendJson(response, 400, { ok: false, error: error.message }, origin);
       return;
     }
-    if (!Object.hasOwn(body || {}, "config") || !validateActiveBonusConfig(body.config)) {
+    if (!Object.hasOwn(body || {}, "config") || !validateActiveBonusConfig(body.config) ||
+      (Object.hasOwn(body || {}, "excludedProfileIds") &&
+        !validateProfileIds(body.excludedProfileIds))) {
       sendJson(response, 400, { ok: false, error: "Configuración de bono activo no válida." }, origin);
       return;
     }
     const serializedConfig = JSON.stringify(body.config);
-    if (serializedConfig !== JSON.stringify(activeBonusConfig)) {
+    const serializedExcludedProfileIds = JSON.stringify(body.excludedProfileIds || []);
+    if (!activeBonusConfigPublished ||
+      serializedConfig !== JSON.stringify(activeBonusConfig) ||
+      serializedExcludedProfileIds !== JSON.stringify(excludedBonusProfileIds)) {
       activeBonusConfig = body.config === null ? null : JSON.parse(serializedConfig);
+      activeBonusConfigPublished = true;
+      excludedBonusProfileIds = JSON.parse(serializedExcludedProfileIds);
       activeBonusRevision += 1;
       for (const poll of waitingBonusConfigPolls.splice(0)) {
         clearTimeout(poll.timer);
@@ -686,7 +757,7 @@ async function handleRequest(request, response) {
       return;
     }
     if (!Object.hasOwn(body || {}, "profileIds") ||
-      !validateHiddenAdvertisingProfiles(body.profileIds)) {
+      !validateProfileIds(body.profileIds)) {
       sendJson(response, 400, { ok: false, error: "La lista de paneles minimizados no es válida." }, origin);
       return;
     }

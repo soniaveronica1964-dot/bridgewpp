@@ -2067,6 +2067,7 @@ function createDataApiServer({ pool, config }) {
     const result = await pool.query(`
       SELECT p.profile_id, p.workspace_id, p.device_id, p.installation_id,
              p.source_extension, p.is_workspace_admin,
+             d.display_name,
              p.revoked_at_ms AS profile_revoked_at_ms,
              d.revoked_at_ms AS device_revoked_at_ms,
              d.device_proof_ciphertext, w.server_id
@@ -2205,6 +2206,7 @@ function createDataApiServer({ pool, config }) {
           profileId: identity.profile_id,
           deviceId: identity.device_id,
           installationId: identity.installation_id,
+          profileName: identity.display_name,
           sourceExtensionId: identity.source_extension,
           enrolled: true,
           schemaVersion: SCHEMA_VERSION,

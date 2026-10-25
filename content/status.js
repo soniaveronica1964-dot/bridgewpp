@@ -102,6 +102,34 @@
     return Boolean(ownStatusHeader && !findVisibleStatusGroup());
   }
 
+  function isWhatsAppDisconnected() {
+    const pageText = (document.body?.innerText || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+    return /escanea para iniciar sesion|scan (?:the )?qr code|scan to log in|use whatsapp on your phone|usa whatsapp en tu telefono/
+      .test(pageText);
+  }
+
+  function getDisconnectedButtonPosition() {
+    const balancePanel = document.getElementById("ganamos-agent-balance");
+    if (balancePanel && isVisible(balancePanel)) {
+      const rect = balancePanel.getBoundingClientRect();
+      const buttonSize = 34;
+      return {
+        left: Math.min(
+          Math.max(8, Math.round(rect.right + 4)),
+          Math.max(8, window.innerWidth - buttonSize - 8)
+        ),
+        top: Math.min(
+          Math.max(8, Math.round(rect.top + (rect.height - buttonSize) / 2)),
+          Math.max(8, window.innerHeight - buttonSize - 8)
+        )
+      };
+    }
+    return { left: 205, top: 8 };
+  }
+
   function getStatusListScrollbarWidth(header) {
     for (let ancestor = header.parentElement;
       ancestor && ancestor !== document.body && ancestor !== document.documentElement;
@@ -124,7 +152,8 @@
       const host = document.getElementById(HOST_ID);
       if (!host) return;
       const isStatusListVisible = isOwnStatusListVisible();
-      const display = isStatusListVisible ? "" : "none";
+      const isDisconnected = isWhatsAppDisconnected();
+      const display = isStatusListVisible || isDisconnected ? "" : "none";
       if (host.style.display !== display) host.style.display = display;
       if (isStatusListVisible) {
         const statusHeader = findOwnStatusHeader();
@@ -145,6 +174,10 @@
         );
         host.style.left = `${left}px`;
         host.style.top = `${top}px`;
+      } else if (isDisconnected) {
+        const position = getDisconnectedButtonPosition();
+        host.style.left = `${position.left}px`;
+        host.style.top = `${position.top}px`;
       } else {
         host.shadowRoot?.querySelector(".status-popup")?.setAttribute("hidden", "");
       }
@@ -962,7 +995,7 @@
       button:disabled { opacity: .58; cursor: wait; }
       .open-button { position: relative; z-index: 1; display: grid; place-items: center; width: 34px; min-width: 34px; height: 34px; min-height: 34px; padding: 0; pointer-events: auto; font-family: Arial, Helvetica, sans-serif; font-style: normal; color: #7dd3fc; border: 0; border-radius: 4px; background: #161717; }
       .open-button:hover:not(:disabled) { color: #bae6fd; border: 0; background: #202222; }
-      .recycle-icon { font-family: "Segoe UI Symbol", "Arial Unicode MS", sans-serif; font-size: 27px; font-weight: 400; line-height: 1; }
+      .recycle-icon { display: block; width: 1em; height: 1em; font-family: "Segoe UI Symbol", "Arial Unicode MS", sans-serif; font-size: 27px; font-weight: 400; line-height: 1; text-align: center; transform: translate(-0.02em, -0.04em); }
       .status-popup { position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center; padding: 16px; background: #070c0ddb; backdrop-filter: blur(1px); pointer-events: auto; }
       .status-popup[hidden] { display: none; }
       .panel { display: grid; gap: 12px; box-sizing: border-box; width: min(500px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; padding: 22px 24px; border: 1px solid #167356; border-radius: 12px; color: #e2e8e7; background: #1d2929; box-shadow: 0 18px 55px #0009; font-size: 14px; line-height: 1.45; }
@@ -977,6 +1010,15 @@
       .detection[data-bonus-type="specific"][data-platform="multipanel"] { color: #70b7ff; }
       .detection[data-bonus-type="special"] { color: #ffd166; }
       .detection[data-bonus-type="mysterious"] { color: #ff79b0; }
+      .exceptions { display: grid; gap: 6px; }
+      .exceptions-label, .profile-message { color: #aab6b5; font-size: 12px; }
+      .profile-list { display: flex; flex-wrap: wrap; gap: 6px; }
+      .profile-toggle { min-width: 0; min-height: 38px; padding: 5px 12px; color: #f2f7f4; border-color: #167356; background: #1b2727; font-size: 15px; font-weight: 600; }
+      .profile-toggle[aria-pressed="true"] { border-color: #168461; background: #167356; box-shadow: inset 0 2px 5px #09271e99; transform: translateY(1px); }
+      .profile-toggle[aria-pressed="true"]:hover:not(:disabled) { background: #1c8966; }
+      .profile-toggle[aria-pressed="false"] { color: #c1ccca; border-color: #465453; background: #273332; box-shadow: 0 2px 3px #0005; }
+      .profile-toggle[aria-pressed="false"]:hover:not(:disabled) { background: #344241; }
+      .profile-message[data-state="error"] { color: #ff8a8a; }
       .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; padding-top: 14px; border-top: 1px solid #344746; }
       .secondary { color: #aab6b5; border-color: #344546; background: transparent; }
       .secondary:hover:not(:disabled) { background: #273535; }
@@ -1011,7 +1053,7 @@
     title.textContent = "Reemplazar último estado";
     const hint = document.createElement("div");
     hint.className = "hint";
-    hint.textContent = "Selecciona un PNG de hasta 10 MB. Se reemplazará el estado propio más reciente o, si no hay ninguno, se publicará como nuevo en los perfiles conectados.";
+    hint.textContent = "Selecciona un PNG de hasta 10 MB. Se publicará en este perfil principal y en los secundarios conectados, salvo los perfiles que marques como excluidos. Las excepciones guardadas omiten envíos futuros de estados y del bono activo; no borran la configuración que el perfil ya recibió.";
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/png,.png";
@@ -1019,6 +1061,16 @@
     detection.className = "detection";
     detection.textContent = "Bono detectado: selecciona una imagen PNG para analizar el nombre.";
     detection.dataset.state = "idle";
+    const exceptions = document.createElement("div");
+    exceptions.className = "exceptions";
+    const exceptionsLabel = document.createElement("div");
+    exceptionsLabel.className = "exceptions-label";
+    exceptionsLabel.textContent = "Perfiles (pulsa para excluirlos del envío):";
+    const profileList = document.createElement("div");
+    profileList.className = "profile-list";
+    const profileMessage = document.createElement("div");
+    profileMessage.className = "profile-message";
+    exceptions.append(exceptionsLabel, profileList, profileMessage);
     const status = document.createElement("div");
     status.className = "result";
     status.setAttribute("role", "status");
@@ -1034,6 +1086,109 @@
     closeButton.textContent = "Cerrar";
     let selectedFile = null;
     let selectionGeneration = 0;
+    let connectedProfiles = [];
+    let primaryProfile = null;
+    let profilesLoaded = false;
+    let excludedProfileIds = [];
+    const renderConnectedProfiles = () => {
+      profileList.replaceChildren();
+      const profiles = [
+        ...(primaryProfile ? [{ ...primaryProfile, role: "Principal" }] : []),
+        ...connectedProfiles.map((profile) => ({ ...profile, role: "Secundario" }))
+      ];
+      const collator = new Intl.Collator("es", {
+        numeric: true,
+        sensitivity: "base"
+      });
+      profiles.sort((left, right) =>
+        collator.compare(left.name, right.name) ||
+        left.profileId.localeCompare(right.profileId));
+      if (!profiles.length) {
+        profileMessage.textContent = "No hay perfiles secundarios conectados en este momento.";
+        return;
+      }
+      profileMessage.textContent = excludedProfileIds.some((profileId) =>
+        !profiles.some((profile) => profile.profileId === profileId))
+        ? "Las excepciones de perfiles desconectados también se conservan."
+        : "";
+      for (const profile of profiles) {
+        const { profileId } = profile;
+        const excluded = excludedProfileIds.includes(profileId);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "profile-toggle";
+        button.setAttribute("aria-pressed", String(!excluded));
+        button.textContent = profile.name;
+        button.setAttribute(
+          "aria-label",
+          `${profile.name}, ${excluded ? "excluido del envío" : "incluido en el envío"}`
+        );
+        button.title = profile.name;
+        button.addEventListener("click", async () => {
+          const nextExcluded = new Set(excludedProfileIds);
+          if (excluded) nextExcluded.delete(profileId);
+          else nextExcluded.add(profileId);
+          profileMessage.dataset.state = "loading";
+          profileMessage.textContent = "Guardando excepción…";
+          for (const toggle of profileList.querySelectorAll("button")) {
+            toggle.disabled = true;
+          }
+          try {
+            const response = await chrome.runtime.sendMessage({
+              type: "BRIDGE_STATUS_EXCEPTIONS_SET",
+              profileIds: [...nextExcluded]
+            });
+            if (!response?.ok || !Array.isArray(response.excludedProfileIds)) {
+              throw new Error(response?.error || "No se pudieron guardar las excepciones.");
+            }
+            excludedProfileIds = response.excludedProfileIds;
+            renderConnectedProfiles();
+            if (response.warning) {
+              profileMessage.dataset.state = "error";
+              profileMessage.textContent = response.warning;
+            } else {
+              profileMessage.dataset.state = "";
+              profileMessage.textContent = "Excepciones guardadas.";
+            }
+          } catch (error) {
+            profileMessage.dataset.state = "error";
+            profileMessage.textContent = error.message || "No se pudieron guardar las excepciones.";
+            for (const toggle of profileList.querySelectorAll("button")) {
+              toggle.disabled = false;
+            }
+          }
+        });
+        profileList.append(button);
+      }
+    };
+    const loadConnectedProfiles = async () => {
+      profileMessage.dataset.state = "loading";
+      profileMessage.textContent = "Consultando perfiles secundarios conectados…";
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: "BRIDGE_STATUS_PROFILES_GET"
+        });
+        if (!response?.ok || !Array.isArray(response.profiles) ||
+          !Array.isArray(response.excludedProfileIds) ||
+          typeof response.primaryProfile?.profileId !== "string" ||
+          typeof response.primaryProfile?.name !== "string") {
+          throw new Error(response?.error || "No se pudieron consultar los perfiles secundarios.");
+        }
+        connectedProfiles = response.profiles;
+        primaryProfile = response.primaryProfile;
+        excludedProfileIds = response.excludedProfileIds;
+        profilesLoaded = true;
+        acceptButton.disabled = !selectedFile;
+        profileMessage.dataset.state = "";
+        renderConnectedProfiles();
+      } catch (error) {
+        profilesLoaded = false;
+        acceptButton.disabled = true;
+        profileList.replaceChildren();
+        profileMessage.dataset.state = "error";
+        profileMessage.textContent = error.message || "No se pudieron consultar los perfiles secundarios.";
+      }
+    };
     const closePopup = () => {
       if (statusUpdateInProgress) return;
       selectionGeneration += 1;
@@ -1057,6 +1212,7 @@
       popup.hidden = false;
       openButton.setAttribute("aria-expanded", "true");
       input.focus();
+      void loadConnectedProfiles();
     });
     panel.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !openButton.disabled) {
@@ -1120,8 +1276,10 @@
       }
       if (currentGeneration !== selectionGeneration) return;
       selectedFile = file;
-      acceptButton.disabled = false;
-      status.textContent = "PNG válido. Ya puedes aceptar.";
+      acceptButton.disabled = !profilesLoaded;
+      status.textContent = profilesLoaded
+        ? "PNG válido. Ya puedes aceptar."
+        : "PNG válido. Esperando la lista de perfiles para confirmar excepciones.";
     });
 
     acceptButton.addEventListener("click", async () => {
@@ -1132,7 +1290,7 @@
       acceptButton.disabled = true;
       closeButton.disabled = true;
       statusUpdateInProgress = true;
-      status.textContent = "Iniciando en paralelo los perfiles conectados…";
+      status.textContent = "Iniciando en paralelo el perfil principal y los perfiles secundarios conectados…";
       const host = document.getElementById(HOST_ID);
       const previousDisplay = host?.style.display || "";
       if (host) host.style.display = "none";
@@ -1147,12 +1305,19 @@
               image
             });
           })(),
-          replaceLatestStatus(file)
+          (async () => {
+            if (!primaryProfile ||
+              excludedProfileIds.includes(primaryProfile.profileId)) {
+              return "Perfil principal: excluido; no se publicó el estado.";
+            }
+            return replaceLatestStatus(file)
+              .then(() => "Perfil principal: publicado.");
+          })()
         ]);
 
         const receipt = publishResult.status === "fulfilled" ? publishResult.value : null;
         const local = localResult.status === "fulfilled"
-          ? "Perfil principal: publicado."
+          ? localResult.value
           : `Perfil principal: error: ${localResult.reason?.message || "no se pudo cambiar el estado."}`;
         if (!receipt?.ok) {
           status.textContent = `${local}\nNo se pudieron iniciar los perfiles secundarios: ${receipt?.error || publishResult.reason?.message || "error de comunicación."}`;
@@ -1204,7 +1369,7 @@
     const actions = document.createElement("div");
     actions.className = "actions";
     actions.append(acceptButton, closeButton);
-    panel.append(title, hint, input, detection, status, actions);
+    panel.append(title, hint, input, detection, exceptions, status, actions);
     popup.append(panel);
     shadow.append(style, openButton, popup);
     document.documentElement.append(host);

@@ -105,12 +105,14 @@
     }
   }
 
-  async function runSecondaryBonusConfigBridge() {
+  async function runSecondaryBonusConfigBridge(profileId, profileName) {
     let revision = 0;
     while (true) {
       try {
         const update = await sendRuntimeMessage({
           type: "BRIDGE_BONUS_CONFIG_POLL",
+          profileId,
+          profileName,
           revision
         });
         if (!update?.ok) {
@@ -206,14 +208,14 @@
     return profileId;
   }
 
-  async function runSecondaryStatusUpdateBridge() {
-    const profileId = await getStatusBridgeProfileId();
+  async function runSecondaryStatusUpdateBridge(profileId, profileName) {
     let revision = 0;
     while (true) {
       try {
         const update = await sendRuntimeMessage({
           type: "BRIDGE_STATUS_UPDATE_POLL",
           profileId,
+          profileName,
           revision
         });
         if (!update?.ok || !Number.isSafeInteger(update.revision) || update.revision < 0) {
@@ -255,10 +257,33 @@
         void runPrimaryAdvertisingProfilesBridge();
         void runPrimaryPlatformOutagesBridge();
       } else if (bridgeRole === "secondary" && typeof bridgeToken === "string" && bridgeToken) {
-        void runSecondaryBonusConfigBridge();
         void runSecondaryAdvertisingProfilesBridge();
         void runSecondaryPlatformOutagesBridge();
-        void runSecondaryStatusUpdateBridge();
+        getStatusBridgeProfileId()
+          .then(async (profileId) => {
+            let profileName = `Perfil ${profileId.slice(0, 8)}`;
+            try {
+              const identity = await sendRuntimeMessage({
+                type: "BRIDGE_PROFILE_NAME_GET"
+              });
+              if (!identity?.ok || typeof identity.profileName !== "string" ||
+                !identity.profileName.trim()) {
+                throw new Error(identity?.error || "La API no devolvió el nombre del perfil.");
+              }
+              profileName = identity.profileName.trim().slice(0, 120);
+            } catch (error) {
+              console.error(
+                "[Ganamos balance extension] No se pudo consultar el nombre de enrolamiento del perfil secundario.",
+                error
+              );
+            }
+            void runSecondaryBonusConfigBridge(profileId, profileName);
+            void runSecondaryStatusUpdateBridge(profileId, profileName);
+          })
+          .catch((error) => console.error(
+            "[Ganamos balance extension] No se pudo inicializar la identidad del perfil secundario.",
+            error
+          ));
       }
     })
     .catch((error) => console.error("[Ganamos balance extension] No se pudo leer el modo del puente.", error));
