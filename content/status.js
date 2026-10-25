@@ -1,6 +1,6 @@
 (() => {
   const HOST_ID = "ganamos-status-replacer";
-  const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+  const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
   const STATUS_COUNT_PATTERN = /^Estado\s+(\d+)\s+de\s+(\d+)$/i;
   const EXTENSION_OVERLAY_IDS = [
     HOST_ID,
@@ -742,13 +742,13 @@
   }
 
   async function makePngFile(image) {
-    if (typeof image !== "string" || image.length > 7_100_000 ||
+    if (typeof image !== "string" || image.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 ||
       !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(image)) {
       throw new Error("La imagen recibida no es válida.");
     }
     const binary = atob(image);
     if (!binary.length || binary.length > MAX_IMAGE_BYTES) {
-      throw new Error("La imagen debe pesar como máximo 5 MB.");
+      throw new Error("La imagen debe pesar como máximo 10 MB.");
     }
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
     const signature = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -1011,7 +1011,7 @@
     title.textContent = "Reemplazar último estado";
     const hint = document.createElement("div");
     hint.className = "hint";
-    hint.textContent = "Selecciona un PNG de hasta 5 MB. Se reemplazará el estado propio más reciente o, si no hay ninguno, se publicará como nuevo en los perfiles conectados.";
+    hint.textContent = "Selecciona un PNG de hasta 10 MB. Se reemplazará el estado propio más reciente o, si no hay ninguno, se publicará como nuevo en los perfiles conectados.";
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/png,.png";
@@ -1101,7 +1101,7 @@
         return;
       }
       if (file.size > MAX_IMAGE_BYTES) {
-        status.textContent = `El archivo pesa ${(file.size / (1024 * 1024)).toFixed(2)} MB; el máximo permitido es 5 MB.`;
+        status.textContent = `El archivo pesa ${(file.size / (1024 * 1024)).toFixed(2)} MB; el máximo permitido es 10 MB.`;
         return;
       }
       status.textContent = "Verificando el archivo PNG…";

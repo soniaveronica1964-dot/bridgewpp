@@ -12,7 +12,7 @@ const REMOTE_CREATE_PORT = 32146;
 const REQUEST_TIMEOUT_MS = 90_000;
 const POLL_TIMEOUT_MS = 20_000;
 const REMOTE_REQUEST_MAX_AGE_MS = 5 * 60_000;
-const STATUS_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const STATUS_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const STATUS_REQUEST_MAX_BYTES = Math.ceil(STATUS_IMAGE_MAX_BYTES / 3) * 4 + 64 * 1024;
 const STATUS_JOB_TIMEOUT_MS = 10 * 60_000;
 const ALLOWED_REQUEST_TYPES = new Set([
@@ -480,7 +480,7 @@ async function handleRequest(request, response) {
     if (!image.length || image.length > STATUS_IMAGE_MAX_BYTES ||
       image.toString("base64") !== body.image ||
       image.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") {
-      sendJson(response, 400, { ok: false, error: "La imagen debe ser un archivo PNG válido de hasta 5 MB." }, origin);
+      sendJson(response, 400, { ok: false, error: "La imagen debe ser un archivo PNG válido de hasta 10 MB." }, origin);
       return;
     }
     const now = Date.now();

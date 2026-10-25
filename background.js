@@ -1637,7 +1637,8 @@ async function publishStatusUpdate(message) {
     throw new Error("Este perfil no está configurado como principal.");
   }
   if (typeof message.id !== "string" || !/^[0-9a-f-]{36}$/i.test(message.id) ||
-    typeof message.image !== "string" || message.image.length > 7_100_000) {
+    typeof message.image !== "string" ||
+    message.image.length > Math.ceil((10 * 1024 * 1024) / 3) * 4) {
     throw new Error("La solicitud de cambio de estado no es válida.");
   }
   return bridgeFetch("/v1/status-update", token, {
