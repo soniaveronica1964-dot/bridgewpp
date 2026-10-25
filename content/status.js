@@ -511,20 +511,32 @@
 
   async function pauseCurrentStatus(group) {
     const pauseButton = findStatusPlaybackButton(group, ["Pausar", "Pause"]);
-    if (!pauseButton) return;
+    if (!pauseButton) return false;
 
-    await clickWhatsAppControl(() => {
-      const currentGroup = findVisibleStatusGroup();
-      return currentGroup
-        ? findStatusPlaybackButton(currentGroup, ["Pausar", "Pause"])
-        : null;
-    });
-    await waitFor(() => {
-      const currentGroup = findVisibleStatusGroup();
-      return currentGroup
-        ? findStatusPlaybackButton(currentGroup, ["Reproducir", "Play"])
-        : null;
-    }, "la pausa del estado", 5_000);
+    try {
+      await clickWhatsAppControl(() => {
+        const currentGroup = findVisibleStatusGroup();
+        return currentGroup
+          ? findStatusPlaybackButton(currentGroup, ["Pausar", "Pause"])
+          : null;
+      });
+      await waitFor(() => {
+        const currentGroup = findVisibleStatusGroup();
+        return currentGroup
+          ? findStatusPlaybackButton(
+            currentGroup,
+            ["Reproducir", "Play", "Reanudar", "Resume"]
+          )
+          : null;
+      }, "la pausa del estado", 2_000);
+      return true;
+    } catch (error) {
+      console.warn(
+        "[Ganamos balance extension] No se pudo confirmar la pausa del estado; se continuará con la eliminación.",
+        error
+      );
+      return false;
+    }
   }
 
   function parseStatusCount(group) {
@@ -658,11 +670,12 @@
     group = await openOwnStatusViewer();
     const updatedGroup = await waitFor(() => {
       const currentGroup = findVisibleStatusGroup();
-      return parseStatusCount(currentGroup) ? currentGroup : null;
-    }, "la cantidad de estados después de eliminar el más reciente", 30_000);
+      const currentCount = parseStatusCount(currentGroup);
+      return currentCount && currentCount.total < previousTotal ? currentGroup : null;
+    }, "la reducción de la cantidad de estados después de eliminar el más reciente", 30_000);
     const updatedCount = parseStatusCount(updatedGroup);
     if (!updatedCount || updatedCount.total >= previousTotal) {
-      throw new Error("WhatsApp cerró el visor, pero el estado más reciente todavía aparece.");
+      throw new Error("WhatsApp cerró el visor, pero no se confirmó la eliminación del estado más reciente.");
     }
   }
 
