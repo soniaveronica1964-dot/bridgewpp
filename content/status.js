@@ -465,7 +465,8 @@
     return match ? { current: Number(match[1]), total: Number(match[2]) } : null;
   }
 
-  async function runStatusStage(name, operation) {
+  async function runStatusStage(name, operation, onStage) {
+    onStage?.(name);
     try {
       return await operation();
     } catch (error) {
@@ -732,7 +733,7 @@
     );
   }
 
-  async function replaceLatestStatus(file) {
+  async function replaceLatestStatus(file, onStage) {
     const started = await chrome.runtime.sendMessage({ type: "STATUS_UPDATE_DEBUGGER_START" });
     if (!started?.ok) {
       throw new Error(started?.error || "No se pudo iniciar el control de WhatsApp mediante Chrome.");
@@ -741,17 +742,19 @@
     let stopError;
     const restoreOverlays = hideExtensionOverlays();
     try {
-      await runStatusStage("Abriendo Estados", ensureStatusPage);
-      const statusPresence = await runStatusStage("Verificando el estado propio", () =>
-        waitFor(() => {
+      await runStatusStage("Abriendo Estados", ensureStatusPage, onStage);
+      const statusPresence = await runStatusStage(
+        "Verificando el estado propio",
+        () => waitFor(() => {
           const presence = getOwnStatusPresence();
           return presence === "unknown" ? null : presence;
-        }, "la miniatura de Mi estado o el aviso de que todavía no hay actualizaciones", 30_000)
+        }, "la miniatura de Mi estado o el aviso de que todavía no hay actualizaciones", 30_000),
+        onStage
       );
       if (statusPresence === "present") {
-        await runStatusStage("Eliminando el estado más reciente", deleteLatestOwnStatus);
+        await runStatusStage("Eliminando el estado más reciente", deleteLatestOwnStatus, onStage);
       }
-      await runStatusStage("Publicando y verificando el PNG", () => publishStatusImage(file));
+      await runStatusStage("Publicando y verificando el PNG", () => publishStatusImage(file), onStage);
     } catch (error) {
       operationError = error;
     } finally {
@@ -998,6 +1001,8 @@
       .recycle-icon { display: block; width: 1em; height: 1em; font-family: "Segoe UI Symbol", "Arial Unicode MS", sans-serif; font-size: 27px; font-weight: 400; line-height: 1; text-align: center; transform: translate(-0.02em, -0.04em); }
       .status-popup { position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center; padding: 16px; background: #070c0ddb; backdrop-filter: blur(1px); pointer-events: auto; }
       .status-popup[hidden] { display: none; }
+      .run-progress { position: fixed; top: 12px; left: 50%; z-index: 2147483647; display: none; box-sizing: border-box; width: min(560px, calc(100vw - 24px)); padding: 10px 14px; transform: translateX(-50%); border: 1px solid #167356; border-radius: 8px; color: #e7edef; background: #1d2929f2; box-shadow: 0 5px 18px #0008; font-size: 13px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .run-progress[data-visible="true"] { display: block; }
       .panel { display: grid; gap: 12px; box-sizing: border-box; width: min(500px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; padding: 22px 24px; border: 1px solid #167356; border-radius: 12px; color: #e2e8e7; background: #1d2929; box-shadow: 0 18px 55px #0009; font-size: 14px; line-height: 1.45; }
       .title { margin: 0 0 5px; color: #e7edef; font-size: 20px; font-weight: 600; letter-spacing: 0; }
       .hint { margin: 0 0 3px; color: #aab6b5; font-size: 13px; }
@@ -1041,6 +1046,10 @@
     const popup = document.createElement("div");
     popup.className = "status-popup";
     popup.hidden = true;
+    const runProgress = document.createElement("div");
+    runProgress.className = "run-progress";
+    runProgress.setAttribute("role", "status");
+    runProgress.setAttribute("aria-live", "polite");
     const panel = document.createElement("section");
     panel.className = "panel";
     panel.setAttribute("role", "dialog");
@@ -1290,59 +1299,76 @@
       acceptButton.disabled = true;
       closeButton.disabled = true;
       statusUpdateInProgress = true;
-      status.textContent = "Iniciando en paralelo el perfil principal y los perfiles secundarios conectados…";
-      const host = document.getElementById(HOST_ID);
-      const previousDisplay = host?.style.display || "";
-      if (host) host.style.display = "none";
+      popup.hidden = true;
+      const updateProgress = (text) => {
+        runProgress.textContent = text;
+        runProgress.dataset.visible = "true";
+      };
+      let localProgress = "Preparando perfiles conectados…";
+      updateProgress(localProgress);
       try {
         const id = crypto.randomUUID();
-        const [publishResult, localResult] = await Promise.allSettled([
-          (async () => {
-            const image = await fileToBase64(file);
-            return chrome.runtime.sendMessage({
-              type: "BRIDGE_STATUS_UPDATE_PUBLISH",
-              id,
-              image
-            });
-          })(),
-          (async () => {
-            if (!primaryProfile ||
-              excludedProfileIds.includes(primaryProfile.profileId)) {
-              return "Perfil principal: excluido; no se publicó el estado.";
-            }
-            return replaceLatestStatus(file)
-              .then(() => "Perfil principal: publicado.");
-          })()
-        ]);
-
+        const publishPromise = (async () => {
+          const image = await fileToBase64(file);
+          return chrome.runtime.sendMessage({
+            type: "BRIDGE_STATUS_UPDATE_PUBLISH",
+            id,
+            image
+          });
+        })();
+        const localPromise = (async () => {
+          if (!primaryProfile || excludedProfileIds.includes(primaryProfile.profileId)) {
+            return "Perfil principal: excluido; no se publicó el estado.";
+          }
+          return replaceLatestStatus(file, (stage) => {
+            localProgress = `Perfil principal: ${stage}.`;
+            updateProgress(localProgress);
+          }).then(() => "Perfil principal: publicado.");
+        })();
+        const [publishResult] = await Promise.allSettled([publishPromise]);
         const receipt = publishResult.status === "fulfilled" ? publishResult.value : null;
-        const local = localResult.status === "fulfilled"
-          ? localResult.value
-          : `Perfil principal: error: ${localResult.reason?.message || "no se pudo cambiar el estado."}`;
+        let secondaryPromise = null;
         if (!receipt?.ok) {
-          status.textContent = `${local}\nNo se pudieron iniciar los perfiles secundarios: ${receipt?.error || publishResult.reason?.message || "error de comunicación."}`;
+          localProgress += `\nNo se pudieron iniciar los perfiles secundarios: ${receipt?.error || publishResult.reason?.message || "error de comunicación."}`;
+          updateProgress(localProgress);
         } else {
           const targets = Array.isArray(receipt.targets) ? receipt.targets : [];
-          status.textContent = `${local}\nPerfiles secundarios conectados: ${targets.length}.`;
-          try {
-            const summary = await collectSecondaryResults(id, targets, (results, pendingCount) => {
+          localProgress += `\nSecundarios conectados: ${targets.length}.`;
+          updateProgress(localProgress);
+          secondaryPromise = collectSecondaryResults(id, targets, (results, pendingCount) => {
               const succeeded = results.filter((result) => result.ok).length;
               const failed = results.filter((result) => !result.ok);
-              status.textContent = `${local}\nSecundarios: ${succeeded} publicados, ${failed.length} con error, ${pendingCount} pendientes.`;
-            });
-            const succeeded = summary.results.filter((result) => result.ok).length;
-            const failures = summary.results
-              .filter((result) => !result.ok)
-              .map((result) => `Perfil ${result.profileId.slice(0, 8)}: ${result.error || "falló"}`);
-            if (summary.pending.length) {
-              failures.push(...summary.pending.map((profileId) =>
-                `Perfil ${profileId.slice(0, 8)}: no respondió a tiempo`));
-            }
-            status.textContent = `${local}\nSecundarios: ${succeeded} publicados, ${failures.length} con error.${failures.length ? `\n${failures.join("\n")}` : ""}`;
-          } catch (error) {
-            status.textContent = `${local}\nNo se pudieron obtener todos los resultados secundarios: ${error.message}`;
-          }
+              updateProgress(`${localProgress}\nSecundarios: ${succeeded} publicados, ${failed.length} con error, ${pendingCount} pendientes.`);
+            }).then(
+              (summary) => ({ summary }),
+              (error) => ({ error })
+            );
         }
+        const [localResult, secondaryResult] = await Promise.all([
+          Promise.allSettled([localPromise]),
+          secondaryPromise || Promise.resolve(null)
+        ]);
+        const local = localResult[0].status === "fulfilled"
+          ? localResult[0].value
+          : `Perfil principal: error: ${localResult[0].reason?.message || "no se pudo cambiar el estado."}`;
+        let secondary = "";
+        if (secondaryResult?.error) {
+          secondary = `\nNo se pudieron obtener los resultados secundarios: ${secondaryResult.error.message || "error de comunicación."}`;
+        } else if (secondaryResult?.summary) {
+          const { summary } = secondaryResult;
+          const succeeded = summary.results.filter((result) => result.ok).length;
+          const failures = summary.results
+            .filter((result) => !result.ok)
+            .map((result) => `Perfil ${result.profileId.slice(0, 8)}: ${result.error || "falló"}`);
+          if (summary.pending.length) {
+            failures.push(...summary.pending.map((profileId) =>
+              `Perfil ${profileId.slice(0, 8)}: no respondió a tiempo`));
+          }
+          secondary = `\nSecundarios: ${succeeded} publicados, ${failures.length} con error.${failures.length ? `\n${failures.join("\n")}` : ""}`;
+        } else if (!receipt?.ok) {
+          secondary = `\nNo se pudieron iniciar los perfiles secundarios: ${receipt?.error || publishResult.reason?.message || "error de comunicación."}`;
+        }
+        status.textContent = `${local}${secondary}`;
       } catch (error) {
         status.textContent = `No se pudo iniciar el cambio de estado: ${error.message || "error desconocido."}`;
       } finally {
@@ -1356,7 +1382,8 @@
           );
           status.textContent += `\nNo se pudo actualizar el bono activo: ${error.message || "error desconocido."}`;
         }
-        if (host) host.style.display = previousDisplay;
+        runProgress.dataset.visible = "false";
+        popup.hidden = false;
         openButton.disabled = false;
         input.disabled = false;
         closeButton.disabled = false;
@@ -1371,7 +1398,7 @@
     actions.append(acceptButton, closeButton);
     panel.append(title, hint, input, detection, exceptions, status, actions);
     popup.append(panel);
-    shadow.append(style, openButton, popup);
+    shadow.append(style, openButton, popup, runProgress);
     document.documentElement.append(host);
     scheduleStatusPageVisibilityUpdate();
     const observer = new MutationObserver(scheduleStatusPageVisibilityUpdate);
