@@ -486,11 +486,45 @@
       [...document.querySelectorAll('button[data-testid="status-header"]')]
         .find((element) => isVisible(element) && /mi estado/i.test(getLabel(element))) || null
     );
-    return waitFor(
+    const group = await waitFor(
       findVisibleStatusGroup,
       "el visor de Mi estado",
       60_000
     );
+    await pauseCurrentStatus(group);
+    return group;
+  }
+
+  function findStatusPlaybackButton(group, labels) {
+    const isPlaybackButton = (button) =>
+      isVisible(button) &&
+        button.getAttribute("aria-disabled") !== "true" &&
+        hasExactNormalizedLabel(button, labels);
+    const scopedButton = [...group.querySelectorAll("button,[role=\"button\"]")]
+      .find(isPlaybackButton);
+    if (scopedButton) return scopedButton;
+
+    const visibleButtons = [...document.querySelectorAll("button,[role=\"button\"]")]
+      .filter(isPlaybackButton);
+    return visibleButtons.length === 1 ? visibleButtons[0] : null;
+  }
+
+  async function pauseCurrentStatus(group) {
+    const pauseButton = findStatusPlaybackButton(group, ["Pausar", "Pause"]);
+    if (!pauseButton) return;
+
+    await clickWhatsAppControl(() => {
+      const currentGroup = findVisibleStatusGroup();
+      return currentGroup
+        ? findStatusPlaybackButton(currentGroup, ["Pausar", "Pause"])
+        : null;
+    });
+    await waitFor(() => {
+      const currentGroup = findVisibleStatusGroup();
+      return currentGroup
+        ? findStatusPlaybackButton(currentGroup, ["Reproducir", "Play"])
+        : null;
+    }, "la pausa del estado", 5_000);
   }
 
   function parseStatusCount(group) {
@@ -556,6 +590,7 @@
         count.current > count.total) {
         throw new Error("WhatsApp devolvió una secuencia de estados inesperada.");
       }
+      await pauseCurrentStatus(group);
     }
     if (count.current !== count.total) {
       throw new Error("No se pudo ubicar el último estado subido.");
