@@ -213,17 +213,23 @@
 
   function findViewerStatusMenu(group) {
     const candidates = [...document.querySelectorAll(
-      'button[aria-label="Menú"][aria-haspopup="menu"]'
+      'button[aria-haspopup="menu"],[role="button"][aria-haspopup="menu"]'
     )].filter((element) => {
       if (!isVisible(element) || element.getAttribute("aria-disabled") === "true") return false;
-      if (element.querySelector('svg title, [aria-hidden="true"] svg title')?.textContent?.trim() !== "ic-more-vert") {
-        return false;
-      }
       const rect = element.getBoundingClientRect();
       const centerX = rect.left + rect.width / 2;
       const centerY = rect.top + rect.height / 2;
-      return centerX >= 0 && centerX <= window.innerWidth &&
-        centerY >= 0 && centerY <= Math.min(window.innerHeight * 0.45, 300);
+      if (centerX < window.innerWidth / 2 || centerX > window.innerWidth ||
+        centerY < 0 || centerY > Math.min(window.innerHeight * 0.45, 300)) return false;
+      if (element.getAttribute("aria-expanded") === "true") return true;
+      const hasMenuLabel = hasNormalizedLabel(
+        element,
+        /^(?:menu(?:\s+(?:(?:de|del)\s+)?(?:estado|opciones))?|mas opciones|more options|opciones)$/i
+      );
+      const iconTitle = element.querySelector(
+        "svg title, [aria-hidden=\"true\"] svg title"
+      )?.textContent?.trim();
+      return hasMenuLabel || /^(?:ic-more-vert|more_vert|more_horiz)$/i.test(iconTitle || "");
     });
     if (!candidates.length) return null;
     const getAncestorDistance = (candidate) => {
@@ -262,34 +268,34 @@
         Math.abs(centerY - menuCenterY) <= 320;
     };
     const candidates = new Set();
-    const addCandidate = (element) => {
+    const addCandidate = (element, requireProximity) => {
       if (!isVisible(element) ||
         !hasExactNormalizedLabel(element, ["Eliminar", "Eliminar estado", "Delete", "Delete status"]) ||
-        !isNearMenu(element)) return;
+        requireProximity && !isNearMenu(element)) return;
       const interactiveAncestor = element.closest(
         'button,[role="menuitem"],[role="option"],[role="button"],[tabindex]'
       );
       candidates.add(interactiveAncestor && isVisible(interactiveAncestor) &&
         hasExactNormalizedLabel(interactiveAncestor,
           ["Eliminar", "Eliminar estado", "Delete", "Delete status"]) &&
-        isNearMenu(interactiveAncestor) ? interactiveAncestor : element);
+        (!requireProximity || isNearMenu(interactiveAncestor)) ? interactiveAncestor : element);
     };
 
     for (const root of menuRoots) {
       if (hasExactNormalizedLabel(root, ["Eliminar", "Eliminar estado", "Delete", "Delete status"])) {
-        addCandidate(root);
+        addCandidate(root, false);
       }
       for (const element of root.querySelectorAll(
         'button,[role="menuitem"],[role="option"],[role="button"],[tabindex],span'
       )) {
-        addCandidate(element);
+        addCandidate(element, false);
       }
     }
     if (!candidates.size) {
       for (const element of document.querySelectorAll(
         'button,[role="menuitem"],[role="option"],[role="button"],[tabindex],span'
       )) {
-        addCandidate(element);
+        addCandidate(element, true);
       }
     }
     return candidates.size === 1 ? [...candidates][0] : null;
@@ -563,19 +569,20 @@
     const menu = findCurrentMenu();
     if (!menu) throw new Error("No se encontró el botón de tres puntos del estado abierto.");
     await clickWhatsAppControl(findCurrentMenu);
-    await waitFor(
-      () => {
-        const currentMenu = findCurrentMenu();
-        if (!currentMenu) return null;
-        if (currentMenu.getAttribute("aria-expanded") === "true") return currentMenu;
-        return findDeleteMenuItem(currentMenu) ? currentMenu : null;
-      },
+    const openMenuButton = await waitFor(() => {
+      const currentMenu = findCurrentMenu() ||
+        (menu.isConnected && isVisible(menu) ? menu : null);
+      if (currentMenu?.getAttribute("aria-expanded") === "true" ||
+        currentMenu && findDeleteMenuItem(currentMenu)) return currentMenu;
+      return null;
+    },
       "el menú del estado",
       30_000
     );
     const deleteItem = await waitFor(
       () => {
-        const currentMenu = findCurrentMenu();
+        const currentMenu = findCurrentMenu() ||
+          (openMenuButton.isConnected && isVisible(openMenuButton) ? openMenuButton : null);
         return currentMenu ? findDeleteMenuItem(currentMenu) : null;
       },
       "la opción Eliminar después de activar los tres puntos del estado"
@@ -601,23 +608,26 @@
       const currentGroup = findVisibleStatusGroup();
       const updatedCount = parseStatusCount(currentGroup);
       if (updatedCount && updatedCount.total < previousTotal) return "remaining-statuses";
-
-      if (!currentGroup && !findOwnStatusThumbnail() &&
-        (findVisibleStatusHeader() || findVisibleEmptyStatusPrompt())) {
-        return "no-statuses";
-      }
+      if (!currentGroup) return "viewer-closed";
       return null;
     }, "la verificación de que WhatsApp eliminó el estado", 60_000);
 
     if (deletionState === "remaining-statuses") return;
-    await waitFor(
-      () => findVisibleStatusHeader() || findVisibleEmptyStatusPrompt(),
-      "la lista de estados después de eliminar el único estado",
-      30_000
-    );
-    await sleep(1000);
-    if (findOwnStatusThumbnail()) {
-      throw new Error("WhatsApp cerró la confirmación, pero el estado sigue apareciendo en la lista.");
+    await ensureStatusPage();
+    const statusPresence = await waitFor(() => {
+      const presence = getOwnStatusPresence();
+      return presence === "unknown" ? null : presence;
+    }, "la lista actualizada de Mi estado", 30_000);
+    if (statusPresence === "empty") return;
+
+    group = await openOwnStatusViewer();
+    const updatedGroup = await waitFor(() => {
+      const currentGroup = findVisibleStatusGroup();
+      return parseStatusCount(currentGroup) ? currentGroup : null;
+    }, "la cantidad de estados después de eliminar el más reciente", 30_000);
+    const updatedCount = parseStatusCount(updatedGroup);
+    if (!updatedCount || updatedCount.total >= previousTotal) {
+      throw new Error("WhatsApp cerró el visor, pero el estado más reciente todavía aparece.");
     }
   }
 
