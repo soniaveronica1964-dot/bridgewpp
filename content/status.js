@@ -1096,13 +1096,15 @@
         }
       }
 
-      if ((file.type && file.type !== "image/png") ||
-        !/\.png$/i.test(file.name) || file.size > MAX_IMAGE_BYTES) {
-        if (currentGeneration === selectionGeneration) {
-          status.textContent = "Selecciona un archivo PNG válido de hasta 5 MB.";
-        }
+      if (!/\.png$/i.test(file.name)) {
+        status.textContent = "El archivo debe tener extensión .png.";
         return;
       }
+      if (file.size > MAX_IMAGE_BYTES) {
+        status.textContent = `El archivo pesa ${(file.size / (1024 * 1024)).toFixed(2)} MB; el máximo permitido es 5 MB.`;
+        return;
+      }
+      status.textContent = "Verificando el archivo PNG…";
       try {
         const bytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
         const signature = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -1119,6 +1121,7 @@
       if (currentGeneration !== selectionGeneration) return;
       selectedFile = file;
       acceptButton.disabled = false;
+      status.textContent = "PNG válido. Ya puedes aceptar.";
     });
 
     acceptButton.addEventListener("click", async () => {
