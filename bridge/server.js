@@ -247,6 +247,21 @@ function validateProfileIds(profileIds) {
     new Set(profileIds).size === profileIds.length;
 }
 
+function isValidBase64(value) {
+  if (typeof value !== "string" || !value.length || value.length % 4 !== 0) return false;
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const contentLength = value.length - padding;
+  if (padding === 2 && contentLength % 4 !== 2 ||
+    padding === 1 && contentLength % 4 !== 3) return false;
+
+  for (let index = 0; index < contentLength; index += 1) {
+    const code = value.charCodeAt(index);
+    if (!(code >= 65 && code <= 90) && !(code >= 97 && code <= 122) &&
+      !(code >= 48 && code <= 57) && code !== 43 && code !== 47) return false;
+  }
+  return true;
+}
+
 function validatePlatformOutageConfig(config) {
   return config !== null && typeof config === "object" && !Array.isArray(config) &&
     typeof config.ganamos === "boolean" &&
@@ -522,7 +537,7 @@ async function handleRequest(request, response) {
     }
     if (typeof body?.id !== "string" || !/^[0-9a-f-]{36}$/i.test(body.id) ||
       typeof body.image !== "string" ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.image) ||
+      !isValidBase64(body.image) ||
       (Object.hasOwn(body || {}, "excludedProfileIds") &&
         !validateProfileIds(body.excludedProfileIds)) ||
       statusUpdateJobs.has(body.id)) {

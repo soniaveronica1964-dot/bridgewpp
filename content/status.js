@@ -35,6 +35,21 @@
       ?.replace(/\s+/g, " ").trim() || "";
   }
 
+  function isValidBase64(value) {
+    if (typeof value !== "string" || !value.length || value.length % 4 !== 0) return false;
+    const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+    const contentLength = value.length - padding;
+    if (padding === 2 && contentLength % 4 !== 2 ||
+      padding === 1 && contentLength % 4 !== 3) return false;
+
+    for (let index = 0; index < contentLength; index += 1) {
+      const code = value.charCodeAt(index);
+      if (!(code >= 65 && code <= 90) && !(code >= 97 && code <= 122) &&
+        !(code >= 48 && code <= 57) && code !== 43 && code !== 47) return false;
+    }
+    return true;
+  }
+
   function hasNormalizedLabel(element, pattern) {
     const normalizedPattern = new RegExp(
       pattern.source.normalize("NFD").replace(/[\u0300-\u036f]/g, ""),
@@ -789,7 +804,7 @@
 
   async function makePngFile(image) {
     if (typeof image !== "string" || image.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(image)) {
+      !isValidBase64(image)) {
       throw new Error("La imagen recibida no es válida.");
     }
     const binary = atob(image);
