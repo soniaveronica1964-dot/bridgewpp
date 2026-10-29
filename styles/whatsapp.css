@@ -721,7 +721,8 @@
 
 .active-bonus-indicator--copy,
 .active-bonus-indicator--invert,
-.active-bonus-indicator--unread {
+.active-bonus-indicator--unread,
+.active-bonus-indicator--mouse {
   width: 19px;
   height: 19px;
 }
@@ -749,7 +750,11 @@
 }
 
 .active-bonus-setting-indicators > .active-bonus-indicator--unread {
-  grid-column: 1 / -1;
+  grid-column: auto;
+}
+
+:host([data-mouse-side-buttons-enabled="true"]) .active-bonus-indicator--mouse {
+  color: #b879ff;
 }
 
 :host([data-active-advertising="true"]) .active-bonus-indicator--advertising {
@@ -1363,6 +1368,10 @@
 
 .active-bonus-dialog .active-bonus-setting-toggle--unread {
   border: 2px solid #ff4545;
+}
+
+.active-bonus-dialog .active-bonus-setting-toggle--mouse {
+  border: 2px solid #a34ce8;
 }
 
 .active-bonus-setting-toggle > span:last-child {
@@ -4346,4 +4355,301 @@ input::placeholder {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 2.5;
+}
+
+:host(#ganamos-top-user-balances) {
+  z-index: 2147483646;
+  color: #e2eee6;
+}
+
+.top-user-balances-panel {
+  display: grid;
+  gap: 7px;
+  padding: 7px;
+  border: 1px solid #4b9b61;
+  border-radius: 8px;
+  background: #15291b;
+  box-shadow: 0 3px 12px rgb(0 0 0 / 35%);
+}
+
+.top-user-balances-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 3px 0 5px;
+}
+
+.top-user-balances-title {
+  color: #d4e6d9;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.top-user-balances-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.top-user-balances-refresh {
+  display: grid;
+  flex: 0 0 30px;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #59ad70;
+  border-radius: 6px;
+  color: #edfff1;
+  background: #287044;
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.top-user-balances-withdrawal-filter {
+  display: grid;
+  flex: 0 0 30px;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #59ad70;
+  border-radius: 6px;
+  color: #edfff1;
+  background: #287044;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.top-user-balances-withdrawal-filter svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.top-user-balances-withdrawal-filter circle {
+  fill: currentColor;
+  stroke: none;
+}
+
+.top-user-balances-withdrawal-filter:hover {
+  background: #348b50;
+}
+
+.top-user-balances-withdrawal-filter:focus-visible {
+  outline: 2px solid #9de0b0;
+  outline-offset: 2px;
+}
+
+.top-user-balances-withdrawal-filter.is-active {
+  border-color: #ff777d;
+  background: #78343a;
+}
+
+.top-user-balances-withdrawal-filter.is-active:hover {
+  background: #914149;
+}
+
+.top-user-balances-refresh:hover:not(:disabled) {
+  background: #348b50;
+}
+
+.top-user-balances-refresh:focus-visible {
+  outline: 2px solid #9de0b0;
+  outline-offset: 2px;
+}
+
+.top-user-balances-refresh:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.top-user-balances-refresh.is-refreshing {
+  animation: top-user-balances-refresh-spin 1s linear infinite;
+}
+
+@keyframes top-user-balances-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.top-user-balances-toggle {
+  display: grid;
+  flex: 0 0 30px;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #59ad70;
+  border-radius: 6px;
+  color: #edfff1;
+  background: #287044;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.top-user-balances-toggle:hover {
+  background: #348b50;
+}
+
+.top-user-balances-toggle:focus-visible {
+  outline: 2px solid #9de0b0;
+  outline-offset: 2px;
+}
+
+.top-user-balances-panel.is-minimized {
+  padding: 5px;
+}
+
+.top-user-balances-panel.is-minimized .top-user-balances-header {
+  justify-content: flex-end;
+  padding: 0;
+}
+
+.top-user-balances-panel.is-minimized .top-user-balances-title {
+  display: none;
+}
+
+.top-user-balances-panel.is-minimized .top-user-balances-refresh {
+  display: none;
+}
+
+.top-user-balances-panel.is-minimized .top-user-balances-withdrawal-filter {
+  display: none;
+}
+
+.top-user-balances-panel.is-minimized .top-user-balances-toggle {
+  box-sizing: border-box;
+  flex: 0 0 32px;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  font-size: 18px;
+}
+
+.top-user-balances-content {
+  display: grid;
+  gap: 8px;
+}
+
+.top-user-balances-content[hidden] {
+  display: none;
+}
+
+.top-user-balances-platform {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px;
+  border-radius: 6px;
+  background: #1a3522;
+}
+
+.top-user-balances-platform-title {
+  width: fit-content;
+  margin: 0;
+  padding-bottom: 2px;
+  border-bottom: 1px solid currentColor;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.top-user-balances-ganamos .top-user-balances-platform-title {
+  color: #c994ff;
+}
+
+.top-user-balances-multipanel .top-user-balances-platform-title {
+  color: #7abaff;
+}
+
+.top-user-balances-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.top-user-balances-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: 5px;
+  background: #254a30;
+}
+
+.top-user-balances-values {
+  display: grid;
+  flex: 0 0 167px;
+  grid-template-columns: 66px 94px;
+  align-items: center;
+  gap: 7px;
+}
+
+.top-user-balances-username {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #e3eee6;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-user-balances-balance {
+  min-width: 0;
+  color: #d3f5db;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.top-user-balances-withdrawal {
+  min-width: 0;
+  padding-left: 8px;
+  border-left: 1px solid #587362;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.top-user-balances-withdrawal-available {
+  color: #f1f5f2;
+}
+
+.top-user-balances-withdrawal-waiting {
+  color: #ff777d;
+}
+
+.top-user-balances-withdrawal-unknown {
+  color: #c4d2c8;
+}
+
+.top-user-balances-message {
+  padding: 5px 6px;
+  color: #c4d2c8;
+  font-size: 12px;
+}
+
+.top-user-balances-error {
+  color: #ff9a9f;
+  overflow-wrap: anywhere;
 }

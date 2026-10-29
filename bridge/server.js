@@ -19,6 +19,7 @@ const ALLOWED_REQUEST_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
   "USER_SEARCH_REQUEST",
+  "TOP_USER_BALANCES_REQUEST",
   "SPORT_BETS_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
@@ -204,6 +205,8 @@ function validateActiveBonusConfig(config) {
     typeof config.activeAdvertising !== "boolean") return false;
   if (config.markUnreadAfterStatusUpdate !== undefined &&
     typeof config.markUnreadAfterStatusUpdate !== "boolean") return false;
+  if (config.mouseSideButtonsEnabled !== undefined &&
+    typeof config.mouseSideButtonsEnabled !== "boolean") return false;
   const isPercent = (value) => typeof value === "number" &&
     Number.isFinite(value) && value >= 0 && value <= 100;
   if (config.advertisingPercent !== undefined &&

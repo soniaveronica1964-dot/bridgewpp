@@ -1006,6 +1006,114 @@ async function searchUsersByDigits(digits) {
   };
 }
 
+function getListedUserBalance(record) {
+  if (!record || typeof record !== "object") return null;
+  const keys = [
+    "balance",
+    "user_balance",
+    "wallet_balance",
+    "saldo",
+    ...Object.keys(record).filter((key) => /^(?:.*_balance|.*_saldo|amount)$/i.test(key))
+  ];
+  for (const key of keys) {
+    const value = record[key];
+    if ((typeof value === "number" || typeof value === "string") &&
+      String(value).trim() !== "") {
+      const balance = Number(String(value).replace(",", "."));
+      if (Number.isFinite(balance)) return balance;
+    }
+  }
+  return null;
+}
+
+async function getTopGanamosUsersPage() {
+  const userId = await getAgentUserId();
+  const pageSize = 100;
+  const params = new URLSearchParams({
+    count: String(pageSize),
+    page: "0",
+    order_by: "-balance",
+    user_id: userId,
+    is_banned: "false",
+    is_direct_structure: "false"
+  });
+  const payload = await requestGanamosJson(`/api/agent_admin/user/?${params}`);
+  if (payload?.status !== 0) {
+    throw new Error(payload?.error_message || "Ganamos no pudo consultar la lista de usuarios.");
+  }
+  const result = payload?.result;
+  const pageRecords = result?.users;
+  if (!Array.isArray(pageRecords) ||
+    !Number.isSafeInteger(result.total_count) || result.total_count < 0) {
+    throw new Error("Ganamos devolvió la lista de usuarios con un formato inesperado.");
+  }
+  const users = [];
+  for (const record of pageRecords) {
+    const username = typeof record?.username === "string" ? record.username.trim() : "";
+    const balance = getListedUserBalance(record);
+    if (!username || balance === null) {
+      throw new Error("Ganamos devolvió un usuario sin nombre o saldo válido para el ranking.");
+    }
+    users.push({ username, balance });
+  }
+  users.sort((first, second) => second.balance - first.balance);
+  return users;
+}
+
+async function getTopMultiPanelUsersPage() {
+  let session = await getMultiPanelSession();
+  const pageSize = 20;
+  const report = await requestMultiPanelForm("/api/admin_reports/getReport", {
+    session,
+    company: "MULT",
+    report: "agents_control_all",
+    filter: JSON.stringify([{ field: "u.alias", type: "like", value: "" }]),
+    user: "null",
+    db: "null",
+    limit: `limit 0,${pageSize}`,
+    sort: "amount desc",
+    callFilter: ""
+  });
+  const pageRecords = report?.data?.data;
+  if (!Array.isArray(pageRecords)) {
+    throw new Error("MultiPanel devolvió una lista de usuarios con formato inesperado.");
+  }
+  const users = [];
+  for (const record of pageRecords) {
+    const username = typeof record?.alias === "string" ? record.alias.trim() : "";
+    const balanceInMinorUnits = getListedUserBalance(record);
+    if (!username || balanceInMinorUnits === null) {
+      throw new Error("MultiPanel devolvió un usuario sin nombre o saldo válido para el ranking.");
+    }
+    users.push({
+      username,
+      balance: balanceInMinorUnits / 100
+    });
+  }
+  users.sort((first, second) => second.balance - first.balance);
+  const refreshedSession = report?.data?.def?.session;
+  if (typeof refreshedSession === "string" && refreshedSession.trim()) {
+    const nextSession = refreshedSession.trim();
+    if (nextSession !== session) {
+      await setExtensionState({ multiPanelSession: nextSession });
+    }
+  }
+  return users;
+}
+
+async function getTopPlatformUsersByBalance(data) {
+  const page = data.page;
+  const users = data.platform === "ganamos"
+    ? await getTopGanamosUsersPage()
+    : await getTopMultiPanelUsersPage();
+  return {
+    ok: true,
+    platform: data.platform,
+    page,
+    users
+  };
+}
+
 async function getMultiPanelBalance(data) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -1414,6 +1522,7 @@ const API_MESSAGE_TYPES = new Set([
   "AGENT_BALANCE_REQUEST",
   "MULTIPANEL_AGENT_BALANCE_REQUEST",
   "USER_SEARCH_REQUEST",
+  "TOP_USER_BALANCES_REQUEST",
   "SPORT_BETS_REQUEST",
   "BALANCE_REQUEST",
   "TRANSACTION_REQUEST",
@@ -1457,6 +1566,8 @@ function isValidActiveBonusConfig(config) {
     typeof config.activeAdvertising !== "boolean") return false;
   if (config.markUnreadAfterStatusUpdate !== undefined &&
     typeof config.markUnreadAfterStatusUpdate !== "boolean") return false;
+  if (config.mouseSideButtonsEnabled !== undefined &&
+    typeof config.mouseSideButtonsEnabled !== "boolean") return false;
   const isPercent = (value) => typeof value === "number" &&
     Number.isFinite(value) && value >= 0 && value <= 100;
   if (config.advertisingPercent !== undefined &&
@@ -2067,7 +2178,11 @@ async function getRemoteUserSearch(data) {
 function validateApiMessage(message, suffixes) {
   if (!API_MESSAGE_TYPES.has(message?.type)) return false;
   if (message.type === "AGENT_BALANCE_REQUEST" ||
-    message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return true;
+    message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return message.data === undefined;
+  if (message.type === "TOP_USER_BALANCES_REQUEST") {
+    return ["ganamos", "multipanel"].includes(message.data?.platform) &&
+      message.data?.page === 0;
+  }
   if (message.type === "USER_SEARCH_REQUEST") return /^\d{4}$/.test(message.data?.digits || "");
 
   const platform = message.data?.platform || "ganamos";
@@ -2104,7 +2219,8 @@ async function executeApiMessage(message) {
   const suffixes = [
     "AGENT_BALANCE_REQUEST",
     "MULTIPANEL_AGENT_BALANCE_REQUEST",
-    "USER_SEARCH_REQUEST"
+    "USER_SEARCH_REQUEST",
+    "TOP_USER_BALANCES_REQUEST"
   ].includes(message.type)
     ? null
     : await getPlatformSuffixes();
@@ -2114,6 +2230,9 @@ async function executeApiMessage(message) {
   if (message.type === "AGENT_BALANCE_REQUEST") return getGanamosAgentBalance();
   if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return getMultiPanelAgentBalance();
   if (message.type === "USER_SEARCH_REQUEST") return searchUsersByDigits(message.data.digits);
+  if (message.type === "TOP_USER_BALANCES_REQUEST") {
+    return getTopPlatformUsersByBalance(message.data);
+  }
   if (message.type === "SPORT_BETS_REQUEST") {
     return message.data.platform === "multipanel"
       ? getMultiPanelActiveSportBets(message.data)

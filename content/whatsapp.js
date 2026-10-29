@@ -3,6 +3,7 @@
   const AGENT_BALANCE_HOST_ID = "ganamos-agent-balance";
   const CONTACT_FLOW_COUNTER_HOST_ID = "ganamos-contact-flow-counters";
   const PENDING_WITHDRAWALS_HOST_ID = "ganamos-pending-withdrawals";
+  const TOP_USER_BALANCES_HOST_ID = "ganamos-top-user-balances";
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
   const PLATFORM_OUTAGE_CONFIG_KEY = "platformOutageConfig";
@@ -19,6 +20,7 @@
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
   const PENDING_WITHDRAWALS_KEY = "pendingWithdrawals";
+  const TOP_USER_WITHDRAWAL_WINDOW_MS = 24 * 60 * 60 * 1000;
   const PENDING_WITHDRAWAL_MESSAGE_MAX_AGE_MS = 60_000;
   const PENDING_WITHDRAWAL_BALANCE_THRESHOLD = 10_000;
   const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 5_000;
@@ -71,6 +73,20 @@
   let pendingWithdrawalsRenderedSignature = null;
   let pendingWithdrawalsTimer = null;
   let pendingWithdrawalBalanceRefreshInProgress = false;
+  let topUserBalancesRefreshInProgress = false;
+  let topUserBalancesExpanded = false;
+  let topUserBalancesWithdrawalFilterEnabled = false;
+  let topUserBalancesData = {
+    ganamos: [],
+    multipanel: [],
+    errors: {},
+    loading: true
+  };
+  let topUserBalancesPanel = null;
+  let topUserBalancesContent = null;
+  let topUserBalancesToggle = null;
+  let topUserBalancesRefreshButton = null;
+  let topUserBalancesWithdrawalFilterButton = null;
   const pendingWithdrawalCompletions = new Set();
   let contactVisualTags = {};
   const blockedUserAccountSettings = new Set();
@@ -1564,6 +1580,8 @@
       typeof config.activeAdvertising !== "boolean") return null;
     if (config.markUnreadAfterStatusUpdate !== undefined &&
       typeof config.markUnreadAfterStatusUpdate !== "boolean") return null;
+    if (config.mouseSideButtonsEnabled !== undefined &&
+      typeof config.mouseSideButtonsEnabled !== "boolean") return null;
     if (config.advertisingPercent !== undefined &&
       config.advertisingPercent !== null &&
       !isValidBonusPercent(config.advertisingPercent)) return null;
@@ -2325,12 +2343,18 @@
       `${count} retiros pendientes${longestPendingAgeLabel}`;
     pendingWithdrawalsToggle.setAttribute("aria-expanded", String(pendingWithdrawalsExpanded));
     pendingWithdrawalsList.hidden = !pendingWithdrawalsExpanded;
-    if (!pendingWithdrawalsExpanded) return;
+    if (!pendingWithdrawalsExpanded) {
+      updateTopUserBalancesPosition();
+      return;
+    }
     const signature = JSON.stringify(
       pendingWithdrawals.map(({ id, name, accounts, balances, createdAt }) =>
         [id, name, accounts, balances, getPendingWithdrawalAge(createdAt, now)])
     );
-    if (signature === pendingWithdrawalsRenderedSignature) return;
+    if (signature === pendingWithdrawalsRenderedSignature) {
+      updateTopUserBalancesPosition();
+      return;
+    }
     pendingWithdrawalsList.replaceChildren();
     for (const withdrawal of pendingWithdrawals) {
       const row = document.createElement("div");
@@ -2365,6 +2389,351 @@
       pendingWithdrawalsList.append(row);
     }
     pendingWithdrawalsRenderedSignature = signature;
+    updateTopUserBalancesPosition();
+  }
+
+  function getTopUserWithdrawalStatus(user, platform, withdrawals, now) {
+    const username = user.username.trim().toLocaleLowerCase();
+    const lastWithdrawal = withdrawals
+      .filter((movement) =>
+        movement.platform === platform &&
+        typeof movement.username === "string" &&
+        movement.username.trim().toLocaleLowerCase() === username &&
+        Number.isFinite(movement.timestamp) &&
+        movement.timestamp <= now)
+      .reduce((latest, movement) =>
+        !latest || movement.timestamp > latest.timestamp ? movement : latest, null);
+    if (!lastWithdrawal) {
+      return { label: "Retiro Disponible", available: true, availableAt: now };
+    }
+    const availableAt = lastWithdrawal.timestamp + TOP_USER_WITHDRAWAL_WINDOW_MS;
+    if (availableAt <= now) return { label: "Retiro Disponible", available: true, availableAt };
+    const availableTime = new Intl.DateTimeFormat("es-AR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23"
+    }).format(availableAt);
+    return { label: `Prox. Ret: ${availableTime}`, available: false, availableAt };
+  }
+
+  function isTopUserWithdrawalInCurrentWindow(user, now = Date.now()) {
+    if (user.withdrawal?.available) return true;
+    if (!Number.isFinite(user.withdrawal?.availableAt)) return false;
+    const nextBoundary = new Date(now);
+    nextBoundary.setMinutes(0, 0, 0);
+    const hour = nextBoundary.getHours();
+    if (hour < 8) {
+      nextBoundary.setHours(8);
+    } else if (hour < 16) {
+      nextBoundary.setHours(16);
+    } else {
+      nextBoundary.setDate(nextBoundary.getDate() + 1);
+      nextBoundary.setHours(0);
+    }
+    return user.withdrawal.availableAt <= nextBoundary.getTime();
+  }
+
+  function renderTopUserBalances() {
+    if (!topUserBalancesPanel || !topUserBalancesContent ||
+      !topUserBalancesToggle || !topUserBalancesRefreshButton ||
+      !topUserBalancesWithdrawalFilterButton) return;
+    topUserBalancesContent.hidden = !topUserBalancesExpanded;
+    topUserBalancesPanel.panel.classList.toggle("is-minimized", !topUserBalancesExpanded);
+    topUserBalancesRefreshButton.disabled = topUserBalancesRefreshInProgress;
+    topUserBalancesRefreshButton.classList.toggle(
+      "is-refreshing",
+      topUserBalancesRefreshInProgress
+    );
+    topUserBalancesRefreshButton.title = topUserBalancesRefreshInProgress
+      ? "Actualizando ranking..."
+      : "Recalcular saldos";
+    topUserBalancesRefreshButton.setAttribute(
+      "aria-label",
+      topUserBalancesRefreshButton.title
+    );
+    topUserBalancesRefreshButton.setAttribute(
+      "aria-busy",
+      String(topUserBalancesRefreshInProgress)
+    );
+    topUserBalancesWithdrawalFilterButton.setAttribute(
+      "aria-pressed",
+      String(topUserBalancesWithdrawalFilterEnabled)
+    );
+    topUserBalancesWithdrawalFilterButton.classList.toggle(
+      "is-active",
+      topUserBalancesWithdrawalFilterEnabled
+    );
+    topUserBalancesWithdrawalFilterButton.title = topUserBalancesWithdrawalFilterEnabled
+      ? "Mostrar todos los usuarios"
+      : "Filtrar por retiros disponibles en la franja actual";
+    topUserBalancesWithdrawalFilterButton.setAttribute(
+      "aria-label",
+      topUserBalancesWithdrawalFilterButton.title
+    );
+    topUserBalancesToggle.textContent = topUserBalancesExpanded ? "−" : "$";
+    topUserBalancesToggle.setAttribute("aria-expanded", String(topUserBalancesExpanded));
+    topUserBalancesToggle.title = topUserBalancesExpanded
+      ? "Minimizar ranking de saldos"
+      : "Abrir ranking de saldos";
+    topUserBalancesToggle.setAttribute("aria-label", topUserBalancesToggle.title);
+
+    const homeIntroPanel = document.querySelector('[data-testid="intro-panel"]');
+    topUserBalancesPanel.host.style.display = isVisible(homeIntroPanel) ? "" : "none";
+    topUserBalancesPanel.host.style.width = topUserBalancesExpanded ? "320px" : "44px";
+    if (!topUserBalancesExpanded) return;
+
+    topUserBalancesContent.replaceChildren();
+    if (topUserBalancesData.loading) {
+      const loading = document.createElement("div");
+      loading.className = "top-user-balances-message";
+      loading.textContent = "Actualizando saldos...";
+      topUserBalancesContent.append(loading);
+      return;
+    }
+
+    for (const [platform, label] of [
+      ["ganamos", "Ganamos"],
+      ["multipanel", "MultiPanel"]
+    ]) {
+      const section = document.createElement("section");
+      section.className = `top-user-balances-platform top-user-balances-${platform}`;
+      const title = document.createElement("h3");
+      title.className = "top-user-balances-platform-title";
+      title.textContent = label;
+      section.append(title);
+      const error = topUserBalancesData.errors[platform];
+      const sortedUsers = [...topUserBalancesData[platform]]
+        .sort((first, second) => second.balance - first.balance);
+      const eligibleUsers = topUserBalancesWithdrawalFilterEnabled
+        ? sortedUsers.filter((user) => isTopUserWithdrawalInCurrentWindow(user))
+        : sortedUsers;
+      const visibleUsers = eligibleUsers.slice(0, 5);
+      if (error && !sortedUsers.length) {
+        const message = document.createElement("div");
+        message.className = "top-user-balances-message top-user-balances-error";
+        message.textContent = `No se pudo actualizar: ${error}`;
+        section.append(message);
+      } else if (!sortedUsers.length && !error) {
+        const message = document.createElement("div");
+        message.className = "top-user-balances-message";
+        message.textContent = "No hay usuarios para mostrar.";
+        section.append(message);
+      } else if (!visibleUsers.length) {
+        const message = document.createElement("div");
+        message.className = "top-user-balances-message";
+        message.textContent = "No hay retiros disponibles en esta franja.";
+        section.append(message);
+      } else {
+        const list = document.createElement("ol");
+        list.className = "top-user-balances-list";
+        for (const user of visibleUsers) {
+          const item = document.createElement("li");
+          item.className = "top-user-balances-item";
+          const username = document.createElement("span");
+          username.className = "top-user-balances-username";
+          username.textContent = user.username;
+          const balance = document.createElement("span");
+          balance.className = "top-user-balances-balance";
+          balance.textContent = `$${new Intl.NumberFormat("es-AR", {
+            maximumFractionDigits: 0
+          }).format(user.balance)}`;
+          const rightDetails = document.createElement("div");
+          rightDetails.className = "top-user-balances-values";
+          const withdrawal = document.createElement("span");
+          withdrawal.className = "top-user-balances-withdrawal";
+          if (user.withdrawal?.available) {
+            withdrawal.classList.add("top-user-balances-withdrawal-available");
+          } else if (user.withdrawal?.label?.startsWith("Prox. Ret:")) {
+            withdrawal.classList.add("top-user-balances-withdrawal-waiting");
+          } else {
+            withdrawal.classList.add("top-user-balances-withdrawal-unknown");
+          }
+          withdrawal.textContent = user.withdrawal?.label || "Retiro no disponible";
+          rightDetails.append(balance, withdrawal);
+          item.append(username, rightDetails);
+          list.append(item);
+        }
+        section.append(list);
+      }
+      if (error && sortedUsers.length) {
+        const message = document.createElement("div");
+        message.className = "top-user-balances-message top-user-balances-error";
+        message.textContent = `Actualización incompleta: ${error}`;
+        section.append(message);
+      }
+      topUserBalancesContent.append(section);
+    }
+    updateTopUserBalancesPosition();
+  }
+
+  function updateTopUserBalancesPosition() {
+    const host = topUserBalancesPanel?.host;
+    if (!host) return;
+    const homeIntroPanel = document.querySelector('[data-testid="intro-panel"]');
+    host.style.display = isVisible(homeIntroPanel) ? "" : "none";
+    const pendingHost = document.getElementById(PENDING_WITHDRAWALS_HOST_ID);
+    if (pendingHost && pendingHost.style.display !== "none") {
+      const pendingBounds = pendingHost.getBoundingClientRect();
+      host.style.top = `${Math.ceil(pendingBounds.bottom + 8)}px`;
+    } else {
+      host.style.top = "12px";
+    }
+  }
+
+  async function refreshTopUserBalances() {
+    if (topUserBalancesRefreshInProgress) return;
+    topUserBalancesRefreshInProgress = true;
+    const platforms = ["ganamos", "multipanel"];
+    topUserBalancesData = {
+      ganamos: [],
+      multipanel: [],
+      errors: {},
+      loading: false
+    };
+    renderTopUserBalances();
+    try {
+      let withdrawals = [];
+      let withdrawalError = "";
+      try {
+        withdrawals = await stateStorage.getMovements({
+          operation: "withdrawal",
+          since: Date.now() - TOP_USER_WITHDRAWAL_WINDOW_MS,
+          limit: 10_000
+        });
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo consultar el historial de retiros del ranking.", error);
+        withdrawalError = error.message || "No se pudo consultar el historial.";
+      }
+
+      await Promise.all(platforms.map(async (platform) => {
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: "TOP_USER_BALANCES_REQUEST",
+            data: { platform, page: 0 }
+          });
+          if (!response?.ok) {
+            throw new Error(response?.error || "No se pudo consultar el ranking.");
+          }
+          if (!Array.isArray(response.users)) {
+            throw new Error("La respuesta de la plataforma no contiene usuarios válidos.");
+          }
+          const users = response.users
+            .sort((first, second) => second.balance - first.balance)
+            .map((user) => ({
+              ...user,
+              withdrawal: withdrawalError
+                ? { label: "Historial no disponible", available: false }
+                : getTopUserWithdrawalStatus(user, platform, withdrawals, Date.now())
+            }));
+          topUserBalancesData = {
+            ...topUserBalancesData,
+            [platform]: users,
+            ...(withdrawalError
+              ? { errors: { ...topUserBalancesData.errors, withdrawals: withdrawalError } }
+              : {})
+          };
+          renderTopUserBalances();
+        } catch (error) {
+          console.error(
+            `[Ganamos balance extension] No se pudo completar el ranking de ${platform}.`,
+            error
+          );
+          topUserBalancesData = {
+            ...topUserBalancesData,
+            errors: {
+              ...topUserBalancesData.errors,
+              [platform]: error.message || "Error desconocido."
+            }
+          };
+          renderTopUserBalances();
+        }
+      }));
+    } finally {
+      topUserBalancesRefreshInProgress = false;
+      renderTopUserBalances();
+    }
+  }
+
+  function createTopUserBalancesPanel() {
+    const host = document.createElement("div");
+    host.id = TOP_USER_BALANCES_HOST_ID;
+    host.style.display = "none";
+    host.style.top = "12px";
+    host.style.right = "12px";
+    host.style.left = "auto";
+    host.style.width = "320px";
+    host.style.maxWidth = "calc(100vw - 24px)";
+    host.style.maxHeight = "calc(100vh - 24px)";
+    host.style.overflowY = "auto";
+    const shadow = host.attachShadow({ mode: "open" });
+    for (const eventName of ["click", "mousedown", "pointerdown"]) {
+      shadow.addEventListener(eventName, (event) => event.stopPropagation());
+    }
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = chrome.runtime.getURL("styles/whatsapp.css");
+    stylesheet.addEventListener("error", () => console.error(
+      "[Ganamos balance extension] No se pudo cargar styles/whatsapp.css para el ranking de saldos."
+    ), { once: true });
+    const panel = document.createElement("section");
+    panel.className = "top-user-balances-panel";
+    panel.setAttribute("aria-label", "Ranking de saldos");
+    const header = document.createElement("header");
+    header.className = "top-user-balances-header";
+    const title = document.createElement("span");
+    title.className = "top-user-balances-title";
+    title.textContent = "Mayores saldos";
+    const actions = document.createElement("div");
+    actions.className = "top-user-balances-actions";
+    topUserBalancesWithdrawalFilterButton = document.createElement("button");
+    topUserBalancesWithdrawalFilterButton.type = "button";
+    topUserBalancesWithdrawalFilterButton.className = "top-user-balances-withdrawal-filter";
+    const filterEyeIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    filterEyeIcon.setAttribute("viewBox", "0 0 24 24");
+    filterEyeIcon.setAttribute("aria-hidden", "true");
+    const filterEyeOutline = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    filterEyeOutline.setAttribute(
+      "d",
+      "M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"
+    );
+    const filterEyePupil = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    filterEyePupil.setAttribute("cx", "12");
+    filterEyePupil.setAttribute("cy", "12");
+    filterEyePupil.setAttribute("r", "2.5");
+    filterEyeIcon.append(filterEyeOutline, filterEyePupil);
+    topUserBalancesWithdrawalFilterButton.append(filterEyeIcon);
+    topUserBalancesWithdrawalFilterButton.addEventListener("click", () => {
+      topUserBalancesWithdrawalFilterEnabled = !topUserBalancesWithdrawalFilterEnabled;
+      renderTopUserBalances();
+    });
+    topUserBalancesRefreshButton = document.createElement("button");
+    topUserBalancesRefreshButton.type = "button";
+    topUserBalancesRefreshButton.className = "top-user-balances-refresh";
+    topUserBalancesRefreshButton.textContent = "↻";
+    topUserBalancesRefreshButton.addEventListener("click", () => {
+      void refreshTopUserBalances();
+    });
+    topUserBalancesToggle = document.createElement("button");
+    topUserBalancesToggle.type = "button";
+    topUserBalancesToggle.className = "top-user-balances-toggle";
+    topUserBalancesToggle.addEventListener("click", () => {
+      topUserBalancesExpanded = !topUserBalancesExpanded;
+      renderTopUserBalances();
+    });
+    actions.append(
+      topUserBalancesWithdrawalFilterButton,
+      topUserBalancesRefreshButton,
+      topUserBalancesToggle
+    );
+    header.append(title, actions);
+    topUserBalancesContent = document.createElement("div");
+    topUserBalancesContent.className = "top-user-balances-content";
+    panel.append(header, topUserBalancesContent);
+    shadow.append(stylesheet, panel);
+    document.documentElement.append(host);
+    topUserBalancesPanel = { host, panel };
+    renderTopUserBalances();
+    void refreshTopUserBalances();
   }
 
   function createPendingWithdrawalsPanel() {
@@ -3615,6 +3984,7 @@
     host.dataset.markUnreadAfterStatusUpdate = String(
       config?.markUnreadAfterStatusUpdate === true
     );
+    host.dataset.mouseSideButtonsEnabled = String(config?.mouseSideButtonsEnabled !== false);
     host.dataset.advertisingReady = String(
       config?.activeAdvertising === true && isValidBonusPercent(config.advertisingPercent)
     );
@@ -3998,6 +4368,12 @@
     const { label: markUnreadLabel, input: markUnreadInput } =
       createBonusSettingToggle("Marcar No Leídos", savedConfig?.markUnreadAfterStatusUpdate === true);
     markUnreadLabel.classList.add("active-bonus-setting-toggle--unread");
+    const { label: mouseSideButtonsLabel, input: mouseSideButtonsInput } =
+      createBonusSettingToggle(
+        "Botones del mouse",
+        savedConfig?.mouseSideButtonsEnabled !== false
+      );
+    mouseSideButtonsLabel.classList.add("active-bonus-setting-toggle--mouse");
     const { label: activeAdvertisingLabel, input: activeAdvertisingInput } =
       createBonusSettingToggle("Publi Activa", savedConfig?.activeAdvertising === true);
     const advertisingSetting = document.createElement("span");
@@ -4024,6 +4400,7 @@
       copyBonusLabel,
       invertDepositButtonsLabel,
       markUnreadLabel,
+      mouseSideButtonsLabel,
       advertisingSetting
     );
     const outageSettings = document.createElement("div");
@@ -4240,6 +4617,7 @@
         copyBonus: copyBonusInput.checked,
         invertDepositButtons: invertDepositButtonsInput.checked,
         markUnreadAfterStatusUpdate: markUnreadInput.checked,
+        mouseSideButtonsEnabled: mouseSideButtonsInput.checked,
         activeAdvertising: activeAdvertisingInput.checked,
         advertisingPercent
       };
@@ -4408,6 +4786,10 @@
       createIndicator("unread", "Marcar No Leídos", [
         "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z",
         "M9 12a3 3 0 1 0 6 0 3 3 0 0 0-6 0Z"
+      ]),
+      createIndicator("mouse", "Botones laterales del mouse", [
+        "M12 2a7 7 0 0 0-7 7v6a7 7 0 0 0 14 0V9a7 7 0 0 0-7-7Z",
+        "M12 2v7"
       ]),
       createIndicator("copy", "Copiar Bono", [
         "M8 8V4a2 2 0 0 1 2-2h9l3 3v13a2 2 0 0 1-2 2h-4",
@@ -10241,6 +10623,27 @@
     }
   }
 
+  function handleChatMouseSideButton(event) {
+    if (event.button !== 3 && event.button !== 4) return;
+    const activeBonusHost = document.getElementById(ACTIVE_BONUS_HOST_ID);
+    if (activeBonusHost?.dataset.mouseSideButtonsEnabled === "false") return;
+    const title = findContactTitle();
+    const host = document.getElementById(HOST_ID);
+    if (!title || !isNormalChatOpen(title) || !host ||
+      host.style.display === "none" || !activeAccountsKey ||
+      host.dataset.accounts !== activeAccountsKey) return;
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const dialogRoot = host.shadowRoot?.querySelector(".dialog-root");
+    if (dialogRoot?.childElementCount) return;
+
+    const action = event.button === 3 ? "withdrawal" : "deposit";
+    const button = host.shadowRoot?.querySelector(`[data-action="${action}"]`);
+    if (!button || button.hidden || button.disabled) return;
+    button.click();
+  }
+
   const observer = new MutationObserver((mutations) => {
     if (mutations.every(({ target }) =>
       target.id === HOST_ID || target.id === AGENT_BALANCE_HOST_ID ||
@@ -10262,6 +10665,7 @@
   });
   window.addEventListener("resize", scheduleUpdate);
   window.addEventListener("scroll", scheduleUpdate, true);
+  window.addEventListener("auxclick", handleChatMouseSideButton, true);
   for (const eventName of [
     "mousedown",
     "mousemove",
@@ -10280,6 +10684,7 @@
   createActiveBonusHost();
   createContactFlowCounterPanel();
   createPendingWithdrawalsPanel();
+  createTopUserBalancesPanel();
   const agentBalanceHost = createAgentBalancePanel();
   void refreshAgentBalance(agentBalanceHost);
   void refreshMultiPanelAgentBalance(agentBalanceHost);
@@ -10288,6 +10693,7 @@
     void refreshAgentBalance(agentBalanceHost);
     void refreshMultiPanelAgentBalance(agentBalanceHost);
     void refreshPendingWithdrawalBalances();
+    void refreshTopUserBalances();
   }, 60_000);
   updateContact();
 })();
