@@ -1,6 +1,8 @@
 (() => {
   const HOST_ID = "ganamos-status-replacer";
   const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+  const STATUS_UPDATE_RECOVERY_KEY = "statusUpdateRecovery";
+  const STATUS_UPDATE_RECOVERY_TTL_MS = 24 * 60 * 60_000;
   const STATUS_COUNT_PATTERN = /^Estado\s+(\d+)\s+de\s+(\d+)$/i;
   const EXTENSION_OVERLAY_IDS = [
     HOST_ID,
@@ -14,6 +16,19 @@
   const sleep = (delay) => new Promise((resolve) => window.setTimeout(resolve, delay));
   let statusPageVisibilityScheduled = false;
   let statusUpdateInProgress = false;
+
+  function getStatusImageFormat(bytes) {
+    const pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
+    if (bytes.length >= pngSignature.length &&
+      pngSignature.every((byte, index) => bytes[index] === byte)) {
+      return { extension: "png", mimeType: "image/png" };
+    }
+    if (bytes.length >= 3 && bytes[0] === 255 &&
+      bytes[1] === 216 && bytes[2] === 255) {
+      return { extension: "jpg", mimeType: "image/jpeg" };
+    }
+    return null;
+  }
 
   function isVisible(element) {
     if (!(element instanceof Element)) return false;
@@ -384,40 +399,44 @@
       if (currentButton && currentButton.isConnected && isVisible(currentButton)) {
         button = currentButton;
       }
-      const rect = button.getBoundingClientRect();
-      const visibleRect = {
-        left: Math.max(0, rect.left),
-        top: Math.max(0, rect.top),
-        right: Math.min(window.innerWidth, rect.right),
-        bottom: Math.min(window.innerHeight, rect.bottom)
-      };
-      if (visibleRect.right <= visibleRect.left ||
-        visibleRect.bottom <= visibleRect.top) {
-        await sleep(250 + attempt * 250);
-        continue;
-      }
-      const width = visibleRect.right - visibleRect.left;
-      const height = visibleRect.bottom - visibleRect.top;
-      const samples = points.map(([xRatio, yRatio]) => ({
-        x: visibleRect.left + width * xRatio,
-        y: visibleRect.top + height * yRatio
-      })).map((point) => ({
-        ...point,
-        target: document.elementFromPoint(point.x, point.y)
-      }));
-      const point = samples.find(({ target }) => target && button.contains(target));
-      if (point) {
-        const response = await chrome.runtime.sendMessage({
-          type: "STATUS_UPDATE_DEBUGGER_CLICK",
-          x: point.x,
-          y: point.y
-        });
-        if (!response?.ok) {
-          throw new Error(response?.error || "Chrome no pudo hacer clic en el control de WhatsApp.");
+      const restoreOverlays = hideExtensionOverlays();
+      try {
+        const rect = button.getBoundingClientRect();
+        const visibleRect = {
+          left: Math.max(0, rect.left),
+          top: Math.max(0, rect.top),
+          right: Math.min(window.innerWidth, rect.right),
+          bottom: Math.min(window.innerHeight, rect.bottom)
+        };
+        if (visibleRect.right <= visibleRect.left ||
+          visibleRect.bottom <= visibleRect.top) {
+          continue;
         }
-        return;
+        const width = visibleRect.right - visibleRect.left;
+        const height = visibleRect.bottom - visibleRect.top;
+        const samples = points.map(([xRatio, yRatio]) => ({
+          x: visibleRect.left + width * xRatio,
+          y: visibleRect.top + height * yRatio
+        })).map((point) => ({
+          ...point,
+          target: document.elementFromPoint(point.x, point.y)
+        }));
+        const point = samples.find(({ target }) => target && button.contains(target));
+        if (point) {
+          const response = await chrome.runtime.sendMessage({
+            type: "STATUS_UPDATE_DEBUGGER_CLICK",
+            x: point.x,
+            y: point.y
+          });
+          if (!response?.ok) {
+            throw new Error(response?.error || "Chrome no pudo hacer clic en el control de WhatsApp.");
+          }
+          return;
+        }
+        lastBlocker = samples.find(({ target }) => target)?.target || null;
+      } finally {
+        restoreOverlays();
       }
-      lastBlocker = samples.find(({ target }) => target)?.target || null;
       await sleep(250 + attempt * 250);
     }
 
@@ -471,7 +490,100 @@
     );
   }
 
-  async function openOwnStatusViewer() {
+  function findOpenConversationTitle() {
+    return [...document.querySelectorAll(
+      '[data-testid="conversation-info-header-chat-title"]'
+    )].find(isVisible) || null;
+  }
+
+  function findVisibleButtonIn(root, pattern) {
+    if (!root) return null;
+    return [...root.querySelectorAll('button,[role="button"],[role="tab"]')]
+      .find((element) => isVisible(element) && hasNormalizedLabel(element, pattern)) || null;
+  }
+
+  function findAllChatsFilter(sidebar) {
+    for (let ancestor = sidebar, depth = 0;
+      ancestor && ancestor !== document.documentElement && depth < 6;
+      ancestor = ancestor.parentElement, depth += 1) {
+      const candidates = [...ancestor.querySelectorAll(
+        'button,[role="button"],[role="tab"]'
+      )].filter((element) => isVisible(element) &&
+        hasNormalizedLabel(element, /^Todos$/i));
+      const innermost = candidates.filter((candidate) =>
+        !candidates.some((other) => other !== candidate && candidate.contains(other)));
+      if (innermost.length === 1) return innermost[0];
+    }
+    return null;
+  }
+
+  async function returnToWhatsAppChats() {
+    const conversationTitle = findOpenConversationTitle();
+    if (conversationTitle) {
+      const main = conversationTitle.closest("#main") || document.getElementById("main");
+      const backButton = [...(main?.querySelectorAll(
+        'button,[role="button"],[data-testid="back"]'
+      ) || [])].find((element) => isVisible(element) &&
+        (element.matches('[data-testid="back"]') || hasNormalizedLabel(
+          element,
+          /^(?:volver(?:\s+a\s+(?:chats|la lista de chats))?|back|regresar)$/i
+        ))) || null;
+      if (backButton && isVisible(backButton)) {
+        await clickWhatsAppControl(() => backButton.isConnected && isVisible(backButton)
+          ? backButton
+          : null);
+        await sleep(500);
+      }
+    }
+
+    const chatsButton = await waitFor(
+      () => findButton(/^Chats$/i),
+      "la pestaña Chats",
+      15_000
+    );
+    await clickWhatsAppControl(() => findButton(/^Chats$/i) || chatsButton);
+    const sidebar = await waitFor(() => {
+      const current = document.querySelector("#pane-side");
+      return current && isVisible(current) ? current : null;
+    }, "la lista de chats de WhatsApp", 15_000);
+    const allChatsFilter = await waitFor(
+      () => findAllChatsFilter(sidebar),
+      "el filtro Todos de la lista de chats",
+      15_000
+    );
+    await clickWhatsAppControl(() => findAllChatsFilter(
+      document.querySelector("#pane-side")
+    ));
+    const selectedFilter = () => {
+      const current = findAllChatsFilter(document.querySelector("#pane-side"));
+      if (!current) return false;
+      const pressed = current.getAttribute("aria-pressed");
+      const selected = current.getAttribute("aria-selected");
+      return pressed === null && selected === null ||
+        pressed === "true" || selected === "true";
+    };
+    await waitFor(selectedFilter, "la selección del filtro Todos", 10_000);
+    if (findOpenConversationTitle()) {
+      await pressWhatsAppEscape();
+      await waitFor(
+        () => !findOpenConversationTitle(),
+        "el cierre del chat abierto",
+        10_000
+      );
+    }
+    const stored = await stateStorage.get("activeBonusConfig");
+    if (stored.activeBonusConfig?.markUnreadAfterStatusUpdate === true) {
+      const unreadFilter = await waitFor(
+        () => findButton(/^(?:No leídos|Unread)$/i),
+        "el filtro No Leídos de la lista de chats",
+        10_000
+      );
+      await clickWhatsAppControl(() =>
+        findButton(/^(?:No leídos|Unread)$/i) || unreadFilter);
+    }
+  }
+
+  async function openOwnStatusViewer(pauseStatus = true) {
     await closeStatusViewerIfOpen();
     await ensureStatusPage();
     const header = await waitFor(
@@ -491,7 +603,7 @@
       "el visor de Mi estado",
       60_000
     );
-    await pauseCurrentStatus(group);
+    if (pauseStatus) await pauseCurrentStatus(group);
     return group;
   }
 
@@ -571,7 +683,7 @@
     return "unknown";
   }
 
-  async function deleteLatestOwnStatus() {
+  async function deleteLatestOwnStatus(onDeleteIntent) {
     let group = await openOwnStatusViewer();
     group = await waitFor(() => {
       const currentGroup = findVisibleStatusGroup();
@@ -645,6 +757,7 @@
     );
     await new Promise((resolve) => requestAnimationFrame(() =>
       requestAnimationFrame(resolve)));
+    await onDeleteIntent?.(previousTotal);
     await clickWhatsAppControl(() => findDeleteConfirmation()?.button || null);
     await waitFor(
       () => !isVisible(confirmation.popup),
@@ -654,20 +767,22 @@
     const deletionState = await waitFor(() => {
       const currentGroup = findVisibleStatusGroup();
       const updatedCount = parseStatusCount(currentGroup);
-      if (updatedCount && updatedCount.total < previousTotal) return "remaining-statuses";
-      if (!currentGroup) return "viewer-closed";
+      if (updatedCount && updatedCount.total < previousTotal) {
+        return { type: "remaining-statuses", total: updatedCount.total };
+      }
+      if (!currentGroup) return { type: "viewer-closed" };
       return null;
     }, "la verificación de que WhatsApp eliminó el estado", 60_000);
 
-    if (deletionState === "remaining-statuses") return;
+    if (deletionState.type === "remaining-statuses") return deletionState.total;
     await ensureStatusPage();
     const statusPresence = await waitFor(() => {
       const presence = getOwnStatusPresence();
       return presence === "unknown" ? null : presence;
     }, "la lista actualizada de Mi estado", 30_000);
-    if (statusPresence === "empty") return;
+    if (statusPresence === "empty") return 0;
 
-    group = await openOwnStatusViewer();
+    group = await openOwnStatusViewer(false);
     const updatedGroup = await waitFor(() => {
       const currentGroup = findVisibleStatusGroup();
       const currentCount = parseStatusCount(currentGroup);
@@ -677,6 +792,7 @@
     if (!updatedCount || updatedCount.total >= previousTotal) {
       throw new Error("WhatsApp cerró el visor, pero no se confirmó la eliminación del estado más reciente.");
     }
+    return updatedCount.total;
   }
 
   async function openPhotoStatusPicker(file) {
@@ -785,13 +901,8 @@
     return null;
   }
 
-  async function publishStatusImage(file) {
+  async function publishStatusImage(file, previousStatusCount) {
     await openPhotoStatusPicker(file);
-    const startingThumbnail = findOwnStatusThumbnail();
-    const startingSignature = startingThumbnail
-      ? `${getLabel(startingThumbnail)}|${[...startingThumbnail.querySelectorAll("img")]
-        .map((image) => image.currentSrc || image.src).join("|")}`
-      : null;
     await waitFor(
       findStatusPublishButton,
       "el botón para publicar el estado",
@@ -803,45 +914,224 @@
       "el cierre del editor tras enviar el estado",
       120_000
     );
-    await waitFor(
-      () => {
-        const thumbnail = findOwnStatusThumbnail();
-        if (!thumbnail) return null;
-        const signature = `${getLabel(thumbnail)}|${[...thumbnail.querySelectorAll("img")]
-          .map((image) => image.currentSrc || image.src).join("|")}`;
-        return !startingSignature || signature !== startingSignature ? thumbnail : null;
-      },
-      "la nueva actualización de Mi estado",
-      120_000
-    );
+    await openOwnStatusViewer(false);
+    try {
+      const publishedGroup = await waitFor(() => {
+        const currentGroup = findVisibleStatusGroup();
+        const count = parseStatusCount(currentGroup);
+        return count && count.total > previousStatusCount ? currentGroup : null;
+      }, "el aumento del contador de estados después de enviar la imagen", 90_000);
+      const count = parseStatusCount(publishedGroup);
+      if (!count || count.total < previousStatusCount + 1) {
+        throw new Error("WhatsApp no confirmó que la imagen enviada haya agregado una actualización.");
+      }
+    } finally {
+      await closeStatusViewerIfOpen();
+    }
   }
 
-  async function replaceLatestStatus(file, onStage) {
+  async function getStatusUpdateFingerprint(action, file) {
+    const contents = file ? await file.arrayBuffer() : new ArrayBuffer(0);
+    const prefix = new TextEncoder().encode(`${action}:`);
+    const input = new Uint8Array(prefix.length + contents.byteLength);
+    input.set(prefix);
+    input.set(new Uint8Array(contents), prefix.length);
+    const digest = await crypto.subtle.digest("SHA-256", input);
+    return [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  async function getLegacyStatusUpdateFingerprint(file) {
+    if (!file) return null;
+    const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+    return [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  async function saveStatusUpdateRecovery(recovery) {
+    await chrome.storage.local.set({
+      [STATUS_UPDATE_RECOVERY_KEY]: {
+        ...recovery,
+        updatedAt: Date.now()
+      }
+    });
+  }
+
+  async function getCurrentStatusCount() {
+    await ensureStatusPage();
+    const presence = await waitFor(() => {
+      const current = getOwnStatusPresence();
+      return current === "unknown" ? null : current;
+    }, "la lista de estados propios", 30_000);
+    if (presence === "empty") return 0;
+
+    await openOwnStatusViewer(false);
+    try {
+      const group = await waitFor(() => {
+        const currentGroup = findVisibleStatusGroup();
+        return parseStatusCount(currentGroup) ? currentGroup : null;
+      }, "el contador de estados propios", 30_000);
+      return parseStatusCount(group).total;
+    } finally {
+      await closeStatusViewerIfOpen();
+    }
+  }
+
+  async function runStatusOperation(action, file, onStage) {
+    if (!["delete", "upload", "replace"].includes(action) ||
+      action !== "delete" && !(file instanceof File)) {
+      throw new Error("La operación de estado solicitada no es válida.");
+    }
+    const fingerprint = await getStatusUpdateFingerprint(action, file);
+    const legacyFingerprint = action === "replace"
+      ? await getLegacyStatusUpdateFingerprint(file)
+      : null;
+    const stored = await chrome.storage.local.get(STATUS_UPDATE_RECOVERY_KEY);
+    const savedRecovery = stored[STATUS_UPDATE_RECOVERY_KEY];
+    const recoveryAge = Date.now() - savedRecovery?.updatedAt;
+    const validRecoveryPhase = savedRecovery?.phase === "starting" ||
+      ["deleting", "deleted", "publishing"].includes(savedRecovery?.phase) &&
+      Number.isSafeInteger(savedRecovery.previousStatusCount) &&
+      savedRecovery.previousStatusCount >= (savedRecovery.phase === "deleting" ? 1 : 0);
+    let recovery = [fingerprint, legacyFingerprint].includes(savedRecovery?.fingerprint) &&
+      Number.isSafeInteger(savedRecovery.updatedAt) &&
+      recoveryAge >= 0 && recoveryAge < STATUS_UPDATE_RECOVERY_TTL_MS &&
+      validRecoveryPhase
+      ? savedRecovery
+      : null;
     const started = await chrome.runtime.sendMessage({ type: "STATUS_UPDATE_DEBUGGER_START" });
     if (!started?.ok) {
       throw new Error(started?.error || "No se pudo iniciar el control de WhatsApp mediante Chrome.");
     }
     let operationError;
     let stopError;
-    const restoreOverlays = hideExtensionOverlays();
+    let operationRecovered = false;
+    let navigationWarning;
     try {
       await runStatusStage("Abriendo Estados", ensureStatusPage, onStage);
-      const statusPresence = await runStatusStage(
-        "Verificando el estado propio",
-        () => waitFor(() => {
-          const presence = getOwnStatusPresence();
-          return presence === "unknown" ? null : presence;
-        }, "la miniatura de Mi estado o el aviso de que todavía no hay actualizaciones", 30_000),
-        onStage
-      );
-      if (statusPresence === "present") {
-        await runStatusStage("Eliminando el estado más reciente", deleteLatestOwnStatus, onStage);
+      if (recovery?.phase === "deleting") {
+        const currentCount = await getCurrentStatusCount();
+        if (currentCount >= recovery.previousStatusCount) {
+          throw new Error(
+            "La operación anterior se interrumpió durante la eliminación y no se pudo confirmar. Revisá Mi estado antes de volver a intentarlo; no se repetirá el borrado automáticamente."
+          );
+        }
+        if (action === "delete") {
+          await chrome.storage.local.remove(STATUS_UPDATE_RECOVERY_KEY);
+          operationRecovered = true;
+        } else {
+          recovery = {
+            fingerprint,
+            phase: "deleted",
+            previousStatusCount: currentCount
+          };
+          await saveStatusUpdateRecovery(recovery);
+        }
       }
-      await runStatusStage("Publicando y verificando el PNG", () => publishStatusImage(file), onStage);
+      if (!operationRecovered && action !== "delete" &&
+        (recovery?.phase === "deleted" || recovery?.phase === "publishing")) {
+        const currentCount = await getCurrentStatusCount();
+        if (recovery.phase === "publishing" &&
+          currentCount > recovery.previousStatusCount) {
+          await chrome.storage.local.remove(STATUS_UPDATE_RECOVERY_KEY);
+          operationRecovered = true;
+        }
+      } else if (!recovery && !operationRecovered) {
+        recovery = {
+          fingerprint,
+          phase: "starting"
+        };
+        await saveStatusUpdateRecovery(recovery);
+      }
+
+      if (!operationRecovered) {
+        const statusPresence = await runStatusStage(
+          "Verificando el estado propio",
+          () => waitFor(() => {
+            const presence = getOwnStatusPresence();
+            return presence === "unknown" ? null : presence;
+          }, "la miniatura de Mi estado o el aviso de que todavía no hay actualizaciones", 30_000),
+          onStage
+        );
+        if (action === "delete") {
+          if (statusPresence === "present") {
+            await runStatusStage(
+              "Eliminando el estado más reciente",
+              () => deleteLatestOwnStatus((count) => saveStatusUpdateRecovery({
+                fingerprint,
+                phase: "deleting",
+                previousStatusCount: count
+              })),
+              onStage
+            );
+          }
+          await chrome.storage.local.remove(STATUS_UPDATE_RECOVERY_KEY);
+          operationRecovered = true;
+        } else {
+          let previousStatusCount = 0;
+          if (recovery?.phase === "deleted" || recovery?.phase === "publishing") {
+            previousStatusCount = recovery.previousStatusCount;
+          } else if (action === "replace" && statusPresence === "present") {
+            previousStatusCount = await runStatusStage(
+              "Eliminando el estado más reciente",
+              () => deleteLatestOwnStatus((count) => saveStatusUpdateRecovery({
+                fingerprint,
+                phase: "deleting",
+                previousStatusCount: count
+              })),
+              onStage
+            );
+            recovery = {
+              fingerprint,
+              phase: "deleted",
+              previousStatusCount
+            };
+            await saveStatusUpdateRecovery(recovery);
+          } else if (statusPresence === "present") {
+            previousStatusCount = await getCurrentStatusCount();
+          }
+          if (recovery?.phase === "starting") {
+            recovery = {
+              fingerprint,
+              phase: "deleted",
+              previousStatusCount
+            };
+            await saveStatusUpdateRecovery(recovery);
+          }
+          recovery = {
+            fingerprint,
+            phase: "publishing",
+            previousStatusCount
+          };
+          await saveStatusUpdateRecovery(recovery);
+          await runStatusStage(
+            "Publicando y verificando la imagen",
+            () => publishStatusImage(file, previousStatusCount),
+            onStage
+          );
+          await chrome.storage.local.remove(STATUS_UPDATE_RECOVERY_KEY);
+        }
+      }
+      if (action !== "delete") {
+        try {
+          await runStatusStage(
+            "Volviendo a Chats y seleccionando Todos",
+            returnToWhatsAppChats,
+            onStage
+          );
+        } catch (error) {
+          navigationWarning = error.message || "No se pudo volver a la lista de chats.";
+          console.warn(
+            "[Ganamos balance extension] La subida se confirmó, pero WhatsApp no volvió a la lista Todos.",
+            error
+          );
+        }
+      }
     } catch (error) {
       operationError = error;
     } finally {
-      restoreOverlays();
       try {
         const stopped = await chrome.runtime.sendMessage({ type: "STATUS_UPDATE_DEBUGGER_STOP" });
         if (!stopped?.ok) {
@@ -852,15 +1142,25 @@
       }
     }
     if (stopError) {
-      throw new Error(
-        `${operationError?.message ? `${operationError.message} ` : ""}${stopError.message || "No se pudo cerrar el control de Chrome."}`
+      if (operationError) {
+        throw new Error(
+          `${operationError.message || ""} ${stopError.message || "No se pudo cerrar el control de Chrome."}`.trim()
+        );
+      }
+      console.error(
+        "[Ganamos balance extension] El estado quedó confirmado, pero no se pudo cerrar la sesión debugger de WhatsApp.",
+        stopError
       );
     }
     if (operationError) throw operationError;
-    return { ok: true };
+    return {
+      ok: true,
+      ...(operationRecovered ? { recovered: true } : {}),
+      ...(navigationWarning ? { navigationWarning } : {})
+    };
   }
 
-  async function makePngFile(image) {
+  async function makeStatusImageFile(image) {
     if (typeof image !== "string" || image.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 ||
       !isValidBase64(image)) {
       throw new Error("La imagen recibida no es válida.");
@@ -870,15 +1170,13 @@
       throw new Error("La imagen debe pesar como máximo 10 MB.");
     }
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
-    if (!signature.every((byte, index) => bytes[index] === byte)) {
-      throw new Error("El archivo seleccionado no es un PNG válido.");
-    }
-    return new File([bytes], "estado.png", { type: "image/png" });
+    const format = getStatusImageFormat(bytes);
+    if (!format) throw new Error("El archivo no es un PNG o JPEG válido.");
+    return new File([bytes], `estado.${format.extension}`, { type: format.mimeType });
   }
 
   function parseActiveBonusFromFilename(filename) {
-    const normalizedName = filename.replace(/\.png$/i, "")
+    const normalizedName = filename.replace(/\.(?:png|jpe?g)$/i, "")
       .replace(/\s+\(\d+\)$/, "")
       .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
       .replace(/\s+/g, " ").trim();
@@ -1084,8 +1382,10 @@
       .recycle-icon { display: block; width: 1em; height: 1em; font-family: "Segoe UI Symbol", "Arial Unicode MS", sans-serif; font-size: 27px; font-weight: 400; line-height: 1; text-align: center; transform: translate(-0.02em, -0.04em); }
       .status-popup { position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center; padding: 16px; background: #070c0ddb; backdrop-filter: blur(1px); pointer-events: auto; }
       .status-popup[hidden] { display: none; }
-      .run-progress { position: fixed; top: 12px; left: 50%; z-index: 2147483647; display: none; box-sizing: border-box; width: min(560px, calc(100vw - 24px)); padding: 10px 14px; transform: translateX(-50%); border: 1px solid #167356; border-radius: 8px; color: #e7edef; background: #1d2929f2; box-shadow: 0 5px 18px #0008; font-size: 13px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
-      .run-progress[data-visible="true"] { display: block; }
+      .run-progress { position: fixed; top: 12px; left: 50%; z-index: 2147483647; display: none; align-items: flex-start; justify-content: space-between; gap: 12px; box-sizing: border-box; width: min(560px, calc(100vw - 24px)); padding: 10px 14px; transform: translateX(-50%); border: 1px solid #167356; border-radius: 8px; color: #e7edef; background: #1d2929f2; box-shadow: 0 5px 18px #0008; font-size: 13px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .run-progress[data-visible="true"] { display: flex; }
+      .run-progress-text { flex: 1 1 auto; min-width: 0; }
+      .close-progress { flex: 0 0 auto; min-width: 0; min-height: 28px; padding: 2px 8px; color: #aab6b5; border-color: #465453; background: #273332; font-size: 12px; }
       .panel { display: grid; gap: 12px; box-sizing: border-box; width: min(500px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; padding: 22px 24px; border: 1px solid #167356; border-radius: 12px; color: #e2e8e7; background: #1d2929; box-shadow: 0 18px 55px #0009; font-size: 14px; line-height: 1.45; }
       .title { margin: 0 0 5px; color: #e7edef; font-size: 20px; font-weight: 600; letter-spacing: 0; }
       .hint { margin: 0 0 3px; color: #aab6b5; font-size: 13px; }
@@ -1107,11 +1407,15 @@
       .profile-toggle[aria-pressed="false"] { color: #c1ccca; border-color: #465453; background: #273332; box-shadow: 0 2px 3px #0005; }
       .profile-toggle[aria-pressed="false"]:hover:not(:disabled) { background: #344241; }
       .profile-message[data-state="error"] { color: #ff8a8a; }
-      .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; padding-top: 14px; border-top: 1px solid #344746; }
+      .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; padding-top: 14px; border-top: 1px solid #344746; }
+      .actions button { min-height: 40px; }
       .secondary { color: #aab6b5; border-color: #344546; background: transparent; }
       .secondary:hover:not(:disabled) { background: #273535; }
       .accept { color: #f2f7f4; background: #167356; }
       .accept:hover:not(:disabled) { background: #1c8966; }
+      .replace { grid-column: 1 / -1; color: #f2f7f4; background: #167356; }
+      .replace:hover:not(:disabled) { background: #1c8966; }
+      .close { grid-column: 1 / -1; }
       input[type="file"] { box-sizing: border-box; width: 100%; min-height: 40px; padding: 8px 11px; border: 1px solid #167356; border-radius: 7px; color: #e7edef; background: #1b2727; font-size: 15px; line-height: 1.4; }
     `;
     const openButton = document.createElement("button");
@@ -1131,8 +1435,22 @@
     popup.hidden = true;
     const runProgress = document.createElement("div");
     runProgress.className = "run-progress";
-    runProgress.setAttribute("role", "status");
-    runProgress.setAttribute("aria-live", "polite");
+    const runProgressText = document.createElement("span");
+    runProgressText.className = "run-progress-text";
+    runProgressText.setAttribute("role", "status");
+    runProgressText.setAttribute("aria-live", "polite");
+    const closeProgressButton = document.createElement("button");
+    closeProgressButton.type = "button";
+    closeProgressButton.className = "close-progress";
+    closeProgressButton.textContent = "Cerrar";
+    closeProgressButton.setAttribute("aria-label", "Cerrar mensaje de progreso");
+    closeProgressButton.title = "Oculta el mensaje; la operación continúa.";
+    runProgress.append(runProgressText, closeProgressButton);
+    let progressDismissed = false;
+    closeProgressButton.addEventListener("click", () => {
+      progressDismissed = true;
+      runProgress.dataset.visible = "false";
+    });
     const panel = document.createElement("section");
     panel.className = "panel";
     panel.setAttribute("role", "dialog");
@@ -1142,22 +1460,22 @@
     const title = document.createElement("h2");
     title.className = "title";
     title.id = "status-popup-title";
-    title.textContent = "Reemplazar último estado";
+    title.textContent = "Administrar estados";
     const hint = document.createElement("div");
     hint.className = "hint";
-    hint.textContent = "Selecciona un PNG de hasta 10 MB. Se publicará en este perfil principal y en los secundarios conectados, salvo los perfiles que marques como excluidos. Las excepciones guardadas omiten envíos futuros de estados y del bono activo; no borran la configuración que el perfil ya recibió.";
+    hint.textContent = "Elige una acción: borrar el estado más reciente, subir una imagen sin borrar o borrar y subir. Se aplica al perfil principal y a los secundarios conectados, salvo los que marques como excluidos.";
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "image/png,.png";
+    input.accept = "image/png,.png,image/jpeg,.jpg,.jpeg";
     const detection = document.createElement("div");
     detection.className = "detection";
-    detection.textContent = "Bono detectado: selecciona una imagen PNG para analizar el nombre.";
+    detection.textContent = "Bono detectado: selecciona una imagen PNG o JPEG para analizar el nombre.";
     detection.dataset.state = "idle";
     const exceptions = document.createElement("div");
     exceptions.className = "exceptions";
     const exceptionsLabel = document.createElement("div");
     exceptionsLabel.className = "exceptions-label";
-    exceptionsLabel.textContent = "Perfiles (pulsa para excluirlos del envío):";
+    exceptionsLabel.textContent = "Perfiles (pulsa para excluirlos de la operación):";
     const profileList = document.createElement("div");
     profileList.className = "profile-list";
     const profileMessage = document.createElement("div");
@@ -1167,14 +1485,24 @@
     status.className = "result";
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
-    const acceptButton = document.createElement("button");
-    acceptButton.type = "button";
-    acceptButton.className = "accept";
-    acceptButton.textContent = "Aceptar";
-    acceptButton.disabled = true;
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "secondary";
+    deleteButton.textContent = "Borrar Estado";
+    deleteButton.disabled = true;
+    const uploadButton = document.createElement("button");
+    uploadButton.type = "button";
+    uploadButton.className = "accept";
+    uploadButton.textContent = "Subir Estado";
+    uploadButton.disabled = true;
+    const replaceButton = document.createElement("button");
+    replaceButton.type = "button";
+    replaceButton.className = "replace";
+    replaceButton.textContent = "Borrar y Subir";
+    replaceButton.disabled = true;
     const closeButton = document.createElement("button");
     closeButton.type = "button";
-    closeButton.className = "secondary";
+    closeButton.className = "secondary close";
     closeButton.textContent = "Cerrar";
     let selectedFile = null;
     let selectionGeneration = 0;
@@ -1182,6 +1510,12 @@
     let primaryProfile = null;
     let profilesLoaded = false;
     let excludedProfileIds = [];
+    const updateActionButtons = () => {
+      deleteButton.disabled = statusUpdateInProgress || !profilesLoaded;
+      uploadButton.disabled = statusUpdateInProgress || !profilesLoaded || !selectedFile;
+      replaceButton.disabled = statusUpdateInProgress || !profilesLoaded || !selectedFile;
+      closeButton.disabled = statusUpdateInProgress;
+    };
     const renderConnectedProfiles = () => {
       profileList.replaceChildren();
       const profiles = [
@@ -1270,12 +1604,12 @@
         primaryProfile = response.primaryProfile;
         excludedProfileIds = response.excludedProfileIds;
         profilesLoaded = true;
-        acceptButton.disabled = !selectedFile;
+        updateActionButtons();
         profileMessage.dataset.state = "";
         renderConnectedProfiles();
       } catch (error) {
         profilesLoaded = false;
-        acceptButton.disabled = true;
+        updateActionButtons();
         profileList.replaceChildren();
         profileMessage.dataset.state = "error";
         profileMessage.textContent = error.message || "No se pudieron consultar los perfiles secundarios.";
@@ -1288,8 +1622,8 @@
       openButton.setAttribute("aria-expanded", "false");
       selectedFile = null;
       input.value = "";
-      acceptButton.disabled = true;
-      detection.textContent = "Bono detectado: selecciona una imagen PNG para analizar el nombre.";
+      updateActionButtons();
+      detection.textContent = "Bono detectado: selecciona una imagen PNG o JPEG para analizar el nombre.";
       detection.dataset.state = "idle";
       delete detection.dataset.bonusType;
       delete detection.dataset.platform;
@@ -1317,10 +1651,10 @@
       input.value = "";
       const currentGeneration = ++selectionGeneration;
       selectedFile = null;
-      acceptButton.disabled = true;
+      updateActionButtons();
       status.textContent = "";
       if (!file) {
-        detection.textContent = "Bono detectado: selecciona una imagen PNG para analizar el nombre.";
+        detection.textContent = "Bono detectado: selecciona una imagen PNG o JPEG para analizar el nombre.";
         detection.dataset.state = "idle";
         delete detection.dataset.bonusType;
         delete detection.dataset.platform;
@@ -1344,21 +1678,24 @@
         }
       }
 
-      if (!/\.png$/i.test(file.name)) {
-        status.textContent = "El archivo debe tener extensión .png.";
+      const fileExtension = /\.([^.]+)$/.exec(file.name)?.[1]?.toLowerCase();
+      if (!["png", "jpg", "jpeg"].includes(fileExtension)) {
+        status.textContent = "El archivo debe tener extensión .png, .jpg o .jpeg.";
         return;
       }
       if (file.size > MAX_IMAGE_BYTES) {
         status.textContent = `El archivo pesa ${(file.size / (1024 * 1024)).toFixed(2)} MB; el máximo permitido es 10 MB.`;
         return;
       }
-      status.textContent = "Verificando el archivo PNG…";
+      status.textContent = "Verificando la imagen…";
       try {
         const bytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
-        const signature = [137, 80, 78, 71, 13, 10, 26, 10];
-        if (bytes.length !== signature.length ||
-          !signature.every((byte, index) => bytes[index] === byte)) {
-          throw new Error("El archivo seleccionado no tiene una firma PNG válida.");
+        const format = getStatusImageFormat(bytes);
+        const extensionMatches = format?.extension === "png"
+          ? fileExtension === "png"
+          : format?.extension === "jpg" && ["jpg", "jpeg"].includes(fileExtension);
+        if (!format || !extensionMatches) {
+          throw new Error("La extensión del archivo no coincide con una imagen PNG o JPEG válida.");
         }
       } catch (error) {
         if (currentGeneration === selectionGeneration) {
@@ -1368,117 +1705,145 @@
       }
       if (currentGeneration !== selectionGeneration) return;
       selectedFile = file;
-      acceptButton.disabled = !profilesLoaded;
+      updateActionButtons();
       status.textContent = profilesLoaded
-        ? "PNG válido. Ya puedes aceptar."
-        : "PNG válido. Esperando la lista de perfiles para confirmar excepciones.";
+        ? "Imagen válida. Ya puedes subirla o borrar y subir."
+        : "Imagen válida. Esperando la lista de perfiles para confirmar excepciones.";
     });
 
-    acceptButton.addEventListener("click", async () => {
-      const file = selectedFile;
-      if (!file || statusUpdateInProgress) return;
+    const runSelectedStatusAction = async (action) => {
+      const file = action === "delete" ? null : selectedFile;
+      if (statusUpdateInProgress || !profilesLoaded ||
+        action !== "delete" && !file) return;
+      statusUpdateInProgress = true;
+      updateActionButtons();
       openButton.disabled = true;
       input.disabled = true;
-      acceptButton.disabled = true;
-      closeButton.disabled = true;
-      statusUpdateInProgress = true;
       popup.hidden = true;
       const updateProgress = (text) => {
-        runProgress.textContent = text;
-        runProgress.dataset.visible = "true";
+        runProgressText.textContent = text;
+        if (!progressDismissed) runProgress.dataset.visible = "true";
       };
+      const actionLabel = action === "delete"
+        ? "Borrando el estado"
+        : action === "upload"
+          ? "Subiendo el estado"
+          : "Borrando y subiendo el estado";
       let localProgress = "Preparando perfiles conectados…";
+      progressDismissed = false;
       updateProgress(localProgress);
       try {
         const id = crypto.randomUUID();
         const publishPromise = (async () => {
-          const image = await fileToBase64(file);
+          const image = file ? await fileToBase64(file) : undefined;
           return chrome.runtime.sendMessage({
             type: "BRIDGE_STATUS_UPDATE_PUBLISH",
             id,
-            image
+            action,
+            ...(image ? { image } : {})
           });
-        })();
-        const localPromise = (async () => {
-          if (!primaryProfile || excludedProfileIds.includes(primaryProfile.profileId)) {
-            return "Perfil principal: excluido; no se publicó el estado.";
-          }
-          return replaceLatestStatus(file, (stage) => {
-            localProgress = `Perfil principal: ${stage}.`;
-            updateProgress(localProgress);
-          }).then(() => "Perfil principal: publicado.");
         })();
         const [publishResult] = await Promise.allSettled([publishPromise]);
         const receipt = publishResult.status === "fulfilled" ? publishResult.value : null;
-        let secondaryPromise = null;
         if (!receipt?.ok) {
-          localProgress += `\nNo se pudieron iniciar los perfiles secundarios: ${receipt?.error || publishResult.reason?.message || "error de comunicación."}`;
+          const error = receipt?.error || publishResult.reason?.message ||
+            "el puente no confirmó la acción solicitada.";
+          status.textContent = `Operación no ejecutada: no se pudo confirmar con el puente (${error}).`;
+          localProgress += `\n${status.textContent}`;
+          updateProgress(localProgress);
+        } else if (receipt.action !== action) {
+          status.textContent = "Operación no ejecutada: el puente confirmó una acción diferente. Reiniciá el puente local antes de volver a intentarlo.";
+          localProgress += `\n${status.textContent}`;
           updateProgress(localProgress);
         } else {
-          const targets = Array.isArray(receipt.targets) ? receipt.targets : [];
+          const targets = receipt.targets;
           localProgress += `\nSecundarios conectados: ${targets.length}.`;
           updateProgress(localProgress);
-          secondaryPromise = collectSecondaryResults(id, targets, (results, pendingCount) => {
-              const succeeded = results.filter((result) => result.ok).length;
-              const failed = results.filter((result) => !result.ok);
-              updateProgress(`${localProgress}\nSecundarios: ${succeeded} publicados, ${failed.length} con error, ${pendingCount} pendientes.`);
-            }).then(
-              (summary) => ({ summary }),
-              (error) => ({ error })
-            );
-        }
-        const [localResult, secondaryResult] = await Promise.all([
-          Promise.allSettled([localPromise]),
-          secondaryPromise || Promise.resolve(null)
-        ]);
-        const local = localResult[0].status === "fulfilled"
-          ? localResult[0].value
-          : `Perfil principal: error: ${localResult[0].reason?.message || "no se pudo cambiar el estado."}`;
-        let secondary = "";
-        if (secondaryResult?.error) {
-          secondary = `\nNo se pudieron obtener los resultados secundarios: ${secondaryResult.error.message || "error de comunicación."}`;
-        } else if (secondaryResult?.summary) {
-          const { summary } = secondaryResult;
-          const succeeded = summary.results.filter((result) => result.ok).length;
-          const failures = summary.results
-            .filter((result) => !result.ok)
-            .map((result) => `Perfil ${result.profileId.slice(0, 8)}: ${result.error || "falló"}`);
-          if (summary.pending.length) {
-            failures.push(...summary.pending.map((profileId) =>
-              `Perfil ${profileId.slice(0, 8)}: no respondió a tiempo`));
-          }
-          secondary = `\nSecundarios: ${succeeded} publicados, ${failures.length} con error.${failures.length ? `\n${failures.join("\n")}` : ""}`;
-        } else if (!receipt?.ok) {
-          secondary = `\nNo se pudieron iniciar los perfiles secundarios: ${receipt?.error || publishResult.reason?.message || "error de comunicación."}`;
-        }
-        status.textContent = `${local}${secondary}`;
-      } catch (error) {
-        status.textContent = `No se pudo iniciar el cambio de estado: ${error.message || "error desconocido."}`;
-      } finally {
-        try {
-          const bonusUpdate = await updateActiveBonusFromFilename(file.name);
-          status.textContent += `\n${bonusUpdate}`;
-        } catch (error) {
-          console.error(
-            "[Ganamos balance extension] No se pudo actualizar el bono activo desde el nombre del PNG.",
-            error
+          const localPromise = (async () => {
+            if (!primaryProfile || excludedProfileIds.includes(primaryProfile.profileId)) {
+              return `Perfil principal: excluido; no se ${action === "delete" ? "borró" : "publicó"} el estado.`;
+            }
+            return runStatusOperation(action, file, (stage) => {
+              localProgress = `Perfil principal: ${stage}.`;
+              updateProgress(localProgress);
+            }).then((result) => {
+              const label = action === "delete"
+                ? "estado borrado"
+                : action === "upload"
+                  ? "estado subido"
+                  : "estado reemplazado";
+              return `Perfil principal: ${label}.${result.navigationWarning
+                ? `\nNo se pudo volver a Chats: ${result.navigationWarning}`
+                : ""}`;
+            });
+          })();
+          const secondaryPromise = collectSecondaryResults(id, targets, (results, pendingCount) => {
+            const succeeded = results.filter((result) => result.ok).length;
+            const failed = results.filter((result) => !result.ok);
+            const verb = action === "delete" ? "borrados" : "publicados";
+            updateProgress(`${localProgress}\nSecundarios: ${succeeded} ${verb}, ${failed.length} con error, ${pendingCount} pendientes.`);
+          }).then(
+            (summary) => ({ summary }),
+            (error) => ({ error })
           );
-          status.textContent += `\nNo se pudo actualizar el bono activo: ${error.message || "error desconocido."}`;
+          const [localResult, secondaryResult] = await Promise.all([
+            Promise.allSettled([localPromise]),
+            secondaryPromise
+          ]);
+          const local = localResult[0].status === "fulfilled"
+            ? localResult[0].value
+            : `Perfil principal: error: ${localResult[0].reason?.message || "no se pudo cambiar el estado."}`;
+          let secondary = "";
+          if (secondaryResult.error) {
+            secondary = `\nNo se pudieron obtener los resultados secundarios: ${secondaryResult.error.message || "error de comunicación."}`;
+          } else {
+            const { summary } = secondaryResult;
+            const succeeded = summary.results.filter((result) => result.ok).length;
+            const failures = summary.results
+              .filter((result) => !result.ok)
+              .map((result) => `Perfil ${result.profileId.slice(0, 8)}: ${result.error || "falló"}`);
+            if (summary.pending.length) {
+              failures.push(...summary.pending.map((profileId) =>
+                `Perfil ${profileId.slice(0, 8)}: no respondió a tiempo`));
+            }
+            const verb = action === "delete" ? "borrados" : "publicados";
+            secondary = `\nSecundarios: ${succeeded} ${verb}, ${failures.length} con error.${failures.length ? `\n${failures.join("\n")}` : ""}`;
+          }
+          status.textContent = `${local}${secondary}`;
+        }
+      } catch (error) {
+        status.textContent = `No se pudo iniciar la operación (${actionLabel.toLowerCase()}): ${error.message || "error desconocido."}`;
+      } finally {
+        if (file && action !== "delete") {
+          try {
+            const bonusUpdate = await updateActiveBonusFromFilename(file.name);
+            status.textContent += `\n${bonusUpdate}`;
+          } catch (error) {
+            console.error(
+              "[Ganamos balance extension] No se pudo actualizar el bono activo desde el nombre de la imagen.",
+              error
+            );
+            status.textContent += `\nNo se pudo actualizar el bono activo: ${error.message || "error desconocido."}`;
+          }
         }
         runProgress.dataset.visible = "false";
+        progressDismissed = false;
         popup.hidden = false;
-        openButton.disabled = false;
-        input.disabled = false;
-        closeButton.disabled = false;
         statusUpdateInProgress = false;
         selectedFile = null;
         input.value = "";
+        updateActionButtons();
+        openButton.disabled = false;
+        input.disabled = false;
         scheduleStatusPageVisibilityUpdate();
       }
-    });
+    };
+    deleteButton.addEventListener("click", () => runSelectedStatusAction("delete"));
+    uploadButton.addEventListener("click", () => runSelectedStatusAction("upload"));
+    replaceButton.addEventListener("click", () => runSelectedStatusAction("replace"));
     const actions = document.createElement("div");
     actions.className = "actions";
-    actions.append(acceptButton, closeButton);
+    actions.append(deleteButton, uploadButton, replaceButton, closeButton);
     panel.append(title, hint, input, detection, exceptions, status, actions);
     popup.append(panel);
     shadow.append(style, openButton, popup, runProgress);
@@ -1501,8 +1866,18 @@
       sendResponse({ ok: false, error: "Origen no autorizado para cambiar el estado." });
       return;
     }
-    makePngFile(message.image)
-      .then((file) => replaceLatestStatus(file))
+    const action = message.action ?? "replace";
+    if (!["delete", "upload", "replace"].includes(action) ||
+      action === "delete" && message.image !== undefined ||
+      action !== "delete" && typeof message.image !== "string") {
+      sendResponse({ ok: false, error: "La operación de estado recibida no es válida." });
+      return;
+    }
+    const filePromise = action === "delete"
+      ? Promise.resolve(null)
+      : makeStatusImageFile(message.image);
+    filePromise
+      .then((file) => runStatusOperation(action, file))
       .then(sendResponse)
       .catch((error) => sendResponse({
         ok: false,

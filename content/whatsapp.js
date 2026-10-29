@@ -1562,6 +1562,8 @@
       typeof config.invertDepositButtons !== "boolean") return null;
     if (config.activeAdvertising !== undefined &&
       typeof config.activeAdvertising !== "boolean") return null;
+    if (config.markUnreadAfterStatusUpdate !== undefined &&
+      typeof config.markUnreadAfterStatusUpdate !== "boolean") return null;
     if (config.advertisingPercent !== undefined &&
       config.advertisingPercent !== null &&
       !isValidBonusPercent(config.advertisingPercent)) return null;
@@ -3990,6 +3992,9 @@
     const { label: invertDepositButtonsLabel, input: invertDepositButtonsInput } =
       createBonusSettingToggle("Invertir B. Dep.", savedConfig?.invertDepositButtons === true);
     invertDepositButtonsLabel.classList.add("active-bonus-setting-toggle--invert");
+    const { label: markUnreadLabel, input: markUnreadInput } =
+      createBonusSettingToggle("Marcar No Leídos", savedConfig?.markUnreadAfterStatusUpdate === true);
+    markUnreadLabel.classList.add("active-bonus-setting-toggle--unread");
     const { label: activeAdvertisingLabel, input: activeAdvertisingInput } =
       createBonusSettingToggle("Publi Activa", savedConfig?.activeAdvertising === true);
     const advertisingSetting = document.createElement("span");
@@ -4012,7 +4017,12 @@
     activeAdvertisingInput.addEventListener("change", updateAdvertisingPercentVisibility);
     updateAdvertisingPercentVisibility();
     advertisingSetting.append(activeAdvertisingLabel, advertisingPercentLabel);
-    bonusSettings.append(copyBonusLabel, invertDepositButtonsLabel, advertisingSetting);
+    bonusSettings.append(
+      copyBonusLabel,
+      invertDepositButtonsLabel,
+      markUnreadLabel,
+      advertisingSetting
+    );
     const outageSettings = document.createElement("div");
     outageSettings.className = "platform-outage-settings";
     const outageHeading = document.createElement("span");
@@ -4110,6 +4120,7 @@
         type: selectedType,
         copyBonus: copyBonusInput.checked,
         invertDepositButtons: invertDepositButtonsInput.checked,
+        markUnreadAfterStatusUpdate: markUnreadInput.checked,
         activeAdvertising: activeAdvertisingInput.checked,
         advertisingPercent
       };
@@ -4922,6 +4933,13 @@
     settingsPanel.setAttribute("role", "tabpanel");
     settingsPanel.setAttribute("aria-labelledby", settingsTab.id);
     settingsPanel.hidden = true;
+    const setSettingLabel = (element, emoji, text) => {
+      const icon = document.createElement("span");
+      icon.className = "movement-history-setting-emoji";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = emoji;
+      element.append(icon, document.createTextNode(text));
+    };
     const sportBetsSettingHeading = document.createElement("h3");
     sportBetsSettingHeading.className = "movement-history-settings-heading";
     sportBetsSettingHeading.textContent = "Apuestas deportivas";
@@ -4933,7 +4951,7 @@
     const sportBetsSettingSwitch = document.createElement("span");
     sportBetsSettingSwitch.className = "active-bonus-setting-switch";
     const sportBetsSettingText = document.createElement("span");
-    sportBetsSettingText.textContent = "Desactivar detección";
+    setSettingLabel(sportBetsSettingText, "⚽", "Desactivar detección");
     sportBetsSetting.append(sportBetsDisabledInput, sportBetsSettingSwitch, sportBetsSettingText);
     const bonusDisabledSetting = document.createElement("label");
     bonusDisabledSetting.className = "active-bonus-setting-toggle";
@@ -4943,7 +4961,7 @@
     const bonusDisabledSwitch = document.createElement("span");
     bonusDisabledSwitch.className = "active-bonus-setting-switch";
     const bonusDisabledText = document.createElement("span");
-    bonusDisabledText.textContent = "Bono Desactivado";
+    setSettingLabel(bonusDisabledText, "⚠️", "Bono Desactivado");
     bonusDisabledSetting.append(bonusDisabledInput, bonusDisabledSwitch, bonusDisabledText);
     const accumulatesBonusesSetting = document.createElement("label");
     accumulatesBonusesSetting.className = "active-bonus-setting-toggle";
@@ -4953,7 +4971,7 @@
     const accumulatesBonusesSwitch = document.createElement("span");
     accumulatesBonusesSwitch.className = "active-bonus-setting-switch";
     const accumulatesBonusesText = document.createElement("span");
-    accumulatesBonusesText.textContent = "Acumula bonos";
+    setSettingLabel(accumulatesBonusesText, "♻️", "Acumula bonos");
     accumulatesBonusesSetting.append(
       accumulatesBonusesInput,
       accumulatesBonusesSwitch,
@@ -4973,7 +4991,7 @@
     userStatusHeading.textContent = "Estado del usuario";
     const contactTagOptions = document.createElement("div");
     contactTagOptions.className = "movement-history-contact-tag-options";
-    const createContactTagSetting = (text, ariaLabel) => {
+    const createContactTagSetting = (text, ariaLabel, emoji) => {
       const setting = document.createElement("label");
       setting.className = "active-bonus-setting-toggle";
       const input = document.createElement("input");
@@ -4982,20 +5000,20 @@
       const toggle = document.createElement("span");
       toggle.className = "active-bonus-setting-switch";
       const label = document.createElement("span");
-      label.textContent = text;
+      setSettingLabel(label, emoji, text);
       setting.append(input, toggle, label);
       return { setting, input };
     };
-    const highDepositorTagSetting = createContactTagSetting("Cargador alto", "Cargador alto");
-    const scammerTagSetting = createContactTagSetting("Peligro", "Peligro");
-    const blockedUserSetting = createContactTagSetting("Bloqueado", "Bloqueado");
+    const highDepositorTagSetting = createContactTagSetting("Cargador alto", "Cargador alto", "💸");
+    const scammerTagSetting = createContactTagSetting("Peligro", "Peligro", "⛔");
+    const blockedUserSetting = createContactTagSetting("Bloqueado", "Bloqueado", "🚫");
     contactTagOptions.append(highDepositorTagSetting.setting, scammerTagSetting.setting);
     const userStatusOptions = document.createElement("div");
     userStatusOptions.className = "movement-history-contact-tag-options";
     userStatusOptions.append(blockedUserSetting.setting);
     const relatedContactsHeading = document.createElement("h3");
     relatedContactsHeading.className = "movement-history-settings-heading";
-    relatedContactsHeading.textContent = "Contactos relacionados";
+    setSettingLabel(relatedContactsHeading, "↔️", "Contactos relacionados");
     const relatedContactsInput = document.createElement("textarea");
     relatedContactsInput.className = "movement-history-related-contacts";
     relatedContactsInput.rows = 2;
@@ -7330,15 +7348,22 @@
     const usernames = { ganamos: null, multipanel: null };
     const legacy = { ganamos: null, multipanel: null };
     let firstPlatform = null;
-    const aliases = contactName.trim().split(/[\s/]+/)
-      .map((part) => part
+    const parseAlias = (part) => {
+      const match = part
         .replace(/^[^\p{L}\p{N}._-]+/u, "")
-        .replace(/[^\p{L}\p{M}\p{N}._-]+$/u, ""))
-      .map((part) => part.match(/^([\p{L}\p{M}\p{N}._-]+?)([a-z])(\2*)$/iu))
+        .replace(/[^\p{L}\p{M}\p{N}._-]+$/u, "")
+        .match(/^([\p{L}\p{M}\p{N}._-]+?)([a-z])(\2*)$/iu);
+      if (!match ||
+        !/^(?=.*\p{L})(?=.*\d)[\p{L}\p{M}\p{N}._-]+$/u.test(match[1])) {
+        return null;
+      }
+      return match;
+    };
+    const aliases = contactName.trim().split(/[\s/.\\]+/)
+      .map(parseAlias)
       .filter(Boolean);
 
     for (const [, base, suffix, repeatedSuffix] of aliases) {
-      if (!/^(?=.*\p{L})(?=.*\d)[\p{L}\p{M}\p{N}._-]+$/u.test(base)) continue;
       const normalizedSuffix = suffix.toLowerCase();
       const fullSuffix = `${suffix}${repeatedSuffix}`.toLowerCase();
       const platform = normalizedSuffix === platformSuffixes.ganamos

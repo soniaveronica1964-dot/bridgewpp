@@ -221,13 +221,24 @@
         if (!update?.ok || !Number.isSafeInteger(update.revision) || update.revision < 0) {
           throw new Error(update?.error || "No se pudo consultar la actualización de estado.");
         }
+        if (!update.changed) {
+          revision = update.revision;
+          continue;
+        }
+        const action = update.action;
+        if (!["delete", "upload", "replace"].includes(action) ||
+          typeof update.id !== "string" ||
+          action === "delete" && update.image !== undefined ||
+          action !== "delete" && typeof update.image !== "string") {
+          throw new Error("El puente devolvió una acción de estado incompleta o no válida; no se ejecutó en este perfil.");
+        }
         revision = update.revision;
-        if (!update.changed) continue;
         let result;
         try {
           result = await sendRuntimeMessage({
             type: "STATUS_UPDATE_EXECUTE",
-            image: update.image
+            action,
+            ...(update.image === undefined ? {} : { image: update.image })
           });
         } catch (error) {
           result = { ok: false, error: error.message || "No se pudo aplicar el cambio de estado." };

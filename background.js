@@ -1455,6 +1455,8 @@ function isValidActiveBonusConfig(config) {
     typeof config.invertDepositButtons !== "boolean") return false;
   if (config.activeAdvertising !== undefined &&
     typeof config.activeAdvertising !== "boolean") return false;
+  if (config.markUnreadAfterStatusUpdate !== undefined &&
+    typeof config.markUnreadAfterStatusUpdate !== "boolean") return false;
   const isPercent = (value) => typeof value === "number" &&
     Number.isFinite(value) && value >= 0 && value <= 100;
   if (config.advertisingPercent !== undefined &&
@@ -1716,17 +1718,33 @@ async function publishStatusUpdate(message) {
   if (role !== "primary" || !token) {
     throw new Error("Este perfil no está configurado como principal.");
   }
+  const action = message.action ?? "replace";
+  const needsImage = action !== "delete";
   if (typeof message.id !== "string" || !/^[0-9a-f-]{36}$/i.test(message.id) ||
-    typeof message.image !== "string" ||
-    message.image.length > Math.ceil((10 * 1024 * 1024) / 3) * 4) {
+    !["delete", "upload", "replace"].includes(action) ||
+    needsImage && (typeof message.image !== "string" ||
+      message.image.length > Math.ceil((10 * 1024 * 1024) / 3) * 4) ||
+    !needsImage && message.image !== undefined) {
     throw new Error("La solicitud de cambio de estado no es válida.");
   }
   const excludedProfileIds = await getStatusExcludedProfileIds();
-  return bridgeFetch("/v1/status-update", token, {
+  const receipt = await bridgeFetch("/v1/status-update", token, {
     method: "POST",
     timeoutMs: 20_000,
-    body: { id: message.id, image: message.image, excludedProfileIds }
+    body: {
+      id: message.id,
+      action,
+      ...(needsImage ? { image: message.image } : {}),
+      excludedProfileIds
+    }
   });
+  if (!receipt?.ok || receipt.id !== message.id || receipt.action !== action ||
+    !Array.isArray(receipt.targets)) {
+    throw new Error(
+      "El puente no confirmó la acción solicitada. Reiniciá el puente local y volvé a intentarlo; no se ejecutó el cambio en este perfil."
+    );
+  }
+  return receipt;
 }
 
 async function pollStatusUpdate(message) {
@@ -2622,7 +2640,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     chrome.tabs.sendMessage(sender.tab.id, {
       type: "STATUS_UPDATE_LOCAL_EXECUTE",
-      image: message.image
+      action: message.action ?? "replace",
+      ...(message.image === undefined ? {} : { image: message.image })
     }).then(sendResponse).catch((error) => sendResponse({
       ok: false,
       error: error.message || "No se pudo ejecutar el cambio de estado en WhatsApp Web."

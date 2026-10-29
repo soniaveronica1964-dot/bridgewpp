@@ -2650,6 +2650,10 @@ button:disabled {
   font-size: 13px;
 }
 
+.movement-history-setting-emoji {
+  margin-right: 5px;
+}
+
 .movement-history-settings-section {
   display: grid;
   gap: 7px;

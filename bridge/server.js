@@ -202,6 +202,8 @@ function validateActiveBonusConfig(config) {
     typeof config.invertDepositButtons !== "boolean") return false;
   if (config.activeAdvertising !== undefined &&
     typeof config.activeAdvertising !== "boolean") return false;
+  if (config.markUnreadAfterStatusUpdate !== undefined &&
+    typeof config.markUnreadAfterStatusUpdate !== "boolean") return false;
   const isPercent = (value) => typeof value === "number" &&
     Number.isFinite(value) && value >= 0 && value <= 100;
   if (config.advertisingPercent !== undefined &&
@@ -535,21 +537,29 @@ async function handleRequest(request, response) {
       sendJson(response, 400, { ok: false, error: error.message }, origin);
       return;
     }
+    const action = body?.action ?? "replace";
+    const needsImage = action !== "delete";
     if (typeof body?.id !== "string" || !/^[0-9a-f-]{36}$/i.test(body.id) ||
-      typeof body.image !== "string" ||
-      !isValidBase64(body.image) ||
+      !["delete", "upload", "replace"].includes(action) ||
+      needsImage && (typeof body.image !== "string" || !isValidBase64(body.image)) ||
+      !needsImage && body.image !== undefined ||
       (Object.hasOwn(body || {}, "excludedProfileIds") &&
         !validateProfileIds(body.excludedProfileIds)) ||
       statusUpdateJobs.has(body.id)) {
       sendJson(response, 400, { ok: false, error: "La solicitud de cambio de estado no es válida." }, origin);
       return;
     }
-    const image = Buffer.from(body.image, "base64");
-    if (!image.length || image.length > STATUS_IMAGE_MAX_BYTES ||
-      image.toString("base64") !== body.image ||
-      image.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") {
-      sendJson(response, 400, { ok: false, error: "La imagen debe ser un archivo PNG válido de hasta 10 MB." }, origin);
-      return;
+    if (needsImage) {
+      const image = Buffer.from(body.image, "base64");
+      const isPng = image.subarray(0, 8).toString("hex") === "89504e470d0a1a0a";
+      const isJpeg = image.length >= 3 &&
+        image[0] === 255 && image[1] === 216 && image[2] === 255;
+      if (!image.length || image.length > STATUS_IMAGE_MAX_BYTES ||
+        image.toString("base64") !== body.image ||
+        !isPng && !isJpeg) {
+        sendJson(response, 400, { ok: false, error: "La imagen debe ser un archivo PNG o JPEG válido de hasta 10 MB." }, origin);
+        return;
+      }
     }
     const now = Date.now();
     for (const [jobId, existingJob] of statusUpdateJobs) {
@@ -569,7 +579,14 @@ async function handleRequest(request, response) {
       expiresAt: now + STATUS_JOB_TIMEOUT_MS
     };
     statusUpdateJobs.set(body.id, job);
-    latestStatusUpdate = { ok: true, changed: true, revision: ++statusUpdateRevision, id: body.id, image: body.image };
+    latestStatusUpdate = {
+      ok: true,
+      changed: true,
+      revision: ++statusUpdateRevision,
+      id: body.id,
+      action,
+      ...(needsImage ? { image: body.image } : {})
+    };
     const deliveredProfiles = new Set();
     for (const poll of waitingStatusUpdatePolls.splice(0)) {
       clearTimeout(poll.timer);
@@ -584,7 +601,7 @@ async function handleRequest(request, response) {
         poll.finish(latestStatusUpdate);
       }
     }
-    sendJson(response, 200, { ok: true, id: body.id, targets }, origin);
+    sendJson(response, 200, { ok: true, id: body.id, action, targets }, origin);
     return;
   }
 
