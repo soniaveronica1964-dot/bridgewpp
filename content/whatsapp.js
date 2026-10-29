@@ -5,6 +5,7 @@
   const PENDING_WITHDRAWALS_HOST_ID = "ganamos-pending-withdrawals";
   const TOP_USER_BALANCES_HOST_ID = "ganamos-top-user-balances";
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
+  const CHAT_FILTER_HIDDEN_ATTRIBUTE = "data-bridgewpp-chat-filter-hidden";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
   const PLATFORM_OUTAGE_CONFIG_KEY = "platformOutageConfig";
   const SPORT_BETS_DISABLED_USERS_KEY = "sportBetsDisabledUsers";
@@ -264,6 +265,7 @@
       remoteCreateDestinationsLoaded = true;
       renderContactFlowDerivedCounters();
       updateContactFlowCounterVisibility();
+      updateTopUserBalancesPosition();
       updateActiveBonusVisibility();
       const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
       if (balanceHost) {
@@ -295,6 +297,7 @@
           remoteCreateDestinationsLoaded = true;
           renderContactFlowDerivedCounters();
           updateContactFlowCounterVisibility();
+          updateTopUserBalancesPosition();
           updateActiveBonusVisibility();
           const balanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
           if (balanceHost) {
@@ -309,6 +312,7 @@
           remoteCreateDestinationsLoadPromise = null;
           remoteCreateDestinationsLoaded = true;
           updateContactFlowCounterVisibility();
+          updateTopUserBalancesPosition();
           updateActiveBonusVisibility();
           throw error;
         });
@@ -357,6 +361,70 @@
 
   function isVisible(element) {
     return Boolean(element && element.getClientRects().length);
+  }
+
+  function hasExactControlLabel(element, pattern) {
+    return [
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.textContent
+    ].filter(Boolean).some((label) =>
+      pattern.test(label.trim().replace(/\s+/g, " ")));
+  }
+
+  function getDirectChildWithin(ancestor, element) {
+    let child = element;
+    while (child.parentElement && child.parentElement !== ancestor) {
+      child = child.parentElement;
+    }
+    return child.parentElement === ancestor ? child : null;
+  }
+
+  function hideChatFilters() {
+    const sidebar = document.querySelector("#pane-side");
+    if (!sidebar) return;
+    const selector = 'button,[role="button"],[role="tab"]';
+
+    for (let ancestor = sidebar, depth = 0;
+      ancestor && ancestor !== document.documentElement && depth < 6;
+      ancestor = ancestor.parentElement, depth += 1) {
+      const controls = [...ancestor.querySelectorAll(selector)];
+      const allFilters = controls.filter((element) =>
+        isVisible(element) && hasExactControlLabel(element, /^Todos$/i));
+      const filtersToHide = controls.filter((element) =>
+        (isVisible(element) || element.hasAttribute(CHAT_FILTER_HIDDEN_ATTRIBUTE)) &&
+        hasExactControlLabel(element, /^(?:Favoritos|Favorites|Grupos|Groups)$/i));
+      const innermost = (candidates) => candidates.filter((candidate) =>
+        !candidates.some((other) => other !== candidate && candidate.contains(other)));
+      const [allFilter] = innermost(allFilters);
+      const hiddenFilters = innermost(filtersToHide);
+      if (!allFilter || hiddenFilters.length === 0) continue;
+
+      for (const filter of hiddenFilters) {
+        const ancestors = new Set();
+        for (let current = allFilter; current; current = current.parentElement) {
+          ancestors.add(current);
+        }
+        let commonAncestor = filter.parentElement;
+        while (commonAncestor && !ancestors.has(commonAncestor)) {
+          commonAncestor = commonAncestor.parentElement;
+        }
+        const filterContainer = commonAncestor
+          ? getDirectChildWithin(commonAncestor, filter)
+          : null;
+        const allFilterContainer = commonAncestor
+          ? getDirectChildWithin(commonAncestor, allFilter)
+          : null;
+        const target = filterContainer && filterContainer !== allFilterContainer
+          ? filterContainer
+          : filter;
+        filter.setAttribute(CHAT_FILTER_HIDDEN_ATTRIBUTE, "");
+        if (target.hasAttribute(CHAT_FILTER_HIDDEN_ATTRIBUTE)) continue;
+        target.setAttribute(CHAT_FILTER_HIDDEN_ATTRIBUTE, "");
+        target.style.setProperty("display", "none", "important");
+      }
+      return;
+    }
   }
 
   function isRenderedVisible(element) {
@@ -1772,6 +1840,10 @@
       typeof destination?.id === "string" && typeof destination.name === "string");
   }
 
+  function shouldShowContactFlowCounters() {
+    return remoteCreateDestinationsLoaded && hasConfiguredRemoteDestinations();
+  }
+
   function normalizeContactFlowCounters(value) {
     const counters = {
       arrived: 0,
@@ -2570,7 +2642,9 @@
     const host = topUserBalancesPanel?.host;
     if (!host) return;
     const homeIntroPanel = document.querySelector('[data-testid="intro-panel"]');
-    host.style.display = isVisible(homeIntroPanel) ? "" : "none";
+    host.style.display = isVisible(homeIntroPanel) && !shouldShowContactFlowCounters()
+      ? ""
+      : "none";
     const pendingHost = document.getElementById(PENDING_WITHDRAWALS_HOST_ID);
     if (pendingHost && pendingHost.style.display !== "none") {
       const pendingBounds = pendingHost.getBoundingClientRect();
@@ -3214,9 +3288,7 @@
   function updateContactFlowCounterVisibility() {
     const host = document.getElementById(CONTACT_FLOW_COUNTER_HOST_ID);
     if (!host) return;
-    host.style.display = remoteCreateDestinationsLoaded && hasConfiguredRemoteDestinations()
-      ? ""
-      : "none";
+    host.style.display = shouldShowContactFlowCounters() ? "" : "none";
   }
 
   function resetContactFlowCounters(clearCountedNumbers = true) {
@@ -10586,6 +10658,7 @@
     scheduled = true;
     requestAnimationFrame(() => {
       scheduled = false;
+      hideChatFilters();
       updateContact();
       scheduleContactTagScan();
       renderPendingWithdrawals();
@@ -10695,5 +10768,6 @@
     void refreshPendingWithdrawalBalances();
     void refreshTopUserBalances();
   }, 60_000);
+  hideChatFilters();
   updateContact();
 })();
