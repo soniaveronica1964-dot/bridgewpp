@@ -3612,6 +3612,9 @@
     host.dataset.copyBonus = String(config?.copyBonus === true);
     host.dataset.invertDepositButtons = String(config?.invertDepositButtons === true);
     host.dataset.activeAdvertising = String(config?.activeAdvertising === true);
+    host.dataset.markUnreadAfterStatusUpdate = String(
+      config?.markUnreadAfterStatusUpdate === true
+    );
     host.dataset.advertisingReady = String(
       config?.activeAdvertising === true && isValidBonusPercent(config.advertisingPercent)
     );
@@ -4054,11 +4057,127 @@
     const formLayout = document.createElement("div");
     formLayout.className = "active-bonus-layout";
     formLayout.append(typeSelector, content);
+    const profileExceptions = document.createElement("section");
+    profileExceptions.className = "active-bonus-profile-exceptions";
+    const profileExceptionsLabel = document.createElement("div");
+    profileExceptionsLabel.className = "active-bonus-profile-label";
+    profileExceptionsLabel.textContent = "Perfiles (pulsa para excluirlos de la operación):";
+    const profileList = document.createElement("div");
+    profileList.className = "active-bonus-profile-list";
+    const profileMessage = document.createElement("div");
+    profileMessage.className = "active-bonus-profile-message";
+    profileMessage.setAttribute("role", "status");
+    profileMessage.setAttribute("aria-live", "polite");
+    profileMessage.textContent = "Consultando perfiles secundarios conectados…";
+    profileExceptions.append(profileExceptionsLabel, profileList, profileMessage);
+    let excludedProfileIds = [];
+    let primaryProfile = null;
+    let connectedProfiles = [];
+    const renderConnectedProfiles = () => {
+      profileList.replaceChildren();
+      const profiles = [
+        ...(primaryProfile ? [primaryProfile] : []),
+        ...connectedProfiles
+      ];
+      const collator = new Intl.Collator("es", {
+        numeric: true,
+        sensitivity: "base"
+      });
+      profiles.sort((left, right) =>
+        collator.compare(left.name, right.name) ||
+        left.profileId.localeCompare(right.profileId));
+      if (!profiles.length) {
+        profileMessage.textContent = "No hay perfiles secundarios conectados en este momento.";
+        return;
+      }
+      profileMessage.textContent = excludedProfileIds.some((profileId) =>
+        !profiles.some((profile) => profile.profileId === profileId))
+        ? "Las excepciones de perfiles desconectados también se conservan."
+        : "";
+      for (const profile of profiles) {
+        const excluded = excludedProfileIds.includes(profile.profileId);
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "active-bonus-profile-toggle";
+        toggle.textContent = profile.name;
+        toggle.title = profile.name;
+        toggle.setAttribute("aria-pressed", String(!excluded));
+        toggle.setAttribute(
+          "aria-label",
+          `${profile.name}, ${excluded ? "excluido del envío" : "incluido en el envío"}`
+        );
+        toggle.addEventListener("click", async () => {
+          const nextExcluded = new Set(excludedProfileIds);
+          if (excluded) nextExcluded.delete(profile.profileId);
+          else nextExcluded.add(profile.profileId);
+          profileMessage.dataset.state = "loading";
+          profileMessage.textContent = "Guardando excepción…";
+          for (const button of profileList.querySelectorAll("button")) {
+            button.disabled = true;
+          }
+          try {
+            const response = await chrome.runtime.sendMessage({
+              type: "BRIDGE_STATUS_EXCEPTIONS_SET",
+              profileIds: [...nextExcluded]
+            });
+            if (!response?.ok || !Array.isArray(response.excludedProfileIds)) {
+              throw new Error(response?.error || "No se pudieron guardar las excepciones.");
+            }
+            excludedProfileIds = response.excludedProfileIds;
+            renderConnectedProfiles();
+            if (response.warning) {
+              profileMessage.dataset.state = "error";
+              profileMessage.textContent = response.warning;
+            } else {
+              profileMessage.dataset.state = "";
+              profileMessage.textContent = "Excepciones guardadas.";
+            }
+          } catch (saveError) {
+            profileMessage.dataset.state = "error";
+            profileMessage.textContent =
+              saveError.message || "No se pudieron guardar las excepciones.";
+            for (const button of profileList.querySelectorAll("button")) {
+              button.disabled = false;
+            }
+          }
+        });
+        profileList.append(toggle);
+      }
+    };
+    const loadConnectedProfiles = async () => {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: "BRIDGE_STATUS_PROFILES_GET"
+        });
+        if (!response?.ok || !Array.isArray(response.profiles) ||
+          !Array.isArray(response.excludedProfileIds) ||
+          typeof response.primaryProfile?.profileId !== "string" ||
+          typeof response.primaryProfile?.name !== "string" ||
+          response.profiles.some((profile) =>
+            typeof profile?.profileId !== "string" ||
+            typeof profile.name !== "string")) {
+          throw new Error(response?.error || "No se pudieron consultar los perfiles secundarios.");
+        }
+        if (!profileExceptions.isConnected) return;
+        connectedProfiles = response.profiles;
+        primaryProfile = response.primaryProfile;
+        excludedProfileIds = response.excludedProfileIds;
+        profileMessage.dataset.state = "";
+        renderConnectedProfiles();
+      } catch (loadError) {
+        if (!profileExceptions.isConnected) return;
+        profileMessage.dataset.state = "error";
+        profileMessage.textContent =
+          loadError.message || "No se pudieron consultar los perfiles secundarios.";
+      }
+    };
     bonusPanel.append(formLayout);
+    bonusPanel.append(profileExceptions);
     settingsPanel.append(bonusSettings, outageSettings);
     dialog.append(tabs, bonusPanel, settingsPanel, error, actions);
     modal.append(dialog);
     root.append(modal);
+    void loadConnectedProfiles();
 
     dialog.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -4239,6 +4358,8 @@
     outageLabel.className = "platform-outage-label";
     outageLabel.setAttribute("role", "status");
     outageLabel.setAttribute("aria-live", "polite");
+    const analyticsIndicators = document.createElement("div");
+    analyticsIndicators.className = "active-bonus-analytics-indicators";
     const createIndicator = (name, label, paths) => {
       const isButton = name === "advertising" || name === "withdrawals";
       const indicator = document.createElement(isButton ? "button" : "span");
@@ -4266,8 +4387,7 @@
       indicator.append(indicatorIcon);
       return indicator;
     };
-    indicators.append(
-      outageLabel,
+    analyticsIndicators.append(
       createIndicator("withdrawals", "Retiros", [
         "M6 3h12v18H6z",
         "M9 8h6",
@@ -4281,9 +4401,14 @@
         "M20 9c1.2 1.7 1.2 4.3 0 6"
       ])
     );
+    indicators.append(outageLabel, analyticsIndicators);
     const settingsIndicators = document.createElement("span");
     settingsIndicators.className = "active-bonus-setting-indicators";
     settingsIndicators.append(
+      createIndicator("unread", "Marcar No Leídos", [
+        "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z",
+        "M9 12a3 3 0 1 0 6 0 3 3 0 0 0-6 0Z"
+      ]),
       createIndicator("copy", "Copiar Bono", [
         "M8 8V4a2 2 0 0 1 2-2h9l3 3v13a2 2 0 0 1-2 2h-4",
         "M3 8h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Z"

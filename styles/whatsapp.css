@@ -630,13 +630,19 @@
 .active-bonus-indicators {
   position: absolute;
   top: -108px;
-  left: 1px;
+  left: -7px;
   display: grid;
   justify-items: center;
   gap: 5px;
-  width: 36px;
+  width: 52px;
   color: #667270;
   pointer-events: none;
+}
+
+.active-bonus-analytics-indicators {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .platform-outage-label {
@@ -676,6 +682,14 @@
   pointer-events: auto;
 }
 
+.active-bonus-indicator--advertising:hover:not(:disabled),
+.active-bonus-indicator--advertising:active:not(:disabled),
+.active-bonus-indicator--withdrawals:hover:not(:disabled),
+.active-bonus-indicator--withdrawals:active:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+}
+
 .active-bonus-indicator--advertising:hover {
   color: #a3e4fa;
 }
@@ -699,15 +713,17 @@
 }
 
 .active-bonus-setting-indicators {
-  display: flex;
-  align-items: center;
-  gap: 7px;
+  display: grid;
+  grid-template-columns: repeat(2, 19px);
+  justify-items: center;
+  gap: 5px;
 }
 
 .active-bonus-indicator--copy,
-.active-bonus-indicator--invert {
-  width: 15px;
-  height: 15px;
+.active-bonus-indicator--invert,
+.active-bonus-indicator--unread {
+  width: 19px;
+  height: 19px;
 }
 
 .active-bonus-indicator svg {
@@ -726,6 +742,14 @@
 
 :host([data-invert-deposit-buttons="true"]) .active-bonus-indicator--invert {
   color: #f0a24a;
+}
+
+:host([data-mark-unread-after-status-update="true"]) .active-bonus-indicator--unread {
+  color: #ff6262;
+}
+
+.active-bonus-setting-indicators > .active-bonus-indicator--unread {
+  grid-column: 1 / -1;
 }
 
 :host([data-active-advertising="true"]) .active-bonus-indicator--advertising {
@@ -752,7 +776,6 @@
 .active-bonus-button svg {
   width: 25px;
   height: 25px;
-  transform: translateX(-1px);
   fill: none;
   stroke: var(--bonus-indicator-accent);
   stroke-linecap: round;
@@ -760,8 +783,13 @@
   stroke-width: 1.7;
 }
 
+.active-bonus-icon-gift {
+  transform: translateX(2px);
+}
+
 .active-bonus-icon-settings {
   display: none;
+  transform: translateX(2px);
 }
 
 :host([data-bonus-type="none"]) .active-bonus-icon-gift {
@@ -1017,6 +1045,57 @@
   margin-top: 12px;
 }
 
+.active-bonus-profile-exceptions {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.active-bonus-profile-label,
+.active-bonus-profile-message {
+  color: #aab6b5;
+  font-size: 12px;
+}
+
+.active-bonus-profile-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.active-bonus-profile-toggle {
+  min-width: 0;
+  min-height: 34px;
+  padding: 5px 10px;
+  border-color: #465453;
+  color: #c1ccca;
+  background: #273332;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.active-bonus-profile-toggle[aria-pressed="true"] {
+  border-color: #168461;
+  color: #f2f7f4;
+  background: #167356;
+  box-shadow: inset 0 2px 5px #09271e99;
+}
+
+.active-bonus-profile-toggle[aria-pressed="true"]:hover:not(:disabled) {
+  background: #1c8966;
+}
+
+.active-bonus-profile-toggle[aria-pressed="false"]:hover:not(:disabled) {
+  background: #344241;
+}
+
+.active-bonus-profile-message[data-state="error"] {
+  color: #ff8a8a;
+}
+
 .active-bonus-type-selector {
   display: grid;
   align-content: start;
@@ -1199,6 +1278,7 @@
   align-items: center;
   min-width: 0;
   min-height: 50px;
+  margin-bottom: 10px;
   padding: 0 13px;
   border: 2px solid #36bce8;
   border-radius: 7px;
@@ -1279,6 +1359,10 @@
 
 .active-bonus-dialog .active-bonus-setting-toggle--invert {
   border: 2px solid #e59a45;
+}
+
+.active-bonus-dialog .active-bonus-setting-toggle--unread {
+  border: 2px solid #ff4545;
 }
 
 .active-bonus-setting-toggle > span:last-child {
@@ -1853,6 +1937,7 @@
 
 .deposit-action-group {
   display: flex;
+  flex-wrap: nowrap;
   min-width: 0;
   align-items: stretch;
   gap: 5px;
@@ -1926,6 +2011,10 @@
 .deposit-action-group > [data-action="deposit"] {
   flex: 1 1 0;
   min-width: 0;
+}
+
+.deposit-action-group > .deposit-advertising-button {
+  flex-shrink: 0;
 }
 
 .withdrawal-action-group {
