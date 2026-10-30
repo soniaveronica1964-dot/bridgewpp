@@ -1002,12 +1002,20 @@
   border-bottom: 1px solid var(--bonus-border);
 }
 
+.movement-history-dialog .active-bonus-tabs {
+  border-bottom-color: #40504e;
+}
+
+.movement-history-dialog .active-bonus-tab {
+  border-radius: 999px;
+}
+
 .active-bonus-tab {
   min-width: 0;
   min-height: 36px;
   padding: 6px 8px;
   border: 1px solid #344546;
-  border-radius: 6px;
+  border-radius: 999px;
   color: #cbd4d2;
   background: #202d2d;
   font-size: 12px;
@@ -1147,7 +1155,7 @@
   margin: 0;
   padding: 12px;
   border: 1px solid var(--bonus-border);
-  border-radius: 7px;
+  border-radius: 12px;
   color: #cbd4d2;
   background: var(--bonus-surface);
   line-height: 1.5;
@@ -1184,7 +1192,7 @@
   min-height: 38px;
   padding: 0 10px;
   border: 1px solid var(--bonus-border);
-  border-radius: 6px;
+  border-radius: 12px;
   color: #e2e8e7;
   background: #182323;
   font: inherit;
@@ -1254,7 +1262,7 @@
   min-height: 36px;
   padding: 7px 10px;
   border: 1px solid #596966;
-  border-radius: 6px;
+  border-radius: 999px;
   color: #d6dfdc;
   background: #263432;
   font-size: 12px;
@@ -1286,7 +1294,7 @@
   margin-bottom: 10px;
   padding: 0 13px;
   border: 2px solid #36bce8;
-  border-radius: 7px;
+  border-radius: 12px;
   background: #202d2d;
 }
 
@@ -1345,7 +1353,7 @@
   margin: 0;
   padding: 9px 13px;
   border: 1px solid #344546;
-  border-radius: 7px;
+  border-radius: 12px;
   color: #d7dfdd;
   background: #202d2d;
   font-size: 13px;
@@ -1391,7 +1399,7 @@
   width: 42px;
   height: 22px;
   border: 1px solid #53615f;
-  border-radius: 10px;
+  border-radius: 999px;
   background: #272b2b;
   transition: background-color 120ms ease, border-color 120ms ease;
 }
@@ -2153,7 +2161,7 @@
   margin-top: 4px;
   padding: 8px 10px;
   border: 1px solid #53615f;
-  border-radius: 7px;
+  border-radius: 12px;
   color: #e2e8e7;
   background: #182323;
   font: inherit;
@@ -2505,6 +2513,22 @@ button[data-action="withdrawal"].recent-withdrawal:hover:not(:disabled) {
   background: #303333;
 }
 
+.panel .actions > .deposit-action-group > [data-action="deposit"],
+.panel .actions > .withdrawal-action-group > [data-action="withdrawal"] {
+  border-radius: 999px;
+}
+
+.panel > .user-information-button,
+.panel > .exchange-button,
+.panel > .reschedule-button,
+.panel > .password-reset-button,
+.panel .actions .create-user-button:not([data-mode="full"]),
+.panel .actions .deposit-bonus-bypass,
+.panel .actions .deposit-advertising-button,
+.panel .actions .untracked-withdrawal-button {
+  border-radius: 50%;
+}
+
 button.secondary {
   color: #aab6b5;
   border-color: #344546;
@@ -2702,6 +2726,18 @@ button:disabled {
   --bonus-button-hover: #687773;
   width: min(520px, 100%);
   border-color: #ffffff;
+  border-radius: 16px;
+}
+
+.movement-history-dialog button {
+  border-radius: 999px;
+}
+
+.movement-history-dialog .movement-history-close,
+.movement-history-dialog .movement-history-delete,
+.movement-history-dialog .movement-history-edit,
+.movement-history-dialog .movement-history-confirm {
+  border-radius: 50%;
 }
 
 .movement-history-dialog[data-settings-active="true"] {
@@ -2726,6 +2762,15 @@ button:disabled {
   scrollbar-gutter: stable;
 }
 
+.movement-history-dialog[data-settings-active="true"] .movement-history-settings-panel {
+  margin-top: 8px;
+}
+
+.movement-history-settings-panel {
+  display: grid;
+  gap: 12px;
+}
+
 .movement-history-heading,
 .movement-history-summary {
   display: flex;
@@ -2735,7 +2780,7 @@ button:disabled {
 }
 
 .movement-history-heading {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .movement-history-heading h2 {
@@ -2745,7 +2790,7 @@ button:disabled {
 .movement-history-settings-heading {
   margin: 0;
   color: #d8e0de;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .movement-history-setting-emoji {
@@ -2754,18 +2799,18 @@ button:disabled {
 
 .movement-history-settings-section {
   display: grid;
-  gap: 7px;
-  padding: 9px 0;
-  border-bottom: 1px solid #344546;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #344546;
+  border-radius: 12px;
+  background: #182323;
 }
 
-.movement-history-settings-section:first-child {
-  padding-top: 0;
-}
-
-.movement-history-settings-section:last-child {
-  padding-bottom: 0;
-  border-bottom: 0;
+.movement-history-settings-panel .active-bonus-setting-toggle {
+  min-height: 40px;
+  gap: 8px;
+  padding: 6px 9px;
+  font-size: 12px;
 }
 
 .movement-history-contact-tag-options {
@@ -2810,7 +2855,7 @@ button:disabled {
   margin-top: 4px;
   padding: 6px 8px;
   border: 1px solid #40504e;
-  border-radius: 6px;
+  border-radius: 12px;
   color: #e7edef;
   background: #182323;
   font: inherit;
@@ -2821,10 +2866,10 @@ button:disabled {
   display: block;
   width: 100%;
   min-width: 0;
-  min-height: 54px;
+  min-height: 46px;
   padding: 8px;
   border: 1px solid #40504e;
-  border-radius: 6px;
+  border-radius: 12px;
   color: #e7edef;
   background: #182323;
   font: inherit;
@@ -2856,7 +2901,7 @@ button:disabled {
   margin-top: 4px;
   padding: 8px 11px 8px 29px;
   border: 1px solid #167356;
-  border-radius: 7px;
+  border-radius: 12px;
   color: #e7edef;
   background: #1b2727;
   font-family: Arial, Helvetica, sans-serif;
@@ -2968,7 +3013,7 @@ button:disabled {
   min-height: 28px;
   padding: 3px 7px;
   border: 1px solid #344746;
-  border-radius: 7px;
+  border-radius: 11px;
   background: #172222;
 }
 
@@ -4252,34 +4297,34 @@ input::placeholder {
 .pending-withdrawals-panel {
   display: grid;
   gap: 5px;
-  padding: 6px;
-  border: 1px solid #ba3440;
-  border-radius: 8px;
-  background: #291719;
-  box-shadow: 0 3px 12px rgb(0 0 0 / 35%);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .pending-withdrawals-toggle {
   width: 100%;
   min-height: 34px;
   padding: 7px 10px;
-  border: 1px solid #c53b48;
-  border-radius: 6px;
+  border: 1px solid #7d343a;
+  border-radius: 999px;
   color: #ff858d;
-  background: #641d25;
+  background: #3a2022;
   font-size: 13px;
   font-weight: 700;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
 .pending-withdrawals-toggle:hover {
-  background: #79232d;
+  border-color: #a64a52;
+  background: #482528;
 }
 
 .pending-withdrawals-toggle:focus-visible,
 .pending-withdrawals-complete:focus-visible {
-  outline: 2px solid #ff858d;
+  outline: 2px solid #21c063;
   outline-offset: 2px;
 }
 
@@ -4299,8 +4344,9 @@ input::placeholder {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  padding: 5px 6px;
-  border-radius: 5px;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid #4a2b2e;
+  border-radius: 999px;
   background: #3b2023;
 }
 
@@ -4337,7 +4383,7 @@ input::placeholder {
   height: 28px;
   padding: 4px;
   border: 1px solid #427d5c;
-  border-radius: 5px;
+  border-radius: 50%;
   color: #a7f3c2;
   background: #1e4931;
   cursor: pointer;
@@ -4366,9 +4412,9 @@ input::placeholder {
   display: grid;
   gap: 7px;
   padding: 7px;
-  border: 1px solid #4b9b61;
-  border-radius: 8px;
-  background: #15291b;
+  border: 1px solid #303232;
+  border-radius: 12px;
+  background: #161717;
   box-shadow: 0 3px 12px rgb(0 0 0 / 35%);
 }
 
@@ -4382,7 +4428,7 @@ input::placeholder {
 }
 
 .top-user-balances-title {
-  color: #d4e6d9;
+  color: #e9edef;
   font-size: 13px;
   font-weight: 700;
 }
@@ -4400,10 +4446,10 @@ input::placeholder {
   width: 30px;
   height: 30px;
   padding: 0;
-  border: 1px solid #59ad70;
-  border-radius: 6px;
-  color: #edfff1;
-  background: #287044;
+  border: 0;
+  border-radius: 50%;
+  color: #e9edef;
+  background: #252727;
   font-size: 21px;
   font-weight: 700;
   line-height: 1;
@@ -4417,10 +4463,10 @@ input::placeholder {
   width: 30px;
   height: 30px;
   padding: 0;
-  border: 1px solid #59ad70;
-  border-radius: 6px;
-  color: #edfff1;
-  background: #287044;
+  border: 0;
+  border-radius: 50%;
+  color: #e9edef;
+  background: #252727;
   line-height: 1;
   cursor: pointer;
 }
@@ -4441,29 +4487,29 @@ input::placeholder {
 }
 
 .top-user-balances-withdrawal-filter:hover {
-  background: #348b50;
+  background: #343737;
 }
 
 .top-user-balances-withdrawal-filter:focus-visible {
-  outline: 2px solid #9de0b0;
+  outline: 2px solid #21c063;
   outline-offset: 2px;
 }
 
 .top-user-balances-withdrawal-filter.is-active {
-  border-color: #ff777d;
-  background: #78343a;
+  color: #111b21;
+  background: #21c063;
 }
 
 .top-user-balances-withdrawal-filter.is-active:hover {
-  background: #914149;
+  background: #36d375;
 }
 
 .top-user-balances-refresh:hover:not(:disabled) {
-  background: #348b50;
+  background: #343737;
 }
 
 .top-user-balances-refresh:focus-visible {
-  outline: 2px solid #9de0b0;
+  outline: 2px solid #21c063;
   outline-offset: 2px;
 }
 
@@ -4489,10 +4535,10 @@ input::placeholder {
   width: 30px;
   height: 30px;
   padding: 0;
-  border: 1px solid #59ad70;
-  border-radius: 6px;
-  color: #edfff1;
-  background: #287044;
+  border: 0;
+  border-radius: 50%;
+  color: #e9edef;
+  background: #252727;
   font-size: 19px;
   font-weight: 700;
   line-height: 1;
@@ -4500,16 +4546,23 @@ input::placeholder {
 }
 
 .top-user-balances-toggle:hover {
-  background: #348b50;
+  background: #343737;
 }
 
 .top-user-balances-toggle:focus-visible {
-  outline: 2px solid #9de0b0;
+  outline: 2px solid #21c063;
   outline-offset: 2px;
 }
 
 .top-user-balances-panel.is-minimized {
-  padding: 5px;
+  box-sizing: border-box;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
 }
 
 .top-user-balances-panel.is-minimized .top-user-balances-header {
@@ -4531,12 +4584,21 @@ input::placeholder {
 
 .top-user-balances-panel.is-minimized .top-user-balances-toggle {
   box-sizing: border-box;
-  flex: 0 0 32px;
-  width: 32px;
-  min-width: 32px;
-  height: 32px;
-  min-height: 32px;
-  font-size: 18px;
+  flex: 0 0 40px;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  border: 0;
+  border-radius: 50%;
+  color: #0c2e1b;
+  background: #21c063;
+  font-size: 21px;
+}
+
+.top-user-balances-panel.is-minimized .top-user-balances-toggle:hover {
+  border-color: #21c063;
+  background: #36d375;
 }
 
 .top-user-balances-content {
@@ -4553,8 +4615,9 @@ input::placeholder {
   gap: 4px;
   min-width: 0;
   padding: 6px;
-  border-radius: 6px;
-  background: #1a3522;
+  border: 1px solid #303232;
+  border-radius: 8px;
+  background: #1d1f1f;
 }
 
 .top-user-balances-platform-title {
@@ -4588,8 +4651,9 @@ input::placeholder {
   gap: 7px;
   min-width: 0;
   padding: 5px 6px;
-  border-radius: 5px;
-  background: #254a30;
+  border: 1px solid #343737;
+  border-radius: 6px;
+  background: #292b2b;
 }
 
 .top-user-balances-values {
@@ -4604,7 +4668,7 @@ input::placeholder {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: #e3eee6;
+  color: #e9edef;
   font-size: 12px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -4613,7 +4677,7 @@ input::placeholder {
 
 .top-user-balances-balance {
   min-width: 0;
-  color: #d3f5db;
+  color: #d1f4dd;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   font-weight: 700;
@@ -4624,7 +4688,7 @@ input::placeholder {
 .top-user-balances-withdrawal {
   min-width: 0;
   padding-left: 8px;
-  border-left: 1px solid #587362;
+  border-left: 1px solid #454848;
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
@@ -4652,4 +4716,14 @@ input::placeholder {
 .top-user-balances-error {
   color: #ff9a9f;
   overflow-wrap: anywhere;
+}
+
+button {
+  border-radius: 999px;
+}
+
+input,
+select,
+textarea {
+  border-radius: 999px;
 }

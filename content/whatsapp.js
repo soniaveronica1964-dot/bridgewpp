@@ -4226,7 +4226,7 @@
       ["simple", "Simple"],
       ["double", "Doble"],
       ["specific", "Específico"],
-      ["special", "Especial (+$10K)"],
+      ["special", "Especial +$10K"],
       ["mysterious", "Misterioso"]
     ];
     let selectedBonusType = savedConfig?.type || "simple";
@@ -5788,7 +5788,7 @@
     const userAccounts = Object.entries(platformUsernames)
       .filter(([, username]) => username);
     const defaultPlatform = host.dataset.defaultPlatform || "ganamos";
-    title.textContent = `Movimientos ${platformUsernames[defaultPlatform] || ""}`.trim();
+    title.textContent = platformUsernames[defaultPlatform] || "Chat";
     let storedMovements = [];
     let savedWithdrawalLimit = DEFAULT_WITHDRAWAL_LIMIT;
     let savedRelatedContacts = "";
@@ -6184,7 +6184,7 @@
     const renderMovements = () => {
       const selectedPlatform = platformSelect.value;
       const titlePlatform = selectedPlatform === "all" ? defaultPlatform : selectedPlatform;
-      title.textContent = `Movimientos ${platformUsernames[titlePlatform] || ""}`.trim();
+      title.textContent = platformUsernames[titlePlatform] || "Chat";
       const filtered = storedMovements.filter((movement) =>
         (selectedPlatform === "all" || movement.platform === selectedPlatform ||
           (movement.operation === "exchange" &&

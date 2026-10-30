@@ -1372,7 +1372,7 @@
       *, *::before, *::after { font-family: Arial, Helvetica, sans-serif; font-style: normal; }
       :host { font-size: 14px; line-height: 1.45; color: #e2e8e7; }
       button, input { font-family: inherit; font-size: inherit; line-height: inherit; }
-      button { box-sizing: border-box; flex: 0 1 auto; min-width: 86px; min-height: 34px; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; color: #f2f4f3; background: #344546; font-weight: 600; cursor: pointer; transition: background .15s ease, border-color .15s ease, transform .15s ease; }
+      button { box-sizing: border-box; flex: 0 1 auto; min-width: 86px; min-height: 34px; padding: 0 10px; border: 1px solid transparent; border-radius: 999px; color: #f2f4f3; background: #344546; font-weight: 600; cursor: pointer; transition: background .15s ease, border-color .15s ease, transform .15s ease; }
       button:hover:not(:disabled) { background: #405455; }
       button:active:not(:disabled) { transform: translateY(1px); }
       button:focus-visible, input:focus-visible { outline: 2px solid #00a884; outline-offset: 2px; }
@@ -1400,11 +1400,10 @@
       .detection[data-bonus-type="mysterious"] { color: #ff79b0; }
       .exceptions { display: grid; gap: 6px; }
       .exceptions-label, .profile-message { color: #aab6b5; font-size: 12px; }
-      .profile-list { display: flex; flex-wrap: wrap; gap: 6px; }
-      .profile-toggle { min-width: 0; min-height: 38px; padding: 5px 12px; color: #f2f7f4; border-color: #167356; background: #1b2727; font-size: 15px; font-weight: 600; }
-      .profile-toggle[aria-pressed="true"] { border-color: #168461; background: #167356; box-shadow: inset 0 2px 5px #09271e99; transform: translateY(1px); }
+      .profile-list { display: flex; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow-y: auto; }
+      .profile-toggle { flex: 1 1 auto; min-width: 0; min-height: 34px; padding: 5px 10px; border-color: #465453; color: #c1ccca; background: #273332; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+      .profile-toggle[aria-pressed="true"] { border-color: #168461; color: #f2f7f4; background: #167356; box-shadow: inset 0 2px 5px #09271e99; }
       .profile-toggle[aria-pressed="true"]:hover:not(:disabled) { background: #1c8966; }
-      .profile-toggle[aria-pressed="false"] { color: #c1ccca; border-color: #465453; background: #273332; box-shadow: 0 2px 3px #0005; }
       .profile-toggle[aria-pressed="false"]:hover:not(:disabled) { background: #344241; }
       .profile-message[data-state="error"] { color: #ff8a8a; }
       .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; padding-top: 14px; border-top: 1px solid #344746; }
@@ -1416,7 +1415,9 @@
       .replace { grid-column: 1 / -1; color: #f2f7f4; background: #167356; }
       .replace:hover:not(:disabled) { background: #1c8966; }
       .close { grid-column: 1 / -1; }
-      input[type="file"] { box-sizing: border-box; width: 100%; min-height: 40px; padding: 8px 11px; border: 1px solid #167356; border-radius: 7px; color: #e7edef; background: #1b2727; font-size: 15px; line-height: 1.4; }
+      input[type="file"] { box-sizing: border-box; width: 100%; min-height: 40px; padding: 6px 9px; border: 1px solid #167356; border-radius: 12px; color: #e7edef; background: #1b2727; font-size: 15px; line-height: 1.4; }
+      input[type="file"]::file-selector-button { margin-right: 8px; padding: 4px 10px; border: 1px solid #344546; border-radius: 999px; color: #e7edef; background: #273535; font: inherit; cursor: pointer; }
+      input[type="file"]::file-selector-button:hover { background: #344546; }
     `;
     const openButton = document.createElement("button");
     openButton.type = "button";
