@@ -1733,84 +1733,124 @@
       progressDismissed = false;
       updateProgress(localProgress);
       try {
-        const id = crypto.randomUUID();
-        const publishPromise = (async () => {
-          const image = file ? await fileToBase64(file) : undefined;
-          return chrome.runtime.sendMessage({
-            type: "BRIDGE_STATUS_UPDATE_PUBLISH",
-            id,
-            action,
-            ...(image ? { image } : {})
-          });
-        })();
-        const [publishResult] = await Promise.allSettled([publishPromise]);
-        const receipt = publishResult.status === "fulfilled" ? publishResult.value : null;
-        if (!receipt?.ok) {
-          const error = receipt?.error || publishResult.reason?.message ||
-            "el puente no confirmó la acción solicitada.";
-          status.textContent = `Operación no ejecutada: no se pudo confirmar con el puente (${error}).`;
-          localProgress += `\n${status.textContent}`;
+        const image = file ? await fileToBase64(file) : undefined;
+        const collator = new Intl.Collator("es", {
+          numeric: true,
+          sensitivity: "base"
+        });
+        const activeProfiles = [
+          ...(primaryProfile ? [{ ...primaryProfile, role: "Principal" }] : []),
+          ...connectedProfiles.map((profile) => ({ ...profile, role: "Secundario" }))
+        ]
+          .filter((profile) => !excludedProfileIds.includes(profile.profileId))
+          .sort((left, right) =>
+            collator.compare(left.name, right.name) ||
+            left.profileId.localeCompare(right.profileId));
+        const midpoint = Math.ceil(activeProfiles.length / 2);
+        const passes = [
+          activeProfiles.slice(0, midpoint),
+          activeProfiles.slice(midpoint)
+        ].filter((profiles) => profiles.length);
+        const passSummaries = [];
+        if (!activeProfiles.length) {
+          passSummaries.push("No hay perfiles incluidos para cambiar el estado.");
+        }
+
+        for (const [index, profiles] of passes.entries()) {
+          const passLabel = `Pasada ${index + 1} de ${passes.length} (${profiles.length} perfiles)`;
+          const secondaryProfileIds = profiles
+            .filter((profile) => profile.role === "Secundario")
+            .map((profile) => profile.profileId);
+          localProgress = `${passLabel}: iniciando…`;
           updateProgress(localProgress);
-        } else if (receipt.action !== action) {
-          status.textContent = "Operación no ejecutada: el puente confirmó una acción diferente. Reiniciá el puente local antes de volver a intentarlo.";
-          localProgress += `\n${status.textContent}`;
-          updateProgress(localProgress);
-        } else {
-          const targets = receipt.targets;
-          localProgress += `\nSecundarios conectados: ${targets.length}.`;
-          updateProgress(localProgress);
-          const localPromise = (async () => {
-            if (!primaryProfile || excludedProfileIds.includes(primaryProfile.profileId)) {
-              return `Perfil principal: excluido; no se ${action === "delete" ? "borró" : "publicó"} el estado.`;
+
+          let targets = [];
+          let id;
+          if (secondaryProfileIds.length) {
+            id = crypto.randomUUID();
+            let receipt;
+            try {
+              receipt = await chrome.runtime.sendMessage({
+                type: "BRIDGE_STATUS_UPDATE_PUBLISH",
+                id,
+                action,
+                targetProfileIds: secondaryProfileIds,
+                ...(image ? { image } : {})
+              });
+            } catch (error) {
+              passSummaries.push(
+                `${passLabel}: no se pudo iniciar en los perfiles secundarios (${error.message || "error de comunicación."}).`
+              );
+              break;
             }
-            return runStatusOperation(action, file, (stage) => {
-              localProgress = `Perfil principal: ${stage}.`;
-              updateProgress(localProgress);
-            }).then((result) => {
-              const label = action === "delete"
-                ? "estado borrado"
-                : action === "upload"
-                  ? "estado subido"
-                  : "estado reemplazado";
-              return `Perfil principal: ${label}.${result.navigationWarning
-                ? `\nNo se pudo volver a Chats: ${result.navigationWarning}`
-                : ""}`;
-            });
-          })();
-          const secondaryPromise = collectSecondaryResults(id, targets, (results, pendingCount) => {
-            const succeeded = results.filter((result) => result.ok).length;
-            const failed = results.filter((result) => !result.ok);
-            const verb = action === "delete" ? "borrados" : "publicados";
-            updateProgress(`${localProgress}\nSecundarios: ${succeeded} ${verb}, ${failed.length} con error, ${pendingCount} pendientes.`);
-          }).then(
-            (summary) => ({ summary }),
-            (error) => ({ error })
-          );
+            if (!receipt?.ok || receipt.action !== action || !Array.isArray(receipt.targets)) {
+              passSummaries.push(
+                `${passLabel}: no se pudo confirmar con el puente (${receipt?.error || "confirmación no válida"}).`
+              );
+              break;
+            }
+            targets = receipt.targets;
+          }
+
+          const localProfileIncluded = profiles.some((profile) =>
+            profile.profileId === primaryProfile?.profileId);
+          const localPromise = localProfileIncluded
+            ? runStatusOperation(action, file, (stage) => {
+                localProgress = `${passLabel} — Perfil principal: ${stage}.`;
+                updateProgress(localProgress);
+              }).then((result) => ({
+                text: `Perfil principal: ${action === "delete"
+                  ? "estado borrado"
+                  : action === "upload"
+                    ? "estado subido"
+                    : "estado reemplazado"}.${result.navigationWarning
+                  ? `\nNo se pudo volver a Chats: ${result.navigationWarning}`
+                  : ""}`
+              }), (error) => ({
+                text: `Perfil principal: error: ${error.message || "no se pudo cambiar el estado."}`
+              }))
+            : Promise.resolve({ text: "" });
+          const secondaryPromise = id
+            ? collectSecondaryResults(id, targets, (results, pendingCount) => {
+                const succeeded = results.filter((result) => result.ok).length;
+                const failed = results.filter((result) => !result.ok);
+                const verb = action === "delete" ? "borrados" : "publicados";
+                updateProgress(
+                  `${localProgress}\n${passLabel} — Secundarios: ${succeeded} ${verb}, ${failed.length} con error, ${pendingCount} pendientes.`
+                );
+              }).then((summary) => ({ summary }), (error) => ({ error }))
+            : Promise.resolve(null);
           const [localResult, secondaryResult] = await Promise.all([
-            Promise.allSettled([localPromise]),
+            localPromise,
             secondaryPromise
           ]);
-          const local = localResult[0].status === "fulfilled"
-            ? localResult[0].value
-            : `Perfil principal: error: ${localResult[0].reason?.message || "no se pudo cambiar el estado."}`;
-          let secondary = "";
-          if (secondaryResult.error) {
-            secondary = `\nNo se pudieron obtener los resultados secundarios: ${secondaryResult.error.message || "error de comunicación."}`;
-          } else {
+          let passSummary = localResult.text;
+          if (secondaryResult?.error) {
+            passSummary += `${passSummary ? "\n" : ""}${passLabel} — No se pudieron obtener los resultados secundarios: ${secondaryResult.error.message || "error de comunicación."}`;
+            passSummaries.push(passSummary);
+            break;
+          } else if (secondaryResult?.summary) {
             const { summary } = secondaryResult;
             const succeeded = summary.results.filter((result) => result.ok).length;
             const failures = summary.results
               .filter((result) => !result.ok)
-              .map((result) => `Perfil ${result.profileId.slice(0, 8)}: ${result.error || "falló"}`);
+              .map((result) =>
+                `Perfil ${result.profileId.slice(0, 8)}: ${result.error || "falló"}`);
             if (summary.pending.length) {
               failures.push(...summary.pending.map((profileId) =>
                 `Perfil ${profileId.slice(0, 8)}: no respondió a tiempo`));
             }
             const verb = action === "delete" ? "borrados" : "publicados";
-            secondary = `\nSecundarios: ${succeeded} ${verb}, ${failures.length} con error.${failures.length ? `\n${failures.join("\n")}` : ""}`;
+            passSummary += `${passSummary ? "\n" : ""}${passLabel} — Secundarios: ${succeeded} ${verb}, ${failures.length} con error.${failures.length ? `\n${failures.join("\n")}` : ""}`;
           }
-          status.textContent = `${local}${secondary}`;
+          passSummaries.push(passSummary || `${passLabel}: terminado.`);
         }
+        if (primaryProfile && excludedProfileIds.includes(primaryProfile.profileId)) {
+          passSummaries.unshift(
+            `Perfil principal: excluido; no se ${action === "delete" ? "borró" : "publicó"} el estado.`
+          );
+        }
+        status.textContent = passSummaries.join("\n");
       } catch (error) {
         status.textContent = `No se pudo iniciar la operación (${actionLabel.toLowerCase()}): ${error.message || "error desconocido."}`;
       } finally {

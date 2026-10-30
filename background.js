@@ -1833,6 +1833,8 @@ async function publishStatusUpdate(message) {
   const needsImage = action !== "delete";
   if (typeof message.id !== "string" || !/^[0-9a-f-]{36}$/i.test(message.id) ||
     !["delete", "upload", "replace"].includes(action) ||
+    message.targetProfileIds !== undefined &&
+      !isValidBridgeProfileIds(message.targetProfileIds) ||
     needsImage && (typeof message.image !== "string" ||
       message.image.length > Math.ceil((10 * 1024 * 1024) / 3) * 4) ||
     !needsImage && message.image !== undefined) {
@@ -1846,7 +1848,10 @@ async function publishStatusUpdate(message) {
       id: message.id,
       action,
       ...(needsImage ? { image: message.image } : {}),
-      excludedProfileIds
+      excludedProfileIds,
+      ...(message.targetProfileIds === undefined
+        ? {}
+        : { targetProfileIds: message.targetProfileIds })
     }
   });
   if (!receipt?.ok || receipt.id !== message.id || receipt.action !== action ||

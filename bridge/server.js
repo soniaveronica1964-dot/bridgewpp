@@ -548,6 +548,8 @@ async function handleRequest(request, response) {
       !needsImage && body.image !== undefined ||
       (Object.hasOwn(body || {}, "excludedProfileIds") &&
         !validateProfileIds(body.excludedProfileIds)) ||
+      (Object.hasOwn(body || {}, "targetProfileIds") &&
+        !validateProfileIds(body.targetProfileIds)) ||
       statusUpdateJobs.has(body.id)) {
       sendJson(response, 400, { ok: false, error: "La solicitud de cambio de estado no es válida." }, origin);
       return;
@@ -572,9 +574,12 @@ async function handleRequest(request, response) {
       }
     }
     const excludedProfileIds = body.excludedProfileIds || [];
+    const targetProfileIds = body.targetProfileIds;
     const targets = getConnectedStatusProfileIds()
       .map(({ profileId }) => profileId)
-      .filter((profileId) => !excludedProfileIds.includes(profileId));
+      .filter((profileId) =>
+        !excludedProfileIds.includes(profileId) &&
+        (targetProfileIds === undefined || targetProfileIds.includes(profileId)));
     const job = {
       id: body.id,
       targets,
