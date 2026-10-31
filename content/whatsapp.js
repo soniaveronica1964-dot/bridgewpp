@@ -23,6 +23,7 @@
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
   const MARK_UNREAD_AFTER_STATUS_UPDATE_KEY = "markUnreadAfterStatusUpdate";
   const UNREAD_FILTER_REFRESH_DELAY_MS = 1000;
+  const ARCHIVED_UNREAD_COUNT_REFRESH_INTERVAL_MS = 15_000;
   const PENDING_WITHDRAWALS_KEY = "pendingWithdrawals";
   const TOP_USER_WITHDRAWAL_WINDOW_MS = 24 * 60 * 60 * 1000;
   const PENDING_WITHDRAWAL_MESSAGE_MAX_AGE_MS = 60_000;
@@ -446,8 +447,8 @@
     ].join(";");
     const allButton = createChatFilterButton("Todos", "all-filter");
     const unreadButton = createChatFilterButton("No leídos", "label_item_1");
-    allButton.style.borderRadius = "6px 0 0 6px";
-    unreadButton.style.borderRadius = "0 6px 6px 0";
+    allButton.style.borderRadius = "16px 0 0 16px";
+    unreadButton.style.borderRadius = "0 16px 16px 0";
     unreadButton.style.borderLeftWidth = "0";
     replacement.append(allButton, unreadButton);
     replacement.filterButtons = {
@@ -10929,6 +10930,65 @@
     }), UNREAD_FILTER_REFRESH_DELAY_MS);
   }
 
+  function refreshArchivedUnreadCount() {
+    if (unreadFilterRefreshInProgress || isArchivedChatsViewOpen() ||
+      isNormalChatCurrentlyOpen() ||
+      !document.getElementById(ARCHIVED_CHAT_BUTTON_CLONE_ID)) return;
+
+    const nativeBar = document.querySelector('[aria-label="chat-list-filters"]');
+    const allFilter = nativeBar?.querySelector("#all-filter");
+    const unreadFilter = nativeBar?.querySelector("#label_item_1");
+    if (!allFilter || !unreadFilter ||
+      unreadFilter.getAttribute("aria-selected") !== "true") return;
+
+    const archivedLifecycleVersion = archivedViewLifecycleVersion;
+    const chatLifecycleVersionAtStart = chatLifecycleVersion;
+    unreadFilterRefreshInProgress = true;
+    const finish = () => {
+      unreadFilterRefreshInProgress = false;
+    };
+    const canContinue = () =>
+      archivedLifecycleVersion === archivedViewLifecycleVersion &&
+      chatLifecycleVersionAtStart === chatLifecycleVersion &&
+      !isArchivedChatsViewOpen() &&
+      !isNormalChatCurrentlyOpen();
+
+    allFilter.click();
+    let attempts = 0;
+    const selectUnreadFilter = () => {
+      if (!canContinue()) {
+        finish();
+        return;
+      }
+
+      if (allFilter.getAttribute("aria-selected") === "true") {
+        hideChatFilters();
+        unreadFilter.click();
+        window.requestAnimationFrame(() => {
+          if (canContinue() &&
+            unreadFilter.getAttribute("aria-selected") !== "true") {
+            console.error(
+              "[Ganamos balance extension] No se pudo actualizar el contador de Archivados en «No leídos»."
+            );
+          }
+          finish();
+        });
+        return;
+      }
+
+      attempts += 1;
+      if (attempts >= 10) {
+        console.error(
+          "[Ganamos balance extension] WhatsApp no activó el filtro «Todos» para actualizar el contador de Archivados."
+        );
+        finish();
+        return;
+      }
+      window.requestAnimationFrame(selectUnreadFilter);
+    };
+    window.requestAnimationFrame(selectUnreadFilter);
+  }
+
   function selectUnreadFilterAfterLeavingArchivedView(lifecycleVersion) {
     if (unreadFilterRefreshInProgress) return;
     unreadFilterRefreshInProgress = true;
@@ -11125,6 +11185,9 @@
   void refreshAgentBalance(agentBalanceHost);
   void refreshMultiPanelAgentBalance(agentBalanceHost);
   void loadContactVisualTags();
+  window.setInterval(() => {
+    refreshArchivedUnreadCount();
+  }, ARCHIVED_UNREAD_COUNT_REFRESH_INTERVAL_MS);
   window.setInterval(() => {
     void refreshAgentBalance(agentBalanceHost);
     void refreshMultiPanelAgentBalance(agentBalanceHost);
