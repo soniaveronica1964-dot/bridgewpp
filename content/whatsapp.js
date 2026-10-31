@@ -5,7 +5,8 @@
   const PENDING_WITHDRAWALS_HOST_ID = "ganamos-pending-withdrawals";
   const TOP_USER_BALANCES_HOST_ID = "ganamos-top-user-balances";
   const ACTIVE_BONUS_HOST_ID = "ganamos-active-bonus";
-  const CHAT_FILTER_HIDDEN_ATTRIBUTE = "data-bridgewpp-chat-filter-hidden";
+  const CHAT_FILTER_REPLACEMENT_ID = "bridgewpp-chat-filter-replacement";
+  const ARCHIVED_CHAT_BUTTON_CLONE_ID = "bridgewpp-archived-chat-button";
   const ACTIVE_BONUS_CONFIG_KEY = "activeBonusConfig";
   const PLATFORM_OUTAGE_CONFIG_KEY = "platformOutageConfig";
   const SPORT_BETS_DISABLED_USERS_KEY = "sportBetsDisabledUsers";
@@ -20,6 +21,8 @@
   const PROFILE_ID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const CONTACT_FLOW_COUNTERS_KEY = "contactFlowCounters";
+  const MARK_UNREAD_AFTER_STATUS_UPDATE_KEY = "markUnreadAfterStatusUpdate";
+  const UNREAD_FILTER_REFRESH_DELAY_MS = 1000;
   const PENDING_WITHDRAWALS_KEY = "pendingWithdrawals";
   const TOP_USER_WITHDRAWAL_WINDOW_MS = 24 * 60 * 60 * 1000;
   const PENDING_WITHDRAWAL_MESSAGE_MAX_AGE_MS = 60_000;
@@ -44,9 +47,21 @@
   ];
   let scheduled = false;
   let activeAccountsKey = null;
+  let markUnreadAfterStatusUpdateEnabled = false;
+  let chatLifecycleInitialized = false;
+  let lastNormalChatOpen = false;
+  let chatLifecycleVersion = 0;
+  let archivedViewLifecycleInitialized = false;
+  let lastArchivedChatsViewOpen = false;
+  let archivedViewLifecycleVersion = 0;
+  let archivedViewEntryFilterId = null;
+  let archivedNavigationFromReplacement = false;
+  const observedArchivedButtons = new WeakSet();
+  let unreadFilterRefreshInProgress = false;
   let selectingAgentBalanceText = false;
   let selectingContactUserText = false;
   let agentBalanceLoading = false;
+  let archivedChatButtonTemplate = null;
   let multiPanelAgentBalanceLoading = false;
   let agentBalanceView = "balance";
   let agentBalanceContactKey = null;
@@ -166,8 +181,14 @@
     ];
   }
 
-  stateStorage.get(["ganamosSuffix", "multiPanelSuffix"])
-    .then(({ ganamosSuffix, multiPanelSuffix }) => {
+  stateStorage.get([
+    "ganamosSuffix",
+    "multiPanelSuffix",
+    ACTIVE_BONUS_CONFIG_KEY
+  ])
+    .then(({ ganamosSuffix, multiPanelSuffix, activeBonusConfig }) => {
+      markUnreadAfterStatusUpdateEnabled =
+        activeBonusConfig?.[MARK_UNREAD_AFTER_STATUS_UPDATE_KEY] === true;
       if (/^[a-z]$/i.test(ganamosSuffix || "") && /^[a-z]$/i.test(multiPanelSuffix || "") &&
         ganamosSuffix.toLowerCase() !== multiPanelSuffix.toLowerCase()) {
         platformSuffixes = {
@@ -181,6 +202,12 @@
     .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar los sufijos de plataformas.", error));
 
   stateStorage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes[ACTIVE_BONUS_CONFIG_KEY]) {
+      markUnreadAfterStatusUpdateEnabled =
+        changes[ACTIVE_BONUS_CONFIG_KEY].newValue?.[
+          MARK_UNREAD_AFTER_STATUS_UPDATE_KEY
+        ] === true;
+    }
     if (areaName === "local" && changes[PENDING_WITHDRAWALS_KEY]) {
       pendingWithdrawals = normalizePendingWithdrawals(
         changes[PENDING_WITHDRAWALS_KEY].newValue
@@ -363,66 +390,230 @@
     return Boolean(element && element.getClientRects().length);
   }
 
-  function hasExactControlLabel(element, pattern) {
-    return [
-      element.getAttribute("aria-label"),
-      element.getAttribute("title"),
-      element.textContent
-    ].filter(Boolean).some((label) =>
-      pattern.test(label.trim().replace(/\s+/g, " ")));
+  function setImportantStyle(element, property, value) {
+    if (element.style.getPropertyValue(property) === value &&
+      element.style.getPropertyPriority(property) === "important") return;
+    element.style.setProperty(property, value, "important");
   }
 
-  function getDirectChildWithin(ancestor, element) {
-    let child = element;
-    while (child.parentElement && child.parentElement !== ancestor) {
-      child = child.parentElement;
+  function createChatFilterButton(label, nativeFilterId) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-pressed", "false");
+    button.dataset.selected = "false";
+    button.style.cssText = [
+      "box-sizing:border-box",
+      "width:100%",
+      "min-width:0",
+      "height:36px",
+      "padding:0 12px",
+      "border:1px solid #3b4a54",
+      "border-radius:0",
+      "color:#e9edef",
+      "background:transparent",
+      "font:inherit",
+      "font-size:14px",
+      "font-weight:500",
+      "line-height:1.2",
+      "appearance:none",
+      "text-align:center",
+      "white-space:nowrap",
+      "cursor:pointer"
+    ].join(";");
+    button.addEventListener("click", () => {
+      const replacement = button.closest(`#${CHAT_FILTER_REPLACEMENT_ID}`);
+      replacement?.nativeFilterBar?.querySelector(`#${nativeFilterId}`)?.click();
+    });
+    return button;
+  }
+
+  function createChatFilterReplacement() {
+    const replacement = document.createElement("div");
+    replacement.id = CHAT_FILTER_REPLACEMENT_ID;
+    replacement.setAttribute("role", "group");
+    replacement.setAttribute("aria-label", "Filtros de chats");
+    replacement.style.cssText = [
+      "box-sizing:border-box",
+      "display:grid",
+      "grid-template-columns:repeat(2,minmax(0,1fr))",
+      "gap:0",
+      "padding:0 20px",
+      "width:100%",
+      "min-width:0",
+      "max-width:100%"
+    ].join(";");
+    const allButton = createChatFilterButton("Todos", "all-filter");
+    const unreadButton = createChatFilterButton("No leídos", "label_item_1");
+    allButton.style.borderRadius = "6px 0 0 6px";
+    unreadButton.style.borderRadius = "0 6px 6px 0";
+    unreadButton.style.borderLeftWidth = "0";
+    replacement.append(allButton, unreadButton);
+    replacement.filterButtons = {
+      "all-filter": allButton,
+      "label_item_1": unreadButton
+    };
+    return replacement;
+  }
+
+  function syncChatFilterButton(button, nativeFilter) {
+    const selected = nativeFilter.getAttribute("aria-selected") === "true";
+    const pressed = String(selected);
+    if (button.getAttribute("aria-pressed") !== pressed) {
+      button.setAttribute("aria-pressed", pressed);
     }
-    return child.parentElement === ancestor ? child : null;
+    if (button.dataset.selected === pressed) return;
+    button.dataset.selected = pressed;
+    const backgroundColor = selected ? "#005c4b" : "transparent";
+    button.style.backgroundColor = backgroundColor;
+    button.style.borderColor = selected ? "#008069" : "#3b4a54";
+  }
+
+  function findNativeArchivedChatButton(sidebar) {
+    const identified = sidebar.querySelector(
+      '[data-testid="chatlist-panel-archived-button"]'
+    );
+    if (identified && identified.id !== ARCHIVED_CHAT_BUTTON_CLONE_ID) {
+      return identified;
+    }
+    return [...sidebar.querySelectorAll("button")].find((button) =>
+      button.id !== ARCHIVED_CHAT_BUTTON_CLONE_ID &&
+        /^Archivados?$|^Archived$/i.test(
+          (button.getAttribute("aria-label") || button.textContent || "")
+            .replace(/\s+/g, " ")
+            .trim()
+        )
+      ) || null;
+  }
+
+  function getSelectedNativeChatFilterId() {
+    return document.querySelector(
+      '[aria-label="chat-list-filters"] [role="tab"][aria-selected="true"]'
+    )?.id || null;
+  }
+
+  function observeArchivedButtonNavigation(button) {
+    if (observedArchivedButtons.has(button)) return;
+    observedArchivedButtons.add(button);
+    button.addEventListener("click", () => {
+      if (!archivedNavigationFromReplacement) {
+        archivedViewEntryFilterId = getSelectedNativeChatFilterId();
+      }
+    }, true);
+  }
+
+  function clickNativeArchivedChatButton(clone) {
+    if (clone.dataset.navigationPending === "true") return;
+    clone.dataset.navigationPending = "true";
+    archivedViewEntryFilterId = getSelectedNativeChatFilterId();
+    const allFilter = document.querySelector(
+      '[aria-label="chat-list-filters"] #all-filter'
+    );
+    if (!allFilter) {
+      clone.dataset.navigationPending = "false";
+      console.error(
+        "[Ganamos balance extension] No se encontró el filtro nativo «Todos» para abrir Archivados."
+      );
+      return;
+    }
+
+    allFilter.click();
+    let attempts = 0;
+    const clickArchivedButton = () => {
+      const sidebar = document.querySelector("#pane-side");
+      const nativeButton = sidebar && findNativeArchivedChatButton(sidebar);
+      if (nativeButton && nativeButton !== clone) {
+        archivedNavigationFromReplacement = true;
+        nativeButton.click();
+        archivedNavigationFromReplacement = false;
+        clone.dataset.navigationPending = "false";
+        return;
+      }
+
+      attempts += 1;
+      if (attempts < 4) {
+        requestAnimationFrame(clickArchivedButton);
+        return;
+      }
+
+      clone.dataset.navigationPending = "false";
+      console.error(
+        "[Ganamos balance extension] WhatsApp no volvió a mostrar el botón nativo «Archivados»."
+      );
+    };
+    requestAnimationFrame(() => requestAnimationFrame(clickArchivedButton));
+  }
+
+  function createArchivedChatButtonClone(template) {
+    const clone = template.cloneNode(true);
+    clone.id = ARCHIVED_CHAT_BUTTON_CLONE_ID;
+    clone.dataset.bridgewppArchivedButton = "true";
+    clone.dataset.navigationPending = "false";
+    clone.removeAttribute("data-testid");
+    clone.removeAttribute("data-tab");
+    clone.addEventListener("click", () => clickNativeArchivedChatButton(clone));
+    return clone;
+  }
+
+  function updateArchivedChatButton(sidebar, nativeBar, unreadFilter) {
+    const nativeButton = findNativeArchivedChatButton(sidebar);
+    if (nativeButton) {
+      archivedChatButtonTemplate = nativeButton.cloneNode(true);
+      observeArchivedButtonNavigation(nativeButton);
+    }
+
+    const existingClone = document.getElementById(ARCHIVED_CHAT_BUTTON_CLONE_ID);
+    const isUnreadSelected = unreadFilter.getAttribute("aria-selected") === "true";
+    if (!isUnreadSelected || nativeButton) {
+      existingClone?.remove();
+      return;
+    }
+    if (!archivedChatButtonTemplate || !nativeBar.parentElement) return;
+
+    const archivedButton = existingClone ||
+      createArchivedChatButtonClone(archivedChatButtonTemplate);
+    if (archivedButton.parentElement !== sidebar || archivedButton !== sidebar.firstElementChild) {
+      sidebar.prepend(archivedButton);
+    }
   }
 
   function hideChatFilters() {
     const sidebar = document.querySelector("#pane-side");
     if (!sidebar) return;
-    const selector = 'button,[role="button"],[role="tab"]';
 
     for (let ancestor = sidebar, depth = 0;
       ancestor && ancestor !== document.documentElement && depth < 6;
       ancestor = ancestor.parentElement, depth += 1) {
-      const controls = [...ancestor.querySelectorAll(selector)];
-      const allFilters = controls.filter((element) =>
-        isVisible(element) && hasExactControlLabel(element, /^Todos$/i));
-      const filtersToHide = controls.filter((element) =>
-        (isVisible(element) || element.hasAttribute(CHAT_FILTER_HIDDEN_ATTRIBUTE)) &&
-        hasExactControlLabel(element, /^(?:Favoritos|Favorites|Grupos|Groups)$/i));
-      const innermost = (candidates) => candidates.filter((candidate) =>
-        !candidates.some((other) => other !== candidate && candidate.contains(other)));
-      const [allFilter] = innermost(allFilters);
-      const hiddenFilters = innermost(filtersToHide);
-      if (!allFilter || hiddenFilters.length === 0) continue;
+      const nativeBar = ancestor.querySelector('[aria-label="chat-list-filters"]');
+      const allFilter = nativeBar?.querySelector("#all-filter");
+      const unreadFilter = nativeBar?.querySelector("#label_item_1");
+      if (!nativeBar || !allFilter || !unreadFilter) continue;
 
-      for (const filter of hiddenFilters) {
-        const ancestors = new Set();
-        for (let current = allFilter; current; current = current.parentElement) {
-          ancestors.add(current);
-        }
-        let commonAncestor = filter.parentElement;
-        while (commonAncestor && !ancestors.has(commonAncestor)) {
-          commonAncestor = commonAncestor.parentElement;
-        }
-        const filterContainer = commonAncestor
-          ? getDirectChildWithin(commonAncestor, filter)
-          : null;
-        const allFilterContainer = commonAncestor
-          ? getDirectChildWithin(commonAncestor, allFilter)
-          : null;
-        const target = filterContainer && filterContainer !== allFilterContainer
-          ? filterContainer
-          : filter;
-        filter.setAttribute(CHAT_FILTER_HIDDEN_ATTRIBUTE, "");
-        if (target.hasAttribute(CHAT_FILTER_HIDDEN_ATTRIBUTE)) continue;
-        target.setAttribute(CHAT_FILTER_HIDDEN_ATTRIBUTE, "");
-        target.style.setProperty("display", "none", "important");
+      updateArchivedChatButton(sidebar, nativeBar, unreadFilter);
+      let replacement = document.getElementById(CHAT_FILTER_REPLACEMENT_ID);
+      if (!replacement?.filterButtons) {
+        replacement?.remove();
+        replacement = createChatFilterReplacement();
       }
+      replacement.nativeFilterBar = nativeBar;
+      if (replacement.parentElement !== nativeBar.parentElement ||
+        replacement.nextElementSibling !== nativeBar) {
+        nativeBar.before(replacement);
+      }
+
+      setImportantStyle(replacement, "align-self", "stretch");
+      setImportantStyle(replacement, "width", "100%");
+      setImportantStyle(replacement, "display", "grid");
+      setImportantStyle(nativeBar, "display", "none");
+      syncChatFilterButton(
+        replacement.filterButtons["all-filter"],
+        allFilter
+      );
+      syncChatFilterButton(
+        replacement.filterButtons.label_item_1,
+        unreadFilter
+      );
       return;
     }
   }
@@ -10653,12 +10844,184 @@
     else if (phone) void searchExistingContactUsers(host, phone.slice(-4), accountsKey);
   }
 
+  function isNormalChatCurrentlyOpen() {
+    const title = findContactTitle();
+    return Boolean(title && isNormalChatOpen(title));
+  }
+
+  function isArchivedChatsViewOpen() {
+    const sidebar = document.querySelector("#pane-side");
+    if (!sidebar) return false;
+    const side = document.querySelector("#side") || sidebar;
+    for (let ancestor = side.parentElement, depth = 0;
+      ancestor && depth < 5;
+      ancestor = ancestor.parentElement, depth += 1) {
+      const headerSiblings = [...ancestor.children].filter((child) =>
+        child !== side && !child.contains(side) && isVisible(child)
+      );
+      if (headerSiblings.some((element) =>
+        /^(?:Archivados|Archived)(?:\s|$)/i.test(
+          (element.innerText || "").replace(/\s+/g, " ").trim()
+        ))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function refreshUnreadFilterAfterChatClose(lifecycleVersion) {
+    if (unreadFilterRefreshInProgress) return;
+    unreadFilterRefreshInProgress = true;
+    const finish = () => {
+      unreadFilterRefreshInProgress = false;
+    };
+    const canContinue = () =>
+      markUnreadAfterStatusUpdateEnabled &&
+      lifecycleVersion === chatLifecycleVersion &&
+      !isNormalChatCurrentlyOpen();
+
+    window.setTimeout(() => window.requestAnimationFrame(() => {
+      if (!canContinue()) {
+        finish();
+        return;
+      }
+
+      const nativeBar = document.querySelector('[aria-label="chat-list-filters"]');
+      const allFilter = nativeBar?.querySelector("#all-filter");
+      const unreadFilter = nativeBar?.querySelector("#label_item_1");
+      if (!allFilter || !unreadFilter ||
+        unreadFilter.getAttribute("aria-selected") !== "true") {
+        finish();
+        return;
+      }
+
+      allFilter.click();
+      let attempts = 0;
+      const selectUnreadFilter = () => {
+        if (!canContinue()) {
+          finish();
+          return;
+        }
+        if (allFilter.getAttribute("aria-selected") === "true") {
+          unreadFilter.click();
+          window.requestAnimationFrame(() => {
+            if (unreadFilter.getAttribute("aria-selected") !== "true") {
+              console.error(
+                "[Ganamos balance extension] No se pudo volver al filtro «No leídos» al cerrar el chat."
+              );
+            }
+            finish();
+          });
+          return;
+        }
+
+        attempts += 1;
+        if (attempts >= 10) {
+          console.error(
+            "[Ganamos balance extension] WhatsApp no activó el filtro «Todos» al actualizar «No leídos»."
+          );
+          finish();
+          return;
+        }
+        window.requestAnimationFrame(selectUnreadFilter);
+      };
+      window.requestAnimationFrame(selectUnreadFilter);
+    }), UNREAD_FILTER_REFRESH_DELAY_MS);
+  }
+
+  function selectUnreadFilterAfterLeavingArchivedView(lifecycleVersion) {
+    if (unreadFilterRefreshInProgress) return;
+    unreadFilterRefreshInProgress = true;
+    const finish = () => {
+      unreadFilterRefreshInProgress = false;
+    };
+    const canContinue = () =>
+      markUnreadAfterStatusUpdateEnabled &&
+      lifecycleVersion === archivedViewLifecycleVersion &&
+      !isArchivedChatsViewOpen();
+
+    let attempts = 0;
+    const selectUnreadFilter = () => {
+      if (!canContinue()) {
+        finish();
+        return;
+      }
+
+      const unreadFilter = document.querySelector(
+        '[aria-label="chat-list-filters"] #label_item_1'
+      );
+      if (unreadFilter) {
+        if (unreadFilter.getAttribute("aria-selected") !== "true") {
+          unreadFilter.click();
+        }
+        window.requestAnimationFrame(() => {
+          if (unreadFilter.getAttribute("aria-selected") !== "true") {
+            console.error(
+              "[Ganamos balance extension] No se pudo activar el filtro «No leídos» al salir de Archivados."
+            );
+          }
+          finish();
+        });
+        return;
+      }
+
+      attempts += 1;
+      if (attempts >= 10) {
+        console.error(
+          "[Ganamos balance extension] No se encontró el filtro «No leídos» al salir de Archivados."
+        );
+        finish();
+        return;
+      }
+      window.requestAnimationFrame(selectUnreadFilter);
+    };
+    window.requestAnimationFrame(selectUnreadFilter);
+  }
+
+  function trackArchivedViewExit() {
+    const isArchived = isArchivedChatsViewOpen();
+    if (!archivedViewLifecycleInitialized) {
+      archivedViewLifecycleInitialized = true;
+      lastArchivedChatsViewOpen = isArchived;
+      return;
+    }
+
+    if (isArchived === lastArchivedChatsViewOpen) return;
+    lastArchivedChatsViewOpen = isArchived;
+    archivedViewLifecycleVersion += 1;
+    if (isArchived) return;
+
+    const enteredFromUnreadFilter = archivedViewEntryFilterId === "label_item_1";
+    archivedViewEntryFilterId = null;
+    if (!enteredFromUnreadFilter || !markUnreadAfterStatusUpdateEnabled) return;
+
+    selectUnreadFilterAfterLeavingArchivedView(archivedViewLifecycleVersion);
+  }
+
+  function trackChatClose() {
+    const isChatOpen = isNormalChatCurrentlyOpen();
+    if (!chatLifecycleInitialized) {
+      chatLifecycleInitialized = true;
+      lastNormalChatOpen = isChatOpen;
+      return;
+    }
+
+    if (isChatOpen === lastNormalChatOpen) return;
+    lastNormalChatOpen = isChatOpen;
+    chatLifecycleVersion += 1;
+    if (isChatOpen || !markUnreadAfterStatusUpdateEnabled) return;
+
+    refreshUnreadFilterAfterChatClose(chatLifecycleVersion);
+  }
+
   function scheduleUpdate() {
     if (scheduled) return;
     scheduled = true;
     requestAnimationFrame(() => {
       scheduled = false;
       hideChatFilters();
+      trackChatClose();
+      trackArchivedViewExit();
       updateContact();
       scheduleContactTagScan();
       renderPendingWithdrawals();
