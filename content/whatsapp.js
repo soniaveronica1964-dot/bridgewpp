@@ -26,8 +26,10 @@
   const ARCHIVED_UNREAD_COUNT_REFRESH_INTERVAL_MS = 15_000;
   const PENDING_WITHDRAWALS_KEY = "pendingWithdrawals";
   const TOP_USER_WITHDRAWAL_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const TOP_USER_BALANCES_AUTO_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
   const PENDING_WITHDRAWAL_MESSAGE_MAX_AGE_MS = 60_000;
   const PENDING_WITHDRAWAL_BALANCE_THRESHOLD = 10_000;
+  const AGENT_BALANCE_AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   const CONTACT_FLOW_COUNTER_REFRESH_INTERVAL_MS = 5_000;
   const CONTACT_FLOW_MESSAGE_MAX_AGE_MS = 45 * 60_000;
   const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
@@ -93,6 +95,7 @@
   let topUserBalancesRefreshInProgress = false;
   let topUserBalancesExpanded = false;
   let topUserBalancesWithdrawalFilterEnabled = false;
+  let topUserBalancesAutoRefreshTimer = null;
   let topUserBalancesData = {
     ganamos: [],
     multipanel: [],
@@ -1705,6 +1708,46 @@
     dismissToast(`agent-balance:${platform}`);
   }
 
+  function applySharedAgentBalanceUpdate(platform, balance, currency = "") {
+    const host = document.getElementById(AGENT_BALANCE_HOST_ID);
+    if (!host?.shadowRoot) return;
+    const label = host.shadowRoot.querySelector(`.agent-balance-label[data-platform="${platform}"]`);
+    const amount = host.shadowRoot.querySelector(`.agent-balance-amount[data-platform="${platform}"]`);
+    if (!label || !amount) return;
+    const numericValue = Number(balance);
+    const isValidValue = Number.isFinite(numericValue);
+    const displayValue = isValidValue
+      ? `$${formatCurrency(numericValue)}`
+      : (typeof balance === "string" ? balance : "Actualizado");
+    const platformName = platform === "ganamos" ? "Ganamos" : "MultiPanel";
+    label.title = `${platformName}: ${displayValue}`;
+    amount.title = label.title;
+    amount.textContent = displayValue;
+    amount.classList.remove("agent-balance-error");
+    clearAgentBalanceErrorToast(platform);
+    setAgentBalanceError(host, platform);
+  }
+
+  function handleSharedAgentBalanceUpdate(payload) {
+    if (!payload || typeof payload !== "object" || payload.type !== "GANAMOS_SHARED_BALANCE_UPDATE") return;
+    if (!payload.platform || !["ganamos", "multipanel"].includes(payload.platform)) return;
+    applySharedAgentBalanceUpdate(payload.platform, payload.balance, payload.currency || "");
+  }
+
+  window.addEventListener("message", (event) => {
+    handleSharedAgentBalanceUpdate(event.data);
+  });
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || typeof message !== "object") return false;
+    handleSharedAgentBalanceUpdate(message);
+    if (message.type === "GANAMOS_SHARED_BALANCE_UPDATE") {
+      sendResponse({ ok: true });
+      return true;
+    }
+    return false;
+  });
+
   function formatCurrency(amount) {
     return new Intl.NumberFormat("es-AR", {
       minimumFractionDigits: 2,
@@ -2846,6 +2889,18 @@
     }
   }
 
+  function scheduleTopUserBalancesAutoRefresh() {
+    if (topUserBalancesAutoRefreshTimer !== null) {
+      window.clearInterval(topUserBalancesAutoRefreshTimer);
+      topUserBalancesAutoRefreshTimer = null;
+    }
+    topUserBalancesAutoRefreshTimer = window.setInterval(() => {
+      if (!topUserBalancesRefreshInProgress) {
+        void refreshTopUserBalances();
+      }
+    }, TOP_USER_BALANCES_AUTO_REFRESH_INTERVAL_MS);
+  }
+
   async function refreshTopUserBalances() {
     if (topUserBalancesRefreshInProgress) return;
     topUserBalancesRefreshInProgress = true;
@@ -2998,6 +3053,7 @@
     shadow.append(stylesheet, panel);
     document.documentElement.append(host);
     topUserBalancesPanel = { host, panel };
+    scheduleTopUserBalancesAutoRefresh();
     renderTopUserBalances();
     void refreshTopUserBalances();
   }
@@ -5184,8 +5240,8 @@
       refresh.title = `Reintentar conexión con ${platform === "ganamos" ? "Ganamos" : "MultiPanel"}`;
       refresh.setAttribute("aria-label", refresh.title);
       refresh.addEventListener("click", () => {
-        if (platform === "ganamos") void refreshAgentBalance(host);
-        else void refreshMultiPanelAgentBalance(host);
+        if (platform === "ganamos") void refreshAgentBalance(host, { force: true });
+        else void refreshMultiPanelAgentBalance(host, { force: true });
       });
       errorRow.append(line, refresh);
       errors.append(errorRow);
@@ -5406,6 +5462,8 @@
     if (operation === "withdrawal") {
       const host = document.getElementById(HOST_ID);
       if (host && host.dataset.accounts === contactKey) {
+        host.recentWithdrawalState ||= new Map();
+        host.recentWithdrawalState.set(contactKey, record.timestamp);
         void updateWithdrawalButtonState(host, contactKey);
       }
     }
@@ -5426,6 +5484,40 @@
       movement.timestamp <= Date.now())[0] || null;
   }
 
+  function renderRecentWithdrawalButtonState(host, button, recentWithdrawalTimestamp, contactKey) {
+    if (!Number.isFinite(recentWithdrawalTimestamp)) {
+      const recentWithdrawalState = host.recentWithdrawalState || new Map();
+      if (contactKey) recentWithdrawalState.delete(contactKey);
+      host.recentWithdrawalState = recentWithdrawalState;
+      button.classList.remove("recent-withdrawal");
+      button.textContent = "Retirar";
+      button.title = "Retirar";
+      return;
+    }
+    const recentWithdrawalState = host.recentWithdrawalState || new Map();
+    if (contactKey) recentWithdrawalState.set(contactKey, recentWithdrawalTimestamp);
+    host.recentWithdrawalState = recentWithdrawalState;
+    const withdrawalTime = new Intl.DateTimeFormat("es-AR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23"
+    }).format(recentWithdrawalTimestamp);
+    button.classList.add("recent-withdrawal");
+    button.textContent = `Ret. (${withdrawalTime})`;
+    button.title = `Hubo un retiro en las últimas 24 horas (${withdrawalTime})`;
+    const timeUntilExpiry = recentWithdrawalTimestamp + 24 * 60 * 60 * 1000 - Date.now();
+    if (host.recentWithdrawalTimer) {
+      window.clearTimeout(host.recentWithdrawalTimer);
+      host.recentWithdrawalTimer = null;
+    }
+    if (timeUntilExpiry > 0) {
+      host.recentWithdrawalTimer = window.setTimeout(
+        () => void updateWithdrawalButtonState(host, contactKey || host.dataset.accounts),
+        timeUntilExpiry + 100
+      );
+    }
+  }
+
   async function updateWithdrawalButtonState(host, contactKey) {
     const button = host.shadowRoot?.querySelector('button[data-action="withdrawal"]');
     if (!button) return;
@@ -5437,26 +5529,23 @@
     button.textContent = "Retirar";
     button.title = "Retirar";
 
+    const recentWithdrawalState = host.recentWithdrawalState || new Map();
+    host.recentWithdrawalState = recentWithdrawalState;
+    const cachedTimestamp = contactKey ? recentWithdrawalState.get(contactKey) : undefined;
+    if (Number.isFinite(cachedTimestamp) && cachedTimestamp <= Date.now() && Date.now() - cachedTimestamp < 24 * 60 * 60 * 1000) {
+      renderRecentWithdrawalButtonState(host, button, cachedTimestamp, contactKey);
+      return;
+    }
+    if (contactKey) recentWithdrawalState.delete(contactKey);
+
     try {
       const recentWithdrawal = await findRecentUserWithdrawal(contactKey);
       if (host.dataset.accounts !== contactKey) return;
-      if (!recentWithdrawal) return;
-
-      const withdrawalTime = new Intl.DateTimeFormat("es-AR", {
-        hour: "2-digit",
-        minute: "2-digit",
-        hourCycle: "h23"
-      }).format(recentWithdrawal.timestamp);
-      button.classList.add("recent-withdrawal");
-      button.textContent = `Ret. (${withdrawalTime})`;
-      button.title = `Hubo un retiro en las últimas 24 horas (${withdrawalTime})`;
-      const timeUntilExpiry = recentWithdrawal.timestamp + 24 * 60 * 60 * 1000 - Date.now();
-      if (timeUntilExpiry > 0) {
-        host.recentWithdrawalTimer = window.setTimeout(
-          () => void updateWithdrawalButtonState(host, contactKey),
-          timeUntilExpiry + 100
-        );
+      if (!recentWithdrawal) {
+        if (contactKey) recentWithdrawalState.delete(contactKey);
+        return;
       }
+      renderRecentWithdrawalButtonState(host, button, recentWithdrawal.timestamp, contactKey);
     } catch (error) {
       console.error("[Ganamos balance extension] No se pudo verificar si hubo un retiro reciente.", error);
     }
@@ -5619,16 +5708,26 @@
       if (!root || !contactKey || !username) {
         throw new Error("No se pudo identificar el usuario para verificar retiros recientes.");
       }
-      if (!skipMovementRecord) {
-        const recentWithdrawal = await findRecentUserWithdrawal(contactKey);
-        if (host.dataset.accounts !== contactKey) return;
-        if (recentWithdrawal &&
-          !(await confirmRecentWithdrawal(root, username, recentWithdrawal))) {
-          return;
-        }
+      const openWithdrawalDialog = () => openTransactionDialog(host, "withdrawal", { skipMovementRecord });
+      if (skipMovementRecord) {
+        await openWithdrawalDialog();
+        return;
       }
-      if (host.dataset.accounts !== contactKey) return;
-      await openTransactionDialog(host, "withdrawal", { skipMovementRecord });
+      const recentWithdrawalCheck = (async () => {
+        try {
+          const recentWithdrawal = await findRecentUserWithdrawal(contactKey);
+          if (host.dataset.accounts !== contactKey) return false;
+          if (!recentWithdrawal) return true;
+          return await confirmRecentWithdrawal(root, username, recentWithdrawal);
+        } catch (error) {
+          console.error("[Ganamos balance extension] No se pudo verificar el retiro reciente antes de abrir el formulario.", error);
+          return true;
+        }
+      })();
+      await openWithdrawalDialog();
+      if (!(await recentWithdrawalCheck)) {
+        root.replaceChildren();
+      }
     } catch (error) {
       showToast(
         host,
@@ -7986,8 +8085,8 @@
       refresh.title = refreshTitle;
       refresh.setAttribute("aria-label", refreshTitle);
       refresh.addEventListener("click", () => {
-        if (platform === "ganamos") void refreshAgentBalance(host);
-        else void refreshMultiPanelAgentBalance(host);
+        if (platform === "ganamos") void refreshAgentBalance(host, { force: true });
+        else void refreshMultiPanelAgentBalance(host, { force: true });
       });
       row.append(label, amount, refresh);
       rows.append(row);
@@ -8017,7 +8116,7 @@
     return host;
   }
 
-  async function refreshAgentBalance(host = createAgentBalancePanel()) {
+  async function refreshAgentBalance(host = createAgentBalancePanel(), { force = false } = {}) {
     if (agentBalanceLoading) return;
     const label = host.shadowRoot?.querySelector('.agent-balance-label[data-platform="ganamos"]');
     const amount = host.shadowRoot?.querySelector('.agent-balance-amount[data-platform="ganamos"]');
@@ -8038,7 +8137,10 @@
         await renderRemoteAgentBalances(host, "ganamos", label, amount, destinations);
         return;
       }
-      const response = await chrome.runtime.sendMessage({ type: "AGENT_BALANCE_REQUEST" });
+      const response = await chrome.runtime.sendMessage({
+        type: "AGENT_BALANCE_REQUEST",
+        ...(force ? { data: { force: true } } : {})
+      });
       if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el balance del agente.");
       setAgentBalanceError(host, "ganamos");
       clearAgentBalanceErrorToast("ganamos");
@@ -8059,7 +8161,7 @@
     }
   }
 
-  async function refreshMultiPanelAgentBalance(host = createAgentBalancePanel()) {
+  async function refreshMultiPanelAgentBalance(host = createAgentBalancePanel(), { force = false } = {}) {
     if (multiPanelAgentBalanceLoading) return;
     const label = host.shadowRoot?.querySelector('.agent-balance-label[data-platform="multipanel"]');
     const amount = host.shadowRoot?.querySelector('.agent-balance-amount[data-platform="multipanel"]');
@@ -8080,7 +8182,10 @@
         await renderRemoteAgentBalances(host, "multipanel", label, amount, destinations);
         return;
       }
-      const response = await chrome.runtime.sendMessage({ type: "MULTIPANEL_AGENT_BALANCE_REQUEST" });
+      const response = await chrome.runtime.sendMessage({
+        type: "MULTIPANEL_AGENT_BALANCE_REQUEST",
+        ...(force ? { data: { force: true } } : {})
+      });
       if (!response?.ok) throw new Error(response?.error || "No se pudo consultar el balance del agente MultiPanel.");
       setAgentBalanceError(host, "multipanel");
       clearAgentBalanceErrorToast("multipanel");
@@ -9186,8 +9291,8 @@
             ? `${message} Además, no se pudo guardar el intercambio en el historial.`
             : message, "error", toastKey);
           void refreshBalance(host);
-          void refreshAgentBalance();
-          void refreshMultiPanelAgentBalance();
+          void refreshAgentBalance(undefined, { force: true });
+          void refreshMultiPanelAgentBalance(undefined, { force: true });
           return;
         }
         if (!response?.ok) throw new Error(response?.error || "No se pudo completar el intercambio.");
@@ -9201,8 +9306,8 @@
           `Intercambio ${platformName(fromPlatform)} → ${platformName(toPlatform)} ($${formatCurrency(amount)}).`,
           "success", toastKey);
         void refreshBalance(host);
-        void refreshAgentBalance();
-        void refreshMultiPanelAgentBalance();
+        void refreshAgentBalance(undefined, { force: true });
+        void refreshMultiPanelAgentBalance(undefined, { force: true });
       } catch (error) {
         showToast(host, fromUsername, error.message || "No se pudo completar el intercambio.", "error", toastKey);
       } finally {
@@ -9283,42 +9388,60 @@
     let activeBonusConfig = null;
     let activeBonusConfigLoadFailed = false;
     let bonusDisabled = host.dataset.bonusDisabled === "true";
+    let modal = null;
+    let refreshDepositBonusUi = () => {};
     if (operation === "deposit") {
-      try {
-        activeBonusConfig = await readActiveBonusConfig();
-      } catch (error) {
-        activeBonusConfigLoadFailed = true;
-        console.error("[Ganamos balance extension] No se pudo cargar el bono activo para el depósito.", error);
-        showToast(host, getPlatformUsername(selectedPlatform), "No se pudo cargar el bono activo para este depósito.", "error");
-      }
-    }
-    if (operation === "deposit" && !advertisingDeposit) {
-      try {
-        bonusDisabled = await readUserBonusDisabled(getSportBetsPreferenceId(host));
-        if (host.dataset.accounts !== openedAccountsKey) return;
-        updateUserBonusDisabledPresentation(host, bonusDisabled);
-      } catch (error) {
-        console.error(
-          "[Ganamos balance extension] No se pudo cargar la configuración de bono por usuario.",
-          error
-        );
-      }
-    }
-    if (advertisingDeposit && activeBonusConfigLoadFailed) return;
-    if (operation === "deposit" && !advertisingDeposit && depositButtonRole) {
-      skipAutomaticBonus = bonusDisabled ||
-        Boolean(activeBonusConfig?.invertDepositButtons) === (depositButtonRole === "main");
-    }
-    if (advertisingDeposit &&
-      (!activeBonusConfig?.activeAdvertising ||
-        !isValidBonusPercent(activeBonusConfig.advertisingPercent))) {
-      showToast(
-        host,
-        getPlatformUsername(selectedPlatform),
-        "Activá Publi Activa y configurá un porcentaje válido antes de usar este depósito.",
-        "error"
-      );
-      return;
+      void (async () => {
+        try {
+          const [loadedBonusConfig, loadedBonusDisabled] = await Promise.all([
+            readActiveBonusConfig().catch((error) => {
+              activeBonusConfigLoadFailed = true;
+              console.error("[Ganamos balance extension] No se pudo cargar el bono activo para el depósito.", error);
+              return null;
+            }),
+            !advertisingDeposit
+              ? readUserBonusDisabled(getSportBetsPreferenceId(host)).catch((error) => {
+                console.error(
+                  "[Ganamos balance extension] No se pudo cargar la configuración de bono por usuario.",
+                  error
+                );
+                return bonusDisabled;
+              })
+              : Promise.resolve(bonusDisabled)
+          ]);
+          activeBonusConfig = loadedBonusConfig;
+          bonusDisabled = loadedBonusDisabled;
+          if (host.dataset.accounts !== openedAccountsKey) return;
+          updateUserBonusDisabledPresentation(host, bonusDisabled);
+          if (advertisingDeposit && activeBonusConfigLoadFailed) {
+            showToast(host, getPlatformUsername(selectedPlatform), "No se pudo cargar el bono activo para este depósito.", "error");
+            return;
+          }
+          if (operation === "deposit" && !advertisingDeposit && depositButtonRole) {
+            skipAutomaticBonus = bonusDisabled ||
+              Boolean(activeBonusConfig?.invertDepositButtons) === (depositButtonRole === "main");
+          }
+          if (advertisingDeposit &&
+            (!activeBonusConfig?.activeAdvertising ||
+              !isValidBonusPercent(activeBonusConfig.advertisingPercent))) {
+            showToast(
+              host,
+              getPlatformUsername(selectedPlatform),
+              "Activá Publi Activa y configurá un porcentaje válido antes de usar este depósito.",
+              "error"
+            );
+            return;
+          }
+          if (modal && root && root.contains(modal)) {
+            refreshDepositBonusUi();
+          }
+          if (typeof updateDepositSummary === "function") {
+            updateDepositSummary();
+          }
+        } catch (error) {
+          console.error("[Ganamos balance extension] No se pudo preparar el diálogo de depósito.", error);
+        }
+      })();
     }
     const mysteriousBonusPercent = activeBonusConfig?.enabled && activeBonusConfig.type === "mysterious"
       ? chooseMysteriousBonusPercent(activeBonusConfig)
@@ -9327,7 +9450,7 @@
     if (!root || !getPlatformUsername(selectedPlatform)) return;
     root.replaceChildren();
 
-    const modal = document.createElement("div");
+    modal = document.createElement("div");
     modal.className = "modal";
     if (advertisingDeposit) modal.dataset.advertisingDeposit = "true";
     if (operation === "deposit" && bonusDisabled && !advertisingDeposit) {
@@ -9536,6 +9659,15 @@
       bonusPercentInput.addEventListener("input", () => {
         if (!applyingAutomaticBonusPercent) manuallyChangedBonusPercent = true;
       });
+      refreshDepositBonusUi = () => {
+        if (advertisingDeposit || (!skipAutomaticBonus && activeBonusConfig?.enabled)) {
+          applyAutomaticBonusPercent();
+        } else {
+          bonusPercentInput.value = "";
+          bonusPercentInput.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        updateDepositSummary();
+      };
       applyPlatformBonus = () => {
         if (advertisingDeposit) {
           manuallyChangedBonusPercent = false;
@@ -9565,9 +9697,7 @@
         getActiveBonusPercent
       );
       dialog.append(bonusPercentageShortcuts.element);
-      if (advertisingDeposit || (!skipAutomaticBonus && activeBonusConfig?.enabled)) {
-        applyAutomaticBonusPercent();
-      }
+      refreshDepositBonusUi();
       updateDepositSummary();
     }
 
@@ -9989,8 +10119,8 @@
           showToast(host, username, "El depósito se completó, pero no se pudo copiar el bono al portapapeles.", "error");
         }
         void refreshBalance(host);
-        if (selectedPlatform === "ganamos") void refreshAgentBalance();
-        else void refreshMultiPanelAgentBalance();
+        if (selectedPlatform === "ganamos") void refreshAgentBalance(undefined, { force: true });
+        else void refreshMultiPanelAgentBalance(undefined, { force: true });
       } catch (exception) {
         showToast(host, username, exception.message || "No se pudo completar la operación.", "error");
       } finally {
@@ -11192,8 +11322,7 @@
     void refreshAgentBalance(agentBalanceHost);
     void refreshMultiPanelAgentBalance(agentBalanceHost);
     void refreshPendingWithdrawalBalances();
-    void refreshTopUserBalances();
-  }, 60_000);
+  }, AGENT_BALANCE_AUTO_REFRESH_INTERVAL_MS);
   hideChatFilters();
   updateContact();
 })();

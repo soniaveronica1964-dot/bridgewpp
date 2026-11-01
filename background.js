@@ -32,6 +32,138 @@ let statePollInProgress = null;
 let lastStatePollAt = 0;
 let extensionStateCache = {};
 const withdrawalUserCache = new Map();
+const agentBalanceCache = new Map();
+const AGENT_BALANCE_CACHE_TTL_MS = 5 * 60 * 1000;
+const sharedBalanceSyncState = { ganamos: null, multipanel: null };
+let sharedBalanceSyncRevision = 0;
+
+function isValidSharedBalanceRecord(value) {
+  return value && typeof value === "object" && value.ok === true &&
+    typeof value.balance === "string" && value.balance.trim() !== "" &&
+    (typeof value.currency === "string" || value.currency === undefined);
+}
+
+function rememberSharedBalanceState(platform, value) {
+  if (!isValidSharedBalanceRecord(value)) {
+    sharedBalanceSyncState[platform] = null;
+    return false;
+  }
+  sharedBalanceSyncState[platform] = { ...value, updatedAt: Date.now() };
+  sharedBalanceSyncRevision += 1;
+  void chrome.tabs.query({ url: ["https://web.whatsapp.com/*", "https://bo.casinoenvivo.club/*"] })
+    .then((tabs) => Promise.allSettled(tabs
+      .filter((tab) => typeof tab.id === "number")
+      .map((tab) => chrome.tabs.sendMessage(tab.id, {
+        type: "GANAMOS_SHARED_BALANCE_UPDATE",
+        platform,
+        balance: value.balance,
+        currency: value.currency || ""
+      }))))
+    .catch((error) => {
+      console.warn("[Ganamos balance extension] No se pudo notificar a la UI el balance compartido actualizado.", error);
+    });
+  return true;
+}
+
+async function publishSharedBalanceState() {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "primary" || !token) {
+    return { ok: true, skipped: true };
+  }
+  return bridgeFetch("/v1/balance-sync", token, {
+    method: "POST",
+    timeoutMs: 10_000,
+    body: {
+      state: {
+        ganamos: sharedBalanceSyncState.ganamos,
+        multipanel: sharedBalanceSyncState.multipanel
+      }
+    }
+  });
+}
+
+async function syncSharedBalanceState(revision) {
+  const { role, token } = await getBridgeSettings();
+  if (role !== "secondary" || !token) {
+    throw new Error("Este perfil no está configurado como secundario.");
+  }
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("La revisión del estado compartido del balance no es válida.");
+  }
+  const update = await bridgeFetch(
+    `/v1/balance-sync?revision=${revision}`,
+    token,
+    { timeoutMs: 25_000 }
+  );
+  if (!update?.ok || !Number.isSafeInteger(update.revision) || update.revision < 0) {
+    throw new Error("El puente devolvió una versión del balance compartido no válida.");
+  }
+  if (!update.changed) return update;
+  if (!update.state || typeof update.state !== "object" || Array.isArray(update.state)) {
+    throw new Error("El puente devolvió un estado compartido del balance inválido.");
+  }
+  const nextState = { ganamos: null, multipanel: null };
+  for (const platform of ["ganamos", "multipanel"]) {
+    const value = update.state[platform];
+    if (value == null) continue;
+    if (!isValidSharedBalanceRecord(value)) {
+      throw new Error(`El puente devolvió un balance compartido inválido para ${platform}.`);
+    }
+    nextState[platform] = { ...value, updatedAt: Date.now() };
+  }
+  sharedBalanceSyncState.ganamos = nextState.ganamos;
+  sharedBalanceSyncState.multipanel = nextState.multipanel;
+  sharedBalanceSyncRevision = update.revision;
+  return update;
+}
+
+function getCachedPlatformBalance(platform, loader, { force = false } = {}) {
+  const cacheKey = platform;
+  const now = Date.now();
+  const cached = agentBalanceCache.get(cacheKey);
+  const sharedState = sharedBalanceSyncState[platform];
+  if (!force) {
+    if (cached?.value && cached.expiresAt > now) return Promise.resolve(cached.value);
+    if (sharedState && isValidSharedBalanceRecord(sharedState) &&
+      (sharedState.updatedAt ?? 0) + AGENT_BALANCE_CACHE_TTL_MS > now) {
+      return Promise.resolve(sharedState);
+    }
+    if (cached?.inFlight) return cached.inFlight;
+  }
+  if (force && cached) {
+    agentBalanceCache.delete(cacheKey);
+  }
+
+  const request = loader().then(async (value) => {
+    agentBalanceCache.set(cacheKey, {
+      value,
+      expiresAt: Date.now() + AGENT_BALANCE_CACHE_TTL_MS,
+      inFlight: null
+    });
+    rememberSharedBalanceState(platform, value);
+    try {
+      await publishSharedBalanceState();
+    } catch (error) {
+      console.warn(
+        `[Ganamos balance extension] No se pudo publicar el balance compartido de ${platform}.`,
+        error
+      );
+    }
+    return value;
+  }).catch((error) => {
+    if (agentBalanceCache.get(cacheKey)?.inFlight === request) {
+      agentBalanceCache.delete(cacheKey);
+    }
+    throw error;
+  });
+
+  agentBalanceCache.set(cacheKey, {
+    value: cached?.value ?? null,
+    expiresAt: cached?.expiresAt ?? 0,
+    inFlight: request
+  });
+  return request;
+}
 let profileRuntimeStatePromise = null;
 let dataProfileSelectorPromise = null;
 const extensionStateOnChanged = {
@@ -556,24 +688,26 @@ async function findGanamosUsersByDigits(digits) {
     normalizeUsernameSuffix(username, suffix).includes(digits));
 }
 
-async function getGanamosAgentBalance() {
-  const payload = await requestGanamosJson("/api/user/balance");
-  if (payload?.status !== 0) {
-    throw new Error(payload?.error_message || "Ganamos no pudo consultar el balance del agente.");
-  }
-  const balance = payload?.result?.balance;
-  if (typeof balance !== "number" && typeof balance !== "string") {
-    throw new Error("Ganamos devolvió el balance del agente con un formato inesperado.");
-  }
-  const numericBalance = Number(balance);
-  if (!Number.isFinite(numericBalance)) {
-    throw new Error("Ganamos devolvió un balance del agente que no es numérico.");
-  }
-  return {
-    ok: true,
-    balance: String(numericBalance),
-    currency: typeof payload.result.currency === "string" ? payload.result.currency : ""
-  };
+async function getGanamosAgentBalance(force = false) {
+  return getCachedPlatformBalance("ganamos", async () => {
+    const payload = await requestGanamosJson("/api/user/balance");
+    if (payload?.status !== 0) {
+      throw new Error(payload?.error_message || "Ganamos no pudo consultar el balance del agente.");
+    }
+    const balance = payload?.result?.balance;
+    if (typeof balance !== "number" && typeof balance !== "string") {
+      throw new Error("Ganamos devolvió el balance del agente con un formato inesperado.");
+    }
+    const numericBalance = Number(balance);
+    if (!Number.isFinite(numericBalance)) {
+      throw new Error("Ganamos devolvió un balance del agente que no es numérico.");
+    }
+    return {
+      ok: true,
+      balance: String(numericBalance),
+      currency: typeof payload.result.currency === "string" ? payload.result.currency : ""
+    };
+  }, { force });
 }
 
 async function getGanamosActiveSportBets(data) {
@@ -1214,32 +1348,34 @@ async function verifyBalanceIncrease(getBalance, initialBalance, expectedIncreas
   };
 }
 
-async function getMultiPanelAgentBalance() {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const session = await getMultiPanelSession();
-      const result = await requestMultiPanelForm("/api/admin/getBalanceUser", {
-        session,
-        company: "MULT"
-      });
-      const balances = Array.isArray(result?.data) ? result.data : [];
-      const balance = balances.find((entry) =>
-        (typeof entry?.amount === "number" || typeof entry?.amount === "string") &&
-        Number.isFinite(Number(entry.amount)));
-      if (!balance) {
-        throw new Error("MultiPanel no devolvió el balance actual del agente en un formato reconocible.");
+async function getMultiPanelAgentBalance(force = false) {
+  return getCachedPlatformBalance("multipanel", async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const session = await getMultiPanelSession();
+        const result = await requestMultiPanelForm("/api/admin/getBalanceUser", {
+          session,
+          company: "MULT"
+        });
+        const balances = Array.isArray(result?.data) ? result.data : [];
+        const balance = balances.find((entry) =>
+          (typeof entry?.amount === "number" || typeof entry?.amount === "string") &&
+          Number.isFinite(Number(entry.amount)));
+        if (!balance) {
+          throw new Error("MultiPanel no devolvió el balance actual del agente en un formato reconocible.");
+        }
+        return {
+          ok: true,
+          balance: (Number(balance.amount) / 100).toFixed(2),
+          currency: typeof balance.currency === "string" ? balance.currency : ""
+        };
+      } catch (error) {
+        if (!isInvalidMultiPanelSession(error) || attempt > 0) throw error;
+        await getMultiPanelSessionFromOpenTab();
       }
-      return {
-        ok: true,
-        balance: (Number(balance.amount) / 100).toFixed(2),
-        currency: typeof balance.currency === "string" ? balance.currency : ""
-      };
-    } catch (error) {
-      if (!isInvalidMultiPanelSession(error) || attempt > 0) throw error;
-      await getMultiPanelSessionFromOpenTab();
     }
-  }
-  throw new Error("No se pudo consultar el balance actual del agente MultiPanel.");
+    throw new Error("No se pudo consultar el balance actual del agente MultiPanel.");
+  }, { force });
 }
 
 function validateTransaction(data, suffixes = { ganamos: "f", multipanel: "y" }) {
@@ -1317,6 +1453,7 @@ async function runTransactionRequest(data) {
       `Ganamos rechazó el ${data.operation === "deposit" ? "depósito" : "retiro"}.`);
   }
   if (data.operation !== "deposit") {
+    await getGanamosAgentBalance(true);
     return { ok: true, username: user.username, userId: user.userId, response };
   }
 
@@ -1327,6 +1464,7 @@ async function runTransactionRequest(data) {
     if (!Number.isFinite(balance)) throw new Error("Ganamos devolvió un saldo no numérico al verificar.");
     return balance;
   }, initialBalance, expectedIncrease);
+  await getGanamosAgentBalance(true);
   return { ok: true, username: user.username, userId: user.userId, response, verification };
 }
 
@@ -1366,7 +1504,10 @@ async function runMultiPanelManualOperation(data) {
         throw new Error(response.error || response.message ||
           `MultiPanel rechazó el ${data.operation === "deposit" ? "depósito" : "retiro"}.`);
       }
-      if (data.operation !== "deposit") return { ok: true, username: user.alias, response };
+      if (data.operation !== "deposit") {
+        await getMultiPanelAgentBalance(true);
+        return { ok: true, username: user.alias, response };
+      }
 
       const expectedIncrease = Number(amount) / 100 + Number(bonusAmount) / 100;
       const verification = await verifyBalanceIncrease(async () => {
@@ -1375,6 +1516,7 @@ async function runMultiPanelManualOperation(data) {
         if (!Number.isFinite(balance)) throw new Error("MultiPanel devolvió un saldo no numérico al verificar.");
         return balance;
       }, initialBalance, expectedIncrease);
+      await getMultiPanelAgentBalance(true);
       if (verification.status === "pending") {
         return {
           ok: true,
@@ -2183,7 +2325,10 @@ async function getRemoteUserSearch(data) {
 function validateApiMessage(message, suffixes) {
   if (!API_MESSAGE_TYPES.has(message?.type)) return false;
   if (message.type === "AGENT_BALANCE_REQUEST" ||
-    message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return message.data === undefined;
+    message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") {
+    return message.data === undefined ||
+      (message.data && message.data.force === true && Object.keys(message.data).length === 1);
+  }
   if (message.type === "TOP_USER_BALANCES_REQUEST") {
     return ["ganamos", "multipanel"].includes(message.data?.platform) &&
       message.data?.page === 0;
@@ -2232,8 +2377,8 @@ async function executeApiMessage(message) {
   if (!validateApiMessage(message, suffixes)) {
     return { ok: false, error: "Solicitud no válida." };
   }
-  if (message.type === "AGENT_BALANCE_REQUEST") return getGanamosAgentBalance();
-  if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return getMultiPanelAgentBalance();
+  if (message.type === "AGENT_BALANCE_REQUEST") return getGanamosAgentBalance(message.data?.force === true);
+  if (message.type === "MULTIPANEL_AGENT_BALANCE_REQUEST") return getMultiPanelAgentBalance(message.data?.force === true);
   if (message.type === "USER_SEARCH_REQUEST") return searchUsersByDigits(message.data.digits);
   if (message.type === "TOP_USER_BALANCES_REQUEST") {
     return getTopPlatformUsersByBalance(message.data);
@@ -2845,6 +2990,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((error) => sendResponse({
         ok: false,
         error: error.message || "No se pudo recibir la configuración de plataformas caídas."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_BALANCE_SYNC_PUBLISH") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de sincronización no válida." });
+      return;
+    }
+    publishSharedBalanceState()
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo publicar el balance compartido."
+      }));
+    return true;
+  }
+
+  if (message?.type === "BRIDGE_BALANCE_SYNC_POLL") {
+    if (!isWhatsAppSender(sender)) {
+      sendResponse({ ok: false, error: "Solicitud de sincronización no válida." });
+      return;
+    }
+    syncSharedBalanceState(message.revision)
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error.message || "No se pudo recibir el balance compartido."
       }));
     return true;
   }

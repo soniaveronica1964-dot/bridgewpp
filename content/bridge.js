@@ -1,6 +1,7 @@
 (() => {
   const BRIDGE_URL = "http://127.0.0.1:32145";
   const RETRY_DELAY_MS = 1500;
+  const IDLE_POLL_DELAY_MS = 25;
   const sleep = (delay) => new Promise((resolve) => window.setTimeout(resolve, delay));
   const platformQueues = {
     ganamos: Promise.resolve(),
@@ -81,7 +82,10 @@
           await sleep(RETRY_DELAY_MS);
           continue;
         }
-        if (!polled.task) continue;
+        if (!polled.task) {
+          await sleep(IDLE_POLL_DELAY_MS);
+          continue;
+        }
         enqueuePrimaryTask(polled.task);
       } catch (error) {
         console.error("[Ganamos balance extension] Error de conexión con el puente local.", error);
@@ -177,6 +181,21 @@
     }
   }
 
+  async function runPrimaryBalanceSyncBridge() {
+    while (true) {
+      try {
+        const result = await sendRuntimeMessage({ type: "BRIDGE_BALANCE_SYNC_PUBLISH" });
+        if (!result?.ok) {
+          throw new Error(result?.error || "No se pudo publicar el balance compartido.");
+        }
+        await sleep(20_000);
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo sincronizar el balance compartido desde el perfil principal.", error);
+        await sleep(5000);
+      }
+    }
+  }
+
   async function runSecondaryPlatformOutagesBridge() {
     let revision = 0;
     while (true) {
@@ -191,6 +210,39 @@
         revision = update.revision;
       } catch (error) {
         console.error("[Ganamos balance extension] No se pudieron recibir las plataformas caídas del perfil principal.", error);
+        await sleep(5000);
+      }
+    }
+  }
+
+  async function runSecondaryBalanceSyncBridge() {
+    let revision = 0;
+    while (true) {
+      try {
+        const update = await sendRuntimeMessage({
+          type: "BRIDGE_BALANCE_SYNC_POLL",
+          revision
+        });
+        if (!update?.ok) {
+          throw new Error(update?.error || "No se pudo consultar el balance compartido.");
+        }
+        if (update.changed && update.state && typeof update.state === "object") {
+          for (const platform of ["ganamos", "multipanel"]) {
+            const sharedBalance = update.state[platform];
+            if (sharedBalance && typeof sharedBalance === "object" &&
+              typeof sharedBalance.balance === "string") {
+              window.postMessage({
+                type: "GANAMOS_SHARED_BALANCE_UPDATE",
+                platform,
+                balance: sharedBalance.balance,
+                currency: sharedBalance.currency
+              }, "*");
+            }
+          }
+        }
+        revision = update.revision;
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo recibir el balance compartido del perfil principal.", error);
         await sleep(5000);
       }
     }
@@ -267,9 +319,11 @@
         void runPrimaryBonusConfigBridge();
         void runPrimaryAdvertisingProfilesBridge();
         void runPrimaryPlatformOutagesBridge();
+        void runPrimaryBalanceSyncBridge();
       } else if (bridgeRole === "secondary" && typeof bridgeToken === "string" && bridgeToken) {
         void runSecondaryAdvertisingProfilesBridge();
         void runSecondaryPlatformOutagesBridge();
+        void runSecondaryBalanceSyncBridge();
         getStatusBridgeProfileId()
           .then(async (profileId) => {
             let profileName = `Perfil ${profileId.slice(0, 8)}`;

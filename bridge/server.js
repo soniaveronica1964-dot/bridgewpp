@@ -45,11 +45,14 @@ let platformOutageConfig = { ganamos: false, multipanel: false };
 let platformOutageRevision = 1;
 let hiddenAdvertisingProfiles = [];
 let hiddenAdvertisingProfilesRevision = 0;
+let sharedBalanceState = { ganamos: null, multipanel: null };
+let sharedBalanceRevision = 0;
 const queuedRequests = [];
 const waitingPolls = [];
 const waitingBonusConfigPolls = [];
 const waitingPlatformOutagePolls = [];
 const waitingHiddenAdvertisingProfilesPolls = [];
+const waitingBalanceSyncPolls = [];
 const waitingStatusUpdatePolls = [];
 const pendingRequests = new Map();
 const remoteNonces = new Map();
@@ -192,6 +195,57 @@ function waitForTask(response, origin) {
     clearTimeout(poll.timer);
     const index = waitingPolls.indexOf(poll);
     if (index !== -1) waitingPolls.splice(index, 1);
+  });
+}
+
+function isValidSharedBalanceState(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return false;
+  return Object.keys(state).every((platform) =>
+    ["ganamos", "multipanel"].includes(platform) &&
+    (state[platform] === null || (
+      state[platform] && typeof state[platform] === "object" &&
+      state[platform].ok === true &&
+      typeof state[platform].balance === "string" &&
+      state[platform].balance.trim() !== "" &&
+      (typeof state[platform].currency === "string" || state[platform].currency === undefined)
+    ))
+  );
+}
+
+function waitForSharedBalanceState(response, origin, revision) {
+  const currentState = JSON.stringify(sharedBalanceState);
+  if (revision < sharedBalanceRevision) {
+    sendJson(response, 200, {
+      ok: true,
+      revision: sharedBalanceRevision,
+      changed: true,
+      state: sharedBalanceState
+    }, origin);
+    return;
+  }
+  const poll = {
+    finish: () => sendJson(response, 200, {
+      ok: true,
+      revision: sharedBalanceRevision,
+      changed: currentState !== JSON.stringify(sharedBalanceState),
+      state: sharedBalanceState
+    }, origin),
+    timer: setTimeout(() => {
+      const index = waitingBalanceSyncPolls.indexOf(poll);
+      if (index !== -1) waitingBalanceSyncPolls.splice(index, 1);
+      sendJson(response, 200, {
+        ok: true,
+        revision: sharedBalanceRevision,
+        changed: false,
+        state: sharedBalanceState
+      }, origin);
+    }, POLL_TIMEOUT_MS)
+  };
+  waitingBalanceSyncPolls.push(poll);
+  response.on("close", () => {
+    clearTimeout(poll.timer);
+    const index = waitingBalanceSyncPolls.indexOf(poll);
+    if (index !== -1) waitingBalanceSyncPolls.splice(index, 1);
   });
 }
 
@@ -770,6 +824,49 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (url.pathname === "/v1/balance-sync" && request.method === "GET") {
+    if (role !== "client") {
+      sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden recibir el balance compartido." }, origin);
+      return;
+    }
+    const revision = Number(url.searchParams.get("revision") || 0);
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+      sendJson(response, 400, { ok: false, error: "La revisión del balance compartido no es válida." }, origin);
+      return;
+    }
+    waitForSharedBalanceState(response, origin, revision);
+    return;
+  }
+
+  if (url.pathname === "/v1/balance-sync" && request.method === "POST") {
+    if (role !== "primary") {
+      sendJson(response, 403, { ok: false, error: "Solo el perfil principal puede publicar el balance compartido." }, origin);
+      return;
+    }
+    let body;
+    try {
+      body = await readJson(request);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message }, origin);
+      return;
+    }
+    if (!Object.hasOwn(body || {}, "state") || !isValidSharedBalanceState(body.state)) {
+      sendJson(response, 400, { ok: false, error: "El estado compartido del balance no es válido." }, origin);
+      return;
+    }
+    const serializedState = JSON.stringify(body.state);
+    if (serializedState !== JSON.stringify(sharedBalanceState)) {
+      sharedBalanceState = JSON.parse(serializedState);
+      sharedBalanceRevision += 1;
+      for (const poll of waitingBalanceSyncPolls.splice(0)) {
+        clearTimeout(poll.timer);
+        poll.finish();
+      }
+    }
+    sendJson(response, 200, { ok: true, revision: sharedBalanceRevision }, origin);
+    return;
+  }
+
   if (url.pathname === "/v1/advertising-hidden-profiles" && request.method === "GET") {
     if (role !== "client") {
       sendJson(response, 403, { ok: false, error: "Solo los perfiles secundarios pueden recibir esta configuración." }, origin);
@@ -916,7 +1013,10 @@ function validateRemoteMessage(message) {
     return /^\d{4}$/.test(message.data?.digits || "");
   }
   return ["AGENT_BALANCE_REQUEST", "MULTIPANEL_AGENT_BALANCE_REQUEST"]
-    .includes(message?.type) && message.data === undefined;
+    .includes(message?.type) && (
+      message.data === undefined ||
+      (message.data && message.data.force === true && Object.keys(message.data).length === 1)
+    );
 }
 
 async function handleRemoteCreateRequest(request, response) {
