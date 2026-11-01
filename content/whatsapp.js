@@ -10050,82 +10050,111 @@
         confirm.disabled = false;
         if (!shouldContinue || host.dataset.accounts !== openedAccountsKey) return;
       }
-      confirm.disabled = true;
-      showToast(host, username, "Enviando solicitud...", "warning");
-      root.replaceChildren();
-      try {
-        const response = await chrome.runtime.sendMessage({
-          type: "TRANSACTION_REQUEST",
-          data: { operation, nombre: username, monto: amount, bonus, platform: selectedPlatform }
-        });
-        if (!response?.ok) throw new Error(response?.error || "La API no confirmó la operación.");
-        const amountValue = numericAmount;
-        let bonusClipboardWriteFailed = false;
-        if (operation === "deposit" && activeBonusConfig?.copyBonus === true && bonusValue > 0) {
-          try {
-            await navigator.clipboard.writeText(String(Math.round(bonusValue)));
-          } catch (error) {
-            bonusClipboardWriteFailed = true;
-            console.error("[Ganamos balance extension] No se pudo copiar el bono al portapapeles.", error);
-          }
-        }
-        const creditedAmount = operation === "deposit" ? amountValue + bonusValue : amountValue;
-        const amountSummary = `$${formatCurrency(creditedAmount)}`;
-        const bonusSummary = `$${formatCurrency(bonusValue)}`;
-        const pendingVerification = operation === "deposit" &&
-          response.verification?.status !== "verified";
-        let movementSaved = true;
-        if (!skipMovementRecord) {
-          try {
-            await saveAgentMovement(openedAccountsKey, operation, creditedAmount, selectedPlatform, {
-              username,
-              transactionAmount: amountValue,
-              bonusAmount: operation === "deposit" ? bonusValue : 0,
-              ...(advertisingDeposit ? { depositType: "advertising" } : {}),
-              status: pendingVerification ? "pending-verification" : undefined,
-              verification: response.verification
-            });
-            if (agentBalanceContactKey === openedAccountsKey) {
-              const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
-              if (agentBalanceHost) void renderAgentMovements(agentBalanceHost);
+      const performTransactionRequest = async (attempt = 0) => {
+        confirm.disabled = true;
+        showToast(host, username,
+          operation === "deposit" && attempt > 0
+            ? "Depósito pendiente. Reintentando en 10 segundos..."
+            : "Enviando solicitud...",
+          "warning");
+        root.replaceChildren();
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: "TRANSACTION_REQUEST",
+            data: { operation, nombre: username, monto: amount, bonus, platform: selectedPlatform }
+          });
+          if (!response?.ok) throw new Error(response?.error || "La API no confirmó la operación.");
+          const amountValue = numericAmount;
+          let bonusClipboardWriteFailed = false;
+          if (operation === "deposit" && activeBonusConfig?.copyBonus === true && bonusValue > 0) {
+            try {
+              await navigator.clipboard.writeText(String(Math.round(bonusValue)));
+            } catch (error) {
+              bonusClipboardWriteFailed = true;
+              console.error("[Ganamos balance extension] No se pudo copiar el bono al portapapeles.", error);
             }
-          } catch (error) {
-            movementSaved = false;
-            console.error("[Ganamos balance extension] No se pudo guardar el movimiento de la operación.", error);
           }
-        }
-        if (pendingVerification) {
-          const verification = response.verification;
-          const observed = Number.isFinite(verification?.finalBalance)
-            ? ` El saldo consultado pasó de $${formatBalance(verification.initialBalance)} a $${formatBalance(verification.finalBalance)}.`
-            : "";
-          const historyNotice = movementSaved
-            ? ""
-            : " Tampoco se pudo guardar el movimiento localmente.";
-          showToast(host, username,
-            `La plataforma respondió, pero no se pudo confirmar el depósito de ${amountSummary} (incluye $${bonusSummary} de bono). Quedó pendiente de verificación; revisá el saldo o historial antes de volver a cargar.${observed}${historyNotice}`,
-            "error");
-        } else {
-          showToast(host, username,
-            operation === "deposit"
-              ? `Depósito - ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} ${amountSummary} (+${bonusSummary}).`
-              : `Retiro ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} (${amountSummary}).`,
-            "success");
-          if (!movementSaved) {
-            showToast(host, username, "La operación se completó, pero no se pudo guardar el movimiento.", "error");
+          const creditedAmount = operation === "deposit" ? amountValue + bonusValue : amountValue;
+          const amountSummary = `$${formatCurrency(creditedAmount)}`;
+          const bonusSummary = `$${formatCurrency(bonusValue)}`;
+          const pendingVerification = operation === "deposit" &&
+            response.verification?.status !== "verified";
+          let movementSaved = true;
+          if (!skipMovementRecord) {
+            try {
+              await saveAgentMovement(openedAccountsKey, operation, creditedAmount, selectedPlatform, {
+                username,
+                transactionAmount: amountValue,
+                bonusAmount: operation === "deposit" ? bonusValue : 0,
+                ...(advertisingDeposit ? { depositType: "advertising" } : {}),
+                status: pendingVerification ? "pending-verification" : undefined,
+                verification: response.verification
+              });
+              if (agentBalanceContactKey === openedAccountsKey) {
+                const agentBalanceHost = document.getElementById(AGENT_BALANCE_HOST_ID);
+                if (agentBalanceHost) void renderAgentMovements(agentBalanceHost);
+              }
+            } catch (error) {
+              movementSaved = false;
+              console.error("[Ganamos balance extension] No se pudo guardar el movimiento de la operación.", error);
+            }
           }
+          if (pendingVerification) {
+            const verification = response.verification;
+            const observed = Number.isFinite(verification?.finalBalance)
+              ? ` El saldo consultado pasó de $${formatBalance(verification.initialBalance)} a $${formatBalance(verification.finalBalance)}.`
+              : "";
+            const historyNotice = movementSaved
+              ? ""
+              : " Tampoco se pudo guardar el movimiento localmente.";
+            showToast(host, username,
+              `La plataforma respondió, pero no se pudo confirmar el depósito de ${amountSummary} (incluye $${bonusSummary} de bono). Quedó pendiente de verificación; revisá el saldo o historial antes de volver a cargar.${observed}${historyNotice}`,
+              "error");
+          } else {
+            showToast(host, username,
+              operation === "deposit"
+                ? `Depósito - ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} ${amountSummary} (+${bonusSummary}).`
+                : `Retiro ${selectedPlatform === "ganamos" ? "Ganamos" : "MultiPanel"} (${amountSummary}).`,
+              "success");
+            if (!movementSaved) {
+              showToast(host, username, "La operación se completó, pero no se pudo guardar el movimiento.", "error");
+            }
+          }
+          if (bonusClipboardWriteFailed) {
+            showToast(host, username, "El depósito se completó, pero no se pudo copiar el bono al portapapeles.", "error");
+          }
+          void refreshBalance(host);
+          if (selectedPlatform === "ganamos") void refreshAgentBalance(undefined, { force: true });
+          else void refreshMultiPanelAgentBalance(undefined, { force: true });
+        } catch (exception) {
+          const transientDepositFailure = operation === "deposit" &&
+            /HTTP\s*400|400|rejected|tempor|timeout|pendiente/i.test(exception.message || "");
+          if (transientDepositFailure) {
+            try {
+              await saveAgentMovement(openedAccountsKey, "deposit", numericAmount, selectedPlatform, {
+                username,
+                transactionAmount: numericAmount,
+                bonusAmount: bonusValue,
+                status: "pending-verification",
+                verification: { status: "pending", reason: exception.message || "Reintento programado." }
+              });
+            } catch (saveError) {
+              console.error("[Ganamos balance extension] No se pudo dejar el depósito en pendiente.", saveError);
+            }
+            showToast(host, username, "Depósito pendiente. Reintentando en 10 segundos...", "warning");
+            window.setTimeout(() => {
+              if (host.dataset.accounts === openedAccountsKey) {
+                void performTransactionRequest(attempt + 1);
+              }
+            }, 10_000);
+            return;
+          }
+          showToast(host, username, exception.message || "No se pudo completar la operación.", "error");
+        } finally {
+          confirm.disabled = false;
         }
-        if (bonusClipboardWriteFailed) {
-          showToast(host, username, "El depósito se completó, pero no se pudo copiar el bono al portapapeles.", "error");
-        }
-        void refreshBalance(host);
-        if (selectedPlatform === "ganamos") void refreshAgentBalance(undefined, { force: true });
-        else void refreshMultiPanelAgentBalance(undefined, { force: true });
-      } catch (exception) {
-        showToast(host, username, exception.message || "No se pudo completar la operación.", "error");
-      } finally {
-        confirm.disabled = false;
-      }
+      };
+      await performTransactionRequest();
     });
     modal.addEventListener("click", (event) => {
       if (event.target === modal) root.replaceChildren();
