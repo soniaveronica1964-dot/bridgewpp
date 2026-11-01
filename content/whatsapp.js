@@ -109,6 +109,8 @@
   let topUserBalancesWithdrawalFilterButton = null;
   const pendingWithdrawalCompletions = new Set();
   let contactVisualTags = {};
+  let activeBonusConfigCache = null;
+  let activeBonusConfigLoadPromise = null;
   const blockedUserAccountSettings = new Set();
   const loadedBlockedUserAccountSettings = new Set();
   const pendingBlockedUserAccountSettings = new Set();
@@ -191,8 +193,9 @@
     ACTIVE_BONUS_CONFIG_KEY
   ])
     .then(({ ganamosSuffix, multiPanelSuffix, activeBonusConfig }) => {
+      activeBonusConfigCache = activeBonusConfig == null ? null : validateActiveBonusConfig(activeBonusConfig) || null;
       markUnreadAfterStatusUpdateEnabled =
-        activeBonusConfig?.[MARK_UNREAD_AFTER_STATUS_UPDATE_KEY] === true;
+        activeBonusConfigCache?.[MARK_UNREAD_AFTER_STATUS_UPDATE_KEY] === true;
       if (/^[a-z]$/i.test(ganamosSuffix || "") && /^[a-z]$/i.test(multiPanelSuffix || "") &&
         ganamosSuffix.toLowerCase() !== multiPanelSuffix.toLowerCase()) {
         platformSuffixes = {
@@ -207,8 +210,11 @@
 
   stateStorage.onChanged.addListener((changes, areaName) => {
     if (areaName === "local" && changes[ACTIVE_BONUS_CONFIG_KEY]) {
+      activeBonusConfigCache = changes[ACTIVE_BONUS_CONFIG_KEY].newValue == null
+        ? null
+        : validateActiveBonusConfig(changes[ACTIVE_BONUS_CONFIG_KEY].newValue) || null;
       markUnreadAfterStatusUpdateEnabled =
-        changes[ACTIVE_BONUS_CONFIG_KEY].newValue?.[
+        activeBonusConfigCache?.[
           MARK_UNREAD_AFTER_STATUS_UPDATE_KEY
         ] === true;
     }
@@ -1905,25 +1911,37 @@
   }
 
   async function readActiveBonusConfig() {
-    const stored = await stateStorage.get(ACTIVE_BONUS_CONFIG_KEY);
-    const config = stored[ACTIVE_BONUS_CONFIG_KEY];
-    if (config == null) return null;
-    const validated = validateActiveBonusConfig(config);
-    if (!validated) throw new Error("La configuración del bono activo no es válida.");
-    const requiredKeys = {
-      none: [],
-      simple: ["percent"],
-      double: ["ganamos", "multipanel"],
-      specific: ["percent"],
-      special: ["underThreshold", "overThreshold"],
-      mysterious: []
-    }[validated.type];
-    const hasRequiredPercents = requiredKeys.every((key) =>
-      isValidBonusPercent(validated[key]));
-    return {
-      ...validated,
-      enabled: validated.type !== "none" && (validated.enabled || hasRequiredPercents)
-    };
+    if (activeBonusConfigCache != null) return activeBonusConfigCache;
+    if (activeBonusConfigLoadPromise) {
+      return activeBonusConfigLoadPromise;
+    }
+    activeBonusConfigLoadPromise = (async () => {
+      const stored = await stateStorage.get(ACTIVE_BONUS_CONFIG_KEY);
+      const config = stored[ACTIVE_BONUS_CONFIG_KEY];
+      if (config == null) return null;
+      const validated = validateActiveBonusConfig(config);
+      if (!validated) throw new Error("La configuración del bono activo no es válida.");
+      const requiredKeys = {
+        none: [],
+        simple: ["percent"],
+        double: ["ganamos", "multipanel"],
+        specific: ["percent"],
+        special: ["underThreshold", "overThreshold"],
+        mysterious: []
+      }[validated.type];
+      const hasRequiredPercents = requiredKeys.every((key) =>
+        isValidBonusPercent(validated[key]));
+      const normalized = {
+        ...validated,
+        enabled: validated.type !== "none" && (validated.enabled || hasRequiredPercents)
+      };
+      activeBonusConfigCache = normalized;
+      return normalized;
+    })().catch((error) => {
+      activeBonusConfigLoadPromise = Promise.resolve(null);
+      throw error;
+    });
+    return activeBonusConfigLoadPromise;
   }
 
   function getMysteriousBonusOutcomes(config) {
@@ -9385,63 +9403,73 @@
         : host.dataset.username
           ? "ganamos"
           : "multipanel";
-    let activeBonusConfig = null;
+    let activeBonusConfig = activeBonusConfigCache;
     let activeBonusConfigLoadFailed = false;
     let bonusDisabled = host.dataset.bonusDisabled === "true";
     let modal = null;
     let refreshDepositBonusUi = () => {};
+    const shouldLazyLoadActiveBonusConfig = operation === "deposit" &&
+      !advertisingDeposit &&
+      !skipAutomaticBonus &&
+      depositButtonRole !== "compact";
     if (operation === "deposit") {
-      void (async () => {
-        try {
-          const [loadedBonusConfig, loadedBonusDisabled] = await Promise.all([
-            readActiveBonusConfig().catch((error) => {
-              activeBonusConfigLoadFailed = true;
-              console.error("[Ganamos balance extension] No se pudo cargar el bono activo para el depósito.", error);
-              return null;
-            }),
-            !advertisingDeposit
-              ? readUserBonusDisabled(getSportBetsPreferenceId(host)).catch((error) => {
-                console.error(
-                  "[Ganamos balance extension] No se pudo cargar la configuración de bono por usuario.",
-                  error
-                );
-                return bonusDisabled;
-              })
-              : Promise.resolve(bonusDisabled)
-          ]);
-          activeBonusConfig = loadedBonusConfig;
-          bonusDisabled = loadedBonusDisabled;
-          if (host.dataset.accounts !== openedAccountsKey) return;
-          updateUserBonusDisabledPresentation(host, bonusDisabled);
-          if (advertisingDeposit && activeBonusConfigLoadFailed) {
-            showToast(host, getPlatformUsername(selectedPlatform), "No se pudo cargar el bono activo para este depósito.", "error");
-            return;
+      if (depositButtonRole === "compact") {
+        activeBonusConfig = null;
+        skipAutomaticBonus = true;
+      }
+      if (shouldLazyLoadActiveBonusConfig) {
+        void (async () => {
+          try {
+            const [loadedBonusConfig, loadedBonusDisabled] = await Promise.all([
+              readActiveBonusConfig().catch((error) => {
+                activeBonusConfigLoadFailed = true;
+                console.error("[Ganamos balance extension] No se pudo cargar el bono activo para el depósito.", error);
+                return null;
+              }),
+              !advertisingDeposit
+                ? readUserBonusDisabled(getSportBetsPreferenceId(host)).catch((error) => {
+                  console.error(
+                    "[Ganamos balance extension] No se pudo cargar la configuración de bono por usuario.",
+                    error
+                  );
+                  return bonusDisabled;
+                })
+                : Promise.resolve(bonusDisabled)
+            ]);
+            activeBonusConfig = loadedBonusConfig;
+            bonusDisabled = loadedBonusDisabled;
+            if (host.dataset.accounts !== openedAccountsKey) return;
+            updateUserBonusDisabledPresentation(host, bonusDisabled);
+            if (advertisingDeposit && activeBonusConfigLoadFailed) {
+              showToast(host, getPlatformUsername(selectedPlatform), "No se pudo cargar el bono activo para este depósito.", "error");
+              return;
+            }
+            if (operation === "deposit" && !advertisingDeposit && depositButtonRole) {
+              skipAutomaticBonus = bonusDisabled ||
+                Boolean(activeBonusConfig?.invertDepositButtons) === (depositButtonRole === "main");
+            }
+            if (advertisingDeposit &&
+              (!activeBonusConfig?.activeAdvertising ||
+                !isValidBonusPercent(activeBonusConfig.advertisingPercent))) {
+              showToast(
+                host,
+                getPlatformUsername(selectedPlatform),
+                "Activá Publi Activa y configurá un porcentaje válido antes de usar este depósito.",
+                "error"
+              );
+              return;
+            }
+            if (modal && root && root.contains(modal)) {
+              refreshDepositBonusUi();
+            }
+            if (typeof updateDepositSummary === "function") {
+              updateDepositSummary();
+            }
+          } catch (error) {
+            console.error("[Ganamos balance extension] No se pudo preparar el diálogo de depósito.", error);
           }
-          if (operation === "deposit" && !advertisingDeposit && depositButtonRole) {
-            skipAutomaticBonus = bonusDisabled ||
-              Boolean(activeBonusConfig?.invertDepositButtons) === (depositButtonRole === "main");
-          }
-          if (advertisingDeposit &&
-            (!activeBonusConfig?.activeAdvertising ||
-              !isValidBonusPercent(activeBonusConfig.advertisingPercent))) {
-            showToast(
-              host,
-              getPlatformUsername(selectedPlatform),
-              "Activá Publi Activa y configurá un porcentaje válido antes de usar este depósito.",
-              "error"
-            );
-            return;
-          }
-          if (modal && root && root.contains(modal)) {
-            refreshDepositBonusUi();
-          }
-          if (typeof updateDepositSummary === "function") {
-            updateDepositSummary();
-          }
-        } catch (error) {
-          console.error("[Ganamos balance extension] No se pudo preparar el diálogo de depósito.", error);
-        }
-      })();
+        })();
+      }
     }
     const mysteriousBonusPercent = activeBonusConfig?.enabled && activeBonusConfig.type === "mysterious"
       ? chooseMysteriousBonusPercent(activeBonusConfig)
