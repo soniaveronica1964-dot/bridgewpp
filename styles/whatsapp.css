@@ -39,8 +39,7 @@
 
 :host(#ganamos-contact-flow-counters) {
   z-index: 2147483646;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: visible;
 }
 
 .contact-flow-counter-panel {
@@ -66,10 +65,156 @@
   overflow-wrap: anywhere;
 }
 
+.contact-flow-counter-heading {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: #d7dfdd;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.contact-flow-counter-heading:hover:not(:disabled),
+.contact-flow-counter-heading:focus-visible {
+  color: #ffffff;
+  text-decoration: underline;
+  outline: none;
+}
+
 .contact-flow-counter-panel h2:not(:first-child),
 .contact-flow-counter-configure {
   padding-top: 4px;
   border-top: 1px solid rgb(255 255 255 / 35%);
+}
+
+.contact-flow-arrived-popup {
+  position: fixed;
+  inset: 50% auto auto 50%;
+  z-index: 2147483647;
+  display: none;
+  width: min(520px, calc(100vw - 24px));
+  max-height: min(80vh, 720px);
+  transform: translate(-50%, -50%);
+  padding: 10px;
+  border: 1px solid #53615f;
+  border-radius: 12px;
+  background: rgba(16, 17, 17, 0.96);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 50%);
+  color: #edf3f2;
+}
+
+.contact-flow-arrived-dialog {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  max-height: min(76vh, 680px);
+  overflow: hidden;
+}
+
+.contact-flow-arrived-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.contact-flow-arrived-header h2 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.contact-flow-arrived-summary {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.contact-flow-arrived-summary-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  color: #d7dfdd;
+}
+
+.contact-flow-arrived-summary-label {
+  opacity: 0.9;
+}
+
+.contact-flow-arrived-summary-value {
+  color: #ffffff;
+}
+
+.contact-flow-arrived-list {
+  display: grid;
+  gap: 6px;
+  max-height: min(48vh, 360px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.contact-flow-arrived-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.contact-flow-arrived-phone {
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.contact-flow-arrived-time {
+  color: #aab7b5;
+  font-size: 11px;
+}
+
+.contact-flow-arrived-empty {
+  padding: 10px 0;
+  color: #d7dfdd;
+  text-align: center;
+}
+
+.contact-flow-arrived-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.contact-flow-arrived-copy,
+.contact-flow-arrived-close {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+}
+
+.contact-flow-arrived-copy {
+  border: 1px solid #167356;
+  background: #1d2e2b;
+  color: #e2e8e7;
+}
+
+.contact-flow-arrived-copy:hover:not(:disabled) {
+  background: #213d36;
 }
 
 .contact-flow-counter-configure {

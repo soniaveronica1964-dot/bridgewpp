@@ -2321,6 +2321,10 @@
     if (processedIncomingMessages.get(metadataElement) === messageIdentity) return;
     const details = getIncomingMessageDetails(metadataElement);
     if (!details) return;
+    if (!shouldShowContactFlowCounters()) {
+      processedIncomingMessages.set(metadataElement, messageIdentity);
+      return;
+    }
     if (details.chat) contactFlowChatNumbers.set(details.chat, details.number);
     const now = Date.now();
     if (pruneExpiredContactFlowNumbers(now)) saveContactFlowCounters();
@@ -4150,6 +4154,158 @@
     return button;
   }
 
+  function createContactFlowArrivedPopup() {
+    const popup = document.createElement("div");
+    popup.className = "contact-flow-arrived-popup";
+    popup.hidden = true;
+    popup.style.display = "none";
+    popup.setAttribute("role", "dialog");
+    popup.setAttribute("aria-modal", "true");
+    popup.setAttribute("aria-label", "Detalle de Llegados");
+
+    const dialog = document.createElement("section");
+    dialog.className = "contact-flow-arrived-dialog";
+    dialog.setAttribute("aria-label", "Llegados");
+
+    const header = document.createElement("div");
+    header.className = "contact-flow-arrived-header";
+    const title = document.createElement("h2");
+    title.textContent = "Llegados";
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "secondary contact-flow-arrived-close";
+    closeButton.textContent = "Cerrar";
+    closeButton.addEventListener("click", () => {
+      popup.hidden = true;
+      popup.style.display = "none";
+    });
+    header.append(title, closeButton);
+
+    const summary = document.createElement("div");
+    summary.className = "contact-flow-arrived-summary";
+
+    const list = document.createElement("div");
+    list.className = "contact-flow-arrived-list";
+
+    const actions = document.createElement("div");
+    actions.className = "contact-flow-arrived-actions";
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "contact-flow-arrived-copy";
+    copyButton.textContent = "Copiar lista";
+    copyButton.addEventListener("click", async () => {
+      const text = buildContactFlowArrivedCopyText();
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(null, "Llegados", "Lista copiada al portapapeles.", "success");
+      } catch (error) {
+        console.error("[Ganamos balance extension] No se pudo copiar la lista de llegados.", error);
+        showToast(null, "Llegados", error.message || "No se pudo copiar la lista.", "error");
+      }
+    });
+    const closeSecondary = document.createElement("button");
+    closeSecondary.type = "button";
+    closeSecondary.className = "secondary contact-flow-arrived-close";
+    closeSecondary.textContent = "Cerrar";
+    closeSecondary.addEventListener("click", () => {
+      popup.hidden = true;
+      popup.style.display = "none";
+    });
+    actions.append(copyButton, closeSecondary);
+
+    dialog.append(header, summary, list, actions);
+    popup.append(dialog);
+    return { popup, summary, list };
+  }
+
+  function buildContactFlowArrivedCopyText() {
+    const arrivedNumbers = [...contactFlowCounters.countedNumbers]
+      .sort((left, right) => (right.countedAt || 0) - (left.countedAt || 0));
+    const derivedTotal = Object.values(contactFlowCounters.derived || {}).reduce((sum, value) =>
+      sum + (Number(value) || 0), 0);
+    const lines = [
+      "CONTEO DE LLEGADOS",
+      `Total: ${contactFlowCounters.arrived}`,
+      `Generación: ${contactFlowCounters.generation || 0}`,
+      `Números guardados: ${arrivedNumbers.length}`,
+      `Derivados: ${derivedTotal}`,
+      `Paneles: ${contactFlowCounters.panels.length || 0}`,
+      ""
+    ];
+    if (!arrivedNumbers.length) {
+      lines.push("Sin números registrados.");
+      return lines.join("\n");
+    }
+    lines.push(...arrivedNumbers.map(({ number, countedAt }) =>
+      `${new Date(countedAt || Date.now()).toLocaleString("es-AR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit"
+      })} - ${number}`
+    ));
+    return lines.join("\n");
+  }
+
+  function renderContactFlowArrivedPopup({ popup, summary, list }) {
+    const arrivedNumbers = [...contactFlowCounters.countedNumbers]
+      .sort((left, right) => (right.countedAt || 0) - (left.countedAt || 0));
+    const derivedTotal = Object.values(contactFlowCounters.derived || {}).reduce((sum, value) =>
+      sum + (Number(value) || 0), 0);
+    const summaryItems = [
+      { label: "Total", value: String(contactFlowCounters.arrived) },
+      { label: "Generación", value: String(contactFlowCounters.generation || 0) },
+      { label: "Números guardados", value: String(arrivedNumbers.length) },
+      { label: "Derivados", value: String(derivedTotal) },
+      { label: "Paneles", value: String(contactFlowCounters.panels.length || 0) }
+    ];
+    summary.replaceChildren(
+      ...summaryItems.map(({ label, value }) => {
+        const item = document.createElement("div");
+        item.className = "contact-flow-arrived-summary-item";
+        const labelNode = document.createElement("span");
+        labelNode.className = "contact-flow-arrived-summary-label";
+        labelNode.textContent = label;
+        const valueNode = document.createElement("strong");
+        valueNode.className = "contact-flow-arrived-summary-value";
+        valueNode.textContent = value;
+        item.append(labelNode, valueNode);
+        return item;
+      })
+    );
+
+    if (!arrivedNumbers.length) {
+      list.replaceChildren(Object.assign(document.createElement("div"), {
+        className: "contact-flow-arrived-empty",
+        textContent: "Todavía no hay números registrados."
+      }));
+    } else {
+      const items = arrivedNumbers.map(({ number, countedAt }) => {
+        const row = document.createElement("div");
+        row.className = "contact-flow-arrived-item";
+        const phone = document.createElement("span");
+        phone.className = "contact-flow-arrived-phone";
+        phone.textContent = number;
+        const time = document.createElement("span");
+        time.className = "contact-flow-arrived-time";
+        time.textContent = new Date(countedAt || Date.now()).toLocaleString("es-AR", {
+          day: "2-digit",
+          month: "2-digit",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit"
+        });
+        row.append(phone, time);
+        return row;
+      });
+      list.replaceChildren(...items);
+    }
+
+    popup.hidden = false;
+    popup.style.display = "grid";
+  }
+
   function createContactFlowCounterPanel() {
     const host = document.createElement("div");
     host.id = CONTACT_FLOW_COUNTER_HOST_ID;
@@ -4185,8 +4341,27 @@
     const panel = document.createElement("section");
     panel.className = "contact-flow-counter-panel";
     panel.setAttribute("aria-label", "Contadores de llegados y derivados");
-    const arrivedHeading = document.createElement("h2");
+    panel.style.position = "relative";
+    const { popup: arrivedPopup, summary: arrivedSummary, list: arrivedNumbersList } = createContactFlowArrivedPopup();
+    const arrivedHeading = document.createElement("button");
+    arrivedHeading.type = "button";
+    arrivedHeading.className = "contact-flow-counter-heading";
     arrivedHeading.textContent = "Llegados";
+    arrivedHeading.title = "Ver detalle de llegados";
+    arrivedHeading.setAttribute("aria-expanded", "false");
+    arrivedHeading.setAttribute("aria-haspopup", "dialog");
+    arrivedHeading.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (arrivedPopup.hidden || arrivedPopup.style.display === "none") {
+        renderContactFlowArrivedPopup({ popup: arrivedPopup, summary: arrivedSummary, list: arrivedNumbersList });
+        arrivedHeading.setAttribute("aria-expanded", "true");
+      } else {
+        arrivedPopup.hidden = true;
+        arrivedPopup.style.display = "none";
+        arrivedHeading.setAttribute("aria-expanded", "false");
+      }
+    });
     const arrivedRows = document.createElement("div");
     arrivedRows.className = "contact-flow-counter-rows";
     arrivedRows.append(createContactFlowCounterRow("arrived", "Total"));
@@ -4215,7 +4390,7 @@
       () => void copyContactFlowCounters()
     );
     actions.append(resetButton, copyButton);
-    panel.append(arrivedHeading, arrivedRows, derivedHeading, contactFlowDerivedRows, actions);
+    panel.append(arrivedHeading, arrivedPopup, arrivedRows, derivedHeading, contactFlowDerivedRows, actions);
     shadow.append(stylesheet, panel);
     document.documentElement.append(host);
     renderContactFlowDerivedCounters();
