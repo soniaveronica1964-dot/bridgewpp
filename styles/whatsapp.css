@@ -66,19 +66,27 @@
 }
 
 .contact-flow-counter-heading {
-  width: 100%;
-  margin: 0;
-  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 0 2px;
   border: 0;
   border-radius: 0;
   color: #d7dfdd;
   background: transparent;
   font-size: 11px;
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1;
   text-align: center;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  justify-self: center;
   cursor: pointer;
+  min-height: 0;
+  height: auto;
 }
 
 .contact-flow-counter-heading:hover:not(:disabled),
