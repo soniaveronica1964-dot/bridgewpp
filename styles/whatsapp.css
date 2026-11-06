@@ -3766,6 +3766,34 @@ input::placeholder {
   pointer-events: auto;
 }
 
+.toast[hidden],
+.toast-summary[hidden] {
+  display: none !important;
+}
+
+.toast-summary {
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  border: 1px solid #52615f;
+  border-left: 4px solid #6bb1ff;
+  border-radius: 8px;
+  color: #dfeafb;
+  background: #1d2d36;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  pointer-events: auto;
+}
+
+.toast-summary:hover:not(:disabled),
+.toast-summary:focus-visible {
+  border-color: #7ea8d6;
+  background: #233743;
+  outline: none;
+}
+
 .toast-message {
   flex: 1;
   overflow-wrap: anywhere;

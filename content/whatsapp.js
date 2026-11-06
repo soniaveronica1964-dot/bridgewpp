@@ -35,6 +35,7 @@
   const CONTACT_FLOW_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
   const CONTACT_FLOW_COUNTED_NUMBER_TTL_MS = 12 * 60 * 60 * 1000;
   const TOAST_HOST_ID = "ganamos-toast-host";
+  const MAX_VISIBLE_TOASTS = 3;
   const AGENT_MOVEMENT_PREFIX = "agentMovement:";
   const AGENT_BALANCE_VIEWS = ["minimized", "balance", "daily", "weekly", "monthly", "total"];
   const AGENT_MOVEMENT_VIEWS = ["daily", "weekly", "monthly", "total"];
@@ -1650,10 +1651,70 @@
     return stack;
   }
 
+  function syncToastVisibility(root) {
+    const toasts = [...root.querySelectorAll(".toast:not(.toast-summary)")];
+    const summary = root.querySelector(".toast-summary");
+    const expanded = root.dataset.expanded === "true";
+    const overflowCount = Math.max(0, toasts.length - MAX_VISIBLE_TOASTS);
+
+    if (overflowCount <= 0) {
+      summary?.remove();
+      for (const toast of toasts) {
+        toast.hidden = false;
+        toast.style.display = "";
+      }
+      return;
+    }
+
+    const buttonLabel = expanded
+      ? `Cerrar ${overflowCount} más`
+      : `Ver ${overflowCount} más`;
+
+    let summaryButton = summary;
+    if (!summaryButton) {
+      summaryButton = document.createElement("button");
+      summaryButton.type = "button";
+      summaryButton.className = "toast toast-summary";
+      summaryButton.setAttribute("aria-expanded", String(expanded));
+      summaryButton.addEventListener("click", () => {
+        root.dataset.expanded = String(root.dataset.expanded !== "true");
+        syncToastVisibility(root);
+      });
+      root.append(summaryButton);
+    }
+
+    summaryButton.textContent = buttonLabel;
+    summaryButton.setAttribute("aria-expanded", String(expanded));
+    summaryButton.hidden = false;
+    summaryButton.style.display = "";
+
+    for (const [index, toast] of toasts.entries()) {
+      const shouldHide = !expanded && index >= MAX_VISIBLE_TOASTS;
+      toast.hidden = shouldHide;
+      toast.style.display = shouldHide ? "none" : "";
+    }
+  }
+
+  function getPlatformFromToastContext(username, toastKey) {
+    const platformCandidates = [
+      typeof username === "string" ? username : "",
+      typeof toastKey === "string" ? toastKey : ""
+    ];
+    for (const candidate of platformCandidates) {
+      const normalizedCandidate = candidate.toLowerCase();
+      if (normalizedCandidate.includes("ganamos")) return "ganamos";
+      if (normalizedCandidate.includes("multipanel")) return "multipanel";
+    }
+    return null;
+  }
+
   function showToast(_host, username, message, type, toastKey = username) {
+    const platform = type === "error" ? getPlatformFromToastContext(username, toastKey) : null;
+    if (platform && platformOutageConfig[platform]) return;
+
     const root = getToastStack();
 
-    for (const toast of root.querySelectorAll(".toast")) {
+    for (const toast of root.querySelectorAll(".toast:not(.toast-summary)")) {
       if (toast.dataset.toastKey === toastKey) {
         window.clearTimeout(toast.dismissTimer);
         toast.remove();
@@ -1673,6 +1734,7 @@
     const dismiss = () => {
       window.clearTimeout(toast.dismissTimer);
       toast.remove();
+      syncToastVisibility(root);
     };
     if (type === "error") {
       const close = document.createElement("button");
@@ -1686,15 +1748,18 @@
       toast.dismissTimer = window.setTimeout(dismiss, 3000);
     }
     root.append(toast);
+    syncToastVisibility(root);
   }
 
   function dismissToast(toastKey) {
-    for (const toast of getToastStack().querySelectorAll(".toast")) {
+    const root = getToastStack();
+    for (const toast of [...root.querySelectorAll(".toast:not(.toast-summary)")]) {
       if (toast.dataset.toastKey === toastKey) {
         window.clearTimeout(toast.dismissTimer);
         toast.remove();
       }
     }
+    syncToastVisibility(root);
   }
 
   function reportAgentBalanceError(platform, message) {
