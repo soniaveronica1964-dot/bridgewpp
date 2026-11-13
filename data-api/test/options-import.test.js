@@ -197,6 +197,91 @@ test("options exporter reads profile state and verifies an encrypted archive", a
   );
 });
 
+test("reconnect updates a saved API origin only when server and device identity match", async () => {
+  const serverId = "11111111-1111-4111-8111-111111111111";
+  const workspaceId = "22222222-2222-4222-8222-222222222222";
+  const deviceId = "33333333-3333-4333-8333-333333333333";
+  const token = "T".repeat(43);
+  const requests = [];
+  const fetchMock = async (url) => {
+    const parsed = new URL(url);
+    requests.push(parsed.pathname);
+    let responseBody;
+    if (parsed.pathname === "/health") {
+      responseBody = { status: "healthy", apiVersion: 1, schemaVersion: 11 };
+    } else if (parsed.pathname === "/v1/server-info") {
+      responseBody = { serverId, workspaceId, tls: true, apiVersion: 1, schemaVersion: 11 };
+    } else if (parsed.pathname === "/v1/identity") {
+      responseBody = { serverId, workspaceId, deviceId };
+    } else {
+      throw new Error(`Unexpected API request: ${parsed.pathname}`);
+    }
+    return { ok: true, status: 200, async text() { return JSON.stringify(responseBody); } };
+  };
+  const { elements, handlers, nativeProfile } = createOptionsContext({}, fetchMock);
+  nativeProfile.apiOrigin = "https://192.168.1.18:3443";
+  nativeProfile.credential = token;
+  nativeProfile.deviceId = deviceId;
+  elements.get("#dataApiOrigin").value = "https://192.168.100.82:3443";
+
+  await handlers.get("#reconnectDataApi:click")();
+
+  assert.equal(nativeProfile.apiOrigin, "https://192.168.100.82:3443");
+  assert.equal(nativeProfile.credential, token);
+  assert.deepEqual(requests, ["/health", "/v1/server-info", "/v1/identity"]);
+  assert.match(elements.get("#connectionStatus").textContent, /Conexión actualizada/);
+
+  const otherServerFetch = async (url) => {
+    const parsed = new URL(url);
+    const responseBody = parsed.pathname === "/health"
+      ? { status: "healthy", apiVersion: 1, schemaVersion: 11 }
+      : parsed.pathname === "/v1/server-info"
+        ? {
+          serverId: "44444444-4444-4444-8444-444444444444",
+          workspaceId,
+          tls: true,
+          apiVersion: 1,
+          schemaVersion: 11
+        }
+        : { serverId, workspaceId, deviceId };
+    return { ok: true, status: 200, async text() { return JSON.stringify(responseBody); } };
+  };
+  const other = createOptionsContext({}, otherServerFetch);
+  other.nativeProfile.apiOrigin = "https://192.168.1.18:3443";
+  other.nativeProfile.credential = token;
+  other.nativeProfile.deviceId = deviceId;
+  other.elements.get("#dataApiOrigin").value = "https://192.168.100.82:3443";
+
+  await other.handlers.get("#reconnectDataApi:click")();
+
+  assert.equal(other.nativeProfile.apiOrigin, "https://192.168.1.18:3443");
+  assert.match(other.elements.get("#connectionStatus").textContent, /No se pudo actualizar la conexión/);
+
+  const otherDeviceFetch = async (url) => {
+    const parsed = new URL(url);
+    const responseBody = parsed.pathname === "/health"
+      ? { status: "healthy", apiVersion: 1, schemaVersion: 11 }
+      : parsed.pathname === "/v1/server-info"
+        ? { serverId, workspaceId, tls: true, apiVersion: 1, schemaVersion: 11 }
+        : {
+          serverId,
+          workspaceId,
+          deviceId: "55555555-5555-4555-8555-555555555555"
+        };
+    return { ok: true, status: 200, async text() { return JSON.stringify(responseBody); } };
+  };
+  const wrongDevice = createOptionsContext({}, otherDeviceFetch);
+  wrongDevice.nativeProfile.apiOrigin = "https://192.168.1.18:3443";
+  wrongDevice.nativeProfile.credential = token;
+  wrongDevice.nativeProfile.deviceId = deviceId;
+  wrongDevice.elements.get("#dataApiOrigin").value = "https://192.168.100.82:3443";
+
+  await wrongDevice.handlers.get("#reconnectDataApi:click")();
+
+  assert.equal(wrongDevice.nativeProfile.apiOrigin, "https://192.168.1.18:3443");
+  assert.match(wrongDevice.elements.get("#connectionStatus").textContent, /no se cambió el origen de API/);
+});
+
 test("options UI stages, previews, confirms, and resumes an import without exposing the passphrase", async () => {
   const storage = {
     ganamosSuffix: "f",

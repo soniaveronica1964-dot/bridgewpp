@@ -144,8 +144,15 @@
       </p>
       <form id="importForm">
         <label for="dataApiOrigin">Origen HTTPS de la API PostgreSQL en la LAN</label>
-        <input id="dataApiOrigin" type="url" value="https://192.168.1.18:3443"
-          autocomplete="url" required>
+      <input id="dataApiOrigin" type="url" placeholder="https://IP-privada:3443"
+        autocomplete="off" required>
+        <button id="reconnectDataApi" type="button">Verificar y actualizar conexión</button>
+        <p class="hint">
+          Para cambiar la dirección de un perfil ya enrolado, verifica primero
+          el certificado TLS y la identidad del mismo servidor y espacio de trabajo.
+          No importa ni modifica datos.
+        </p>
+        <p id="connectionStatus" role="status" aria-live="polite"></p>
         <label for="importFile">Archivo de respaldo cifrado</label>
         <input id="importFile" type="file" accept="application/json,.json" required>
         <label for="importPassphrase">Frase de contraseña del respaldo</label>

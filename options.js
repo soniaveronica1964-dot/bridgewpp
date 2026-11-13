@@ -33,6 +33,8 @@ const importApiOriginInput = document.querySelector("#dataApiOrigin");
 const confirmDifferentExtensionInput = document.querySelector("#confirmDifferentExtension");
 const importPreviewElement = document.querySelector("#importPreview");
 const importStatusElement = document.querySelector("#importStatus");
+const reconnectDataApiButton = document.querySelector("#reconnectDataApi");
+const connectionStatusElement = document.querySelector("#connectionStatus");
 const sharedDecisionLabel = document.querySelector("#sharedDecisionLabel");
 const sharedDecisionSelect = document.querySelector("#sharedDataDecision");
 const previewImportButton = document.querySelector("#previewImport");
@@ -469,25 +471,36 @@ async function requestDataApi(origin, route, { method = "GET", body, credential 
   }
 }
 
-async function ensureDataApiCredential(origin, serverInfo) {
+async function ensureDataApiCredential(origin, serverInfo, { allowEnrollment = true } = {}) {
   const stored = await sendNativeHost({ command: "get" });
   const credential = stored.credential;
   if (typeof credential === "string" && credential) {
     try {
-      if (stored.apiOrigin !== origin) {
-        throw new Error("La credencial de este perfil está vinculada a otro origen de API. Verificá la dirección antes de reenrolar.");
-      }
       const identity = await requestDataApi(origin, "/v1/identity", { credential });
       if (identity.serverId !== serverInfo.serverId ||
         identity.workspaceId !== serverInfo.workspaceId) {
         throw new Error("La credencial está enrolada en otro servidor o workspace. No se inició la importación.");
       }
+      if (stored.apiOrigin !== origin) {
+        if (!identity.deviceId || identity.deviceId !== stored.deviceId) {
+          throw new Error("La identidad del perfil no coincide con la credencial local; no se cambió el origen de API.");
+        }
+        await sendNativeHost({
+          command: "store",
+          apiOrigin: origin,
+          credential,
+          deviceId: identity.deviceId
+        });
+      }
       return { credential, identity };
     } catch (error) {
-      if (error.status !== 401 || !enrollmentCodeInput.value.trim()) throw error;
+      if (!allowEnrollment || error.status !== 401 || !enrollmentCodeInput.value.trim()) throw error;
     }
   }
 
+  if (!allowEnrollment) {
+    throw new Error("No se pudo verificar la credencial existente; no se modificó el origen de API.");
+  }
   const code = enrollmentCodeInput.value.trim();
   const deviceName = importDeviceNameInput.value.trim();
   if (!code || !deviceName || deviceName.length > 120) {
@@ -528,6 +541,42 @@ async function ensureDataApiCredential(origin, serverInfo) {
   enrollmentCodeInput.value = "";
   return { credential: enrollment.credential, identity };
 }
+
+reconnectDataApiButton.addEventListener("click", async () => {
+  reconnectDataApiButton.disabled = true;
+  connectionStatusElement.textContent = "";
+  try {
+    const origin = getDataApiOrigin(importApiOriginInput.value);
+    const permitted = await chrome.permissions.request({
+      origins: [getDataApiPermissionPattern(origin)]
+    });
+    if (!permitted) throw new Error("No se concedió permiso para conectarse a esta API HTTPS.");
+
+    const stored = await sendNativeHost({ command: "get" });
+    if (typeof stored.credential !== "string" || !stored.credential) {
+      throw new Error("Este perfil aún no está enrolado. Usá el flujo de importación para conectarlo.");
+    }
+
+    const health = await requestDataApi(origin, "/health");
+    if (health?.status !== "healthy" || health.apiVersion !== 1 || health.schemaVersion !== 11) {
+      throw new Error("La API no confirmó una versión compatible y el esquema de estado PostgreSQL.");
+    }
+    const serverInfo = await requestDataApi(origin, "/v1/server-info");
+    if (serverInfo?.tls !== true || serverInfo.apiVersion !== 1 || serverInfo.schemaVersion !== 11 ||
+      !/^[0-9a-f-]{36}$/i.test(serverInfo.serverId || "") ||
+      !/^[0-9a-f-]{36}$/i.test(serverInfo.workspaceId || "")) {
+      throw new Error("La identidad, versión o canal seguro de la API no coincide con lo esperado.");
+    }
+
+    await ensureDataApiCredential(origin, serverInfo, { allowEnrollment: false });
+    connectionStatusElement.textContent =
+      "Conexión actualizada; este perfil sigue enlazado al mismo servidor y dispositivo.";
+  } catch (error) {
+    connectionStatusElement.textContent = `No se pudo actualizar la conexión: ${error.message}`;
+  } finally {
+    reconnectDataApiButton.disabled = false;
+  }
+});
 
 function makeImportBatches(entries) {
   const batches = [];

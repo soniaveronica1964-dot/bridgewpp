@@ -179,6 +179,15 @@ de corregirlo. Si aparece **No se pudo conectar con la API HTTPS** o
 **Failed to fetch**, revisá primero la confianza TLS, luego permisos de Chrome,
 CORS/ID permitido, IP, puerto y firewall.
 
+Si cambia la IPv4 del servidor, emití un nuevo certificado HTTPS firmado por la
+misma CA raíz e incluí la nueva IP como SAN; Chrome no acepta que se cambie la
+dirección si el certificado solo cubre la anterior. Actualizá `ApiHost` en
+`%LOCALAPPDATA%\BridgeWppDataApi\api-config.json` del servidor, reiniciá la
+tarea **BridgeWpp Data API** y comprobá `/health`. En cada perfil Chrome ya
+enrolado, ingresá la nueva URL en **Origen HTTPS** y elegí **Verificar y
+actualizar conexión**. Ese botón comprueba TLS, servidor, workspace y
+dispositivo; no importa datos ni cambia la credencial.
+
 ## 6. Configurar Publi para usar solo altas remotas
 
 Después de importar, abrí las opciones y revisá explícitamente estos valores:
