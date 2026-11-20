@@ -90,6 +90,8 @@
   let pendingWithdrawalSaveQueue = Promise.resolve();
   let pendingWithdrawalsList = null;
   let pendingWithdrawalsToggle = null;
+  let pendingWithdrawalsLabel = null;
+  let pendingWithdrawalsCountBadge = null;
   let pendingWithdrawalsRenderedSignature = null;
   let pendingWithdrawalsTimer = null;
   let pendingWithdrawalBalanceRefreshInProgress = false;
@@ -407,6 +409,20 @@
     element.style.setProperty(property, value, "important");
   }
 
+  function findNativeChatFilterBar(root = document) {
+    return root.querySelector('[data-testid="chat_list_filters_row"]') ||
+      root.querySelector('[aria-label="chat-list-filters"]') ||
+      root.querySelector('[aria-label="Chat filters"]');
+  }
+
+  function isNativeChatFilterSelected(filter) {
+    if (!filter) return false;
+    const pressed = filter.getAttribute("aria-pressed");
+    return pressed !== null
+      ? pressed === "true"
+      : filter.getAttribute("aria-selected") === "true";
+  }
+
   function createChatFilterButton(label, nativeFilterId) {
     const button = document.createElement("button");
     button.type = "button";
@@ -469,7 +485,7 @@
   }
 
   function syncChatFilterButton(button, nativeFilter) {
-    const selected = nativeFilter.getAttribute("aria-selected") === "true";
+    const selected = isNativeChatFilterSelected(nativeFilter);
     const pressed = String(selected);
     if (button.getAttribute("aria-pressed") !== pressed) {
       button.setAttribute("aria-pressed", pressed);
@@ -499,8 +515,9 @@
   }
 
   function getSelectedNativeChatFilterId() {
-    return document.querySelector(
-      '[aria-label="chat-list-filters"] [role="tab"][aria-selected="true"]'
+    const nativeBar = findNativeChatFilterBar();
+    return nativeBar?.querySelector(
+      '[aria-pressed="true"], [aria-selected="true"]'
     )?.id || null;
   }
 
@@ -518,9 +535,7 @@
     if (clone.dataset.navigationPending === "true") return;
     clone.dataset.navigationPending = "true";
     archivedViewEntryFilterId = getSelectedNativeChatFilterId();
-    const allFilter = document.querySelector(
-      '[aria-label="chat-list-filters"] #all-filter'
-    );
+    const allFilter = findNativeChatFilterBar()?.querySelector("#all-filter");
     if (!allFilter) {
       clone.dataset.navigationPending = "false";
       console.error(
@@ -575,7 +590,7 @@
     }
 
     const existingClone = document.getElementById(ARCHIVED_CHAT_BUTTON_CLONE_ID);
-    const isUnreadSelected = unreadFilter.getAttribute("aria-selected") === "true";
+    const isUnreadSelected = isNativeChatFilterSelected(unreadFilter);
     if (!isUnreadSelected || nativeButton) {
       existingClone?.remove();
       return;
@@ -596,7 +611,7 @@
     for (let ancestor = sidebar, depth = 0;
       ancestor && ancestor !== document.documentElement && depth < 6;
       ancestor = ancestor.parentElement, depth += 1) {
-      const nativeBar = ancestor.querySelector('[aria-label="chat-list-filters"]');
+      const nativeBar = findNativeChatFilterBar(ancestor);
       const allFilter = nativeBar?.querySelector("#all-filter");
       const unreadFilter = nativeBar?.querySelector("#label_item_1");
       if (!nativeBar || !allFilter || !unreadFilter) continue;
@@ -2717,13 +2732,15 @@
 
   function renderPendingWithdrawals() {
     const host = document.getElementById(PENDING_WITHDRAWALS_HOST_ID);
-    if (!host || !pendingWithdrawalsToggle || !pendingWithdrawalsList) return;
+    if (!host || !pendingWithdrawalsToggle || !pendingWithdrawalsLabel ||
+      !pendingWithdrawalsCountBadge || !pendingWithdrawalsList) return;
     const homeIntroPanel = document.querySelector('[data-testid="intro-panel"]');
     const isWhatsAppHomeView = isVisible(homeIntroPanel);
     host.style.display = pendingWithdrawalsLoaded && isWhatsAppHomeView &&
       pendingWithdrawals.length
       ? ""
       : "none";
+    host.style.overflowY = pendingWithdrawalsExpanded ? "auto" : "visible";
     const count = pendingWithdrawals.length;
     const now = Date.now();
     const longestPendingAge = pendingWithdrawals.reduce(
@@ -2733,8 +2750,9 @@
     const longestPendingAgeLabel = pendingWithdrawals.length
       ? ` · ${Math.floor(Math.max(0, longestPendingAge) / 60_000)}m`
       : "";
-    pendingWithdrawalsToggle.textContent =
+    pendingWithdrawalsLabel.textContent =
       `${count} retiros pendientes${longestPendingAgeLabel}`;
+    pendingWithdrawalsCountBadge.textContent = String(count);
     pendingWithdrawalsToggle.setAttribute("aria-expanded", String(pendingWithdrawalsExpanded));
     pendingWithdrawalsList.hidden = !pendingWithdrawalsExpanded;
     if (!pendingWithdrawalsExpanded) {
@@ -2874,7 +2892,10 @@
     const homeIntroPanel = document.querySelector('[data-testid="intro-panel"]');
     topUserBalancesPanel.host.style.display = isVisible(homeIntroPanel) ? "" : "none";
     topUserBalancesPanel.host.style.width = topUserBalancesExpanded ? "320px" : "44px";
-    if (!topUserBalancesExpanded) return;
+    if (!topUserBalancesExpanded) {
+      updateTopUserBalancesPosition();
+      return;
+    }
 
     topUserBalancesContent.replaceChildren();
     if (topUserBalancesData.loading) {
@@ -2970,9 +2991,12 @@
     const pendingHost = document.getElementById(PENDING_WITHDRAWALS_HOST_ID);
     if (pendingHost && pendingHost.style.display !== "none") {
       const pendingBounds = pendingHost.getBoundingClientRect();
+      const joinedControls = !pendingWithdrawalsExpanded && !topUserBalancesExpanded;
       host.style.top = `${Math.ceil(pendingBounds.bottom + 8)}px`;
+      host.style.right = joinedControls ? "60px" : "12px";
     } else {
       host.style.top = "12px";
+      host.style.right = "12px";
     }
   }
 
@@ -3172,6 +3196,12 @@
     pendingWithdrawalsToggle = document.createElement("button");
     pendingWithdrawalsToggle.type = "button";
     pendingWithdrawalsToggle.className = "pending-withdrawals-toggle";
+    pendingWithdrawalsLabel = document.createElement("span");
+    pendingWithdrawalsLabel.className = "pending-withdrawals-label";
+    pendingWithdrawalsCountBadge = document.createElement("span");
+    pendingWithdrawalsCountBadge.className = "pending-withdrawals-count";
+    pendingWithdrawalsCountBadge.setAttribute("aria-hidden", "true");
+    pendingWithdrawalsToggle.append(pendingWithdrawalsLabel, pendingWithdrawalsCountBadge);
     pendingWithdrawalsToggle.addEventListener("click", () => {
       pendingWithdrawalsExpanded = !pendingWithdrawalsExpanded;
       renderPendingWithdrawals();
@@ -11314,11 +11344,11 @@
         return;
       }
 
-      const nativeBar = document.querySelector('[aria-label="chat-list-filters"]');
+      const nativeBar = findNativeChatFilterBar();
       const allFilter = nativeBar?.querySelector("#all-filter");
       const unreadFilter = nativeBar?.querySelector("#label_item_1");
       if (!allFilter || !unreadFilter ||
-        unreadFilter.getAttribute("aria-selected") !== "true") {
+        !isNativeChatFilterSelected(unreadFilter)) {
         finish();
         return;
       }
@@ -11330,10 +11360,10 @@
           finish();
           return;
         }
-        if (allFilter.getAttribute("aria-selected") === "true") {
+        if (isNativeChatFilterSelected(allFilter)) {
           unreadFilter.click();
           window.requestAnimationFrame(() => {
-            if (unreadFilter.getAttribute("aria-selected") !== "true") {
+            if (!isNativeChatFilterSelected(unreadFilter)) {
               console.error(
                 "[Ganamos balance extension] No se pudo volver al filtro «No leídos» al cerrar el chat."
               );
@@ -11362,11 +11392,11 @@
       isNormalChatCurrentlyOpen() ||
       !document.getElementById(ARCHIVED_CHAT_BUTTON_CLONE_ID)) return;
 
-    const nativeBar = document.querySelector('[aria-label="chat-list-filters"]');
+    const nativeBar = findNativeChatFilterBar();
     const allFilter = nativeBar?.querySelector("#all-filter");
     const unreadFilter = nativeBar?.querySelector("#label_item_1");
     if (!allFilter || !unreadFilter ||
-      unreadFilter.getAttribute("aria-selected") !== "true") return;
+      !isNativeChatFilterSelected(unreadFilter)) return;
 
     const archivedLifecycleVersion = archivedViewLifecycleVersion;
     const chatLifecycleVersionAtStart = chatLifecycleVersion;
@@ -11388,12 +11418,12 @@
         return;
       }
 
-      if (allFilter.getAttribute("aria-selected") === "true") {
+      if (isNativeChatFilterSelected(allFilter)) {
         hideChatFilters();
         unreadFilter.click();
         window.requestAnimationFrame(() => {
           if (canContinue() &&
-            unreadFilter.getAttribute("aria-selected") !== "true") {
+            !isNativeChatFilterSelected(unreadFilter)) {
             console.error(
               "[Ganamos balance extension] No se pudo actualizar el contador de Archivados en «No leídos»."
             );
@@ -11434,15 +11464,13 @@
         return;
       }
 
-      const unreadFilter = document.querySelector(
-        '[aria-label="chat-list-filters"] #label_item_1'
-      );
+      const unreadFilter = findNativeChatFilterBar()?.querySelector("#label_item_1");
       if (unreadFilter) {
-        if (unreadFilter.getAttribute("aria-selected") !== "true") {
+        if (!isNativeChatFilterSelected(unreadFilter)) {
           unreadFilter.click();
         }
         window.requestAnimationFrame(() => {
-          if (unreadFilter.getAttribute("aria-selected") !== "true") {
+          if (!isNativeChatFilterSelected(unreadFilter)) {
             console.error(
               "[Ganamos balance extension] No se pudo activar el filtro «No leídos» al salir de Archivados."
             );
@@ -11581,7 +11609,7 @@
   });
   observer.observe(document.documentElement, {
     attributes: true,
-    attributeFilter: ["aria-hidden", "aria-label", "aria-selected", "class", "data-id", "hidden", "style", "title"],
+    attributeFilter: ["aria-hidden", "aria-label", "aria-pressed", "aria-selected", "class", "data-id", "hidden", "style", "title"],
     childList: true,
     subtree: true,
     characterData: true
