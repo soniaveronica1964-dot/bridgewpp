@@ -563,6 +563,38 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(scheduledUsernameHistory.status, 200, JSON.stringify(scheduledUsernameHistory.body));
     assert.equal(scheduledUsernameHistory.body.movements.length, 1);
     assert.equal(scheduledUsernameHistory.body.movements[0].contactKey, unscheduledContactKey);
+    await pool.query(`
+      UPDATE agent_movements
+      SET platform = 'multipanel', username = 'user-x',
+          legacy_record_json = jsonb_set(
+            jsonb_set(legacy_record_json, '{platform}', '"multipanel"'::jsonb),
+            '{username}', '"user-x"'::jsonb
+          )
+      WHERE legacy_storage_key = 'agentMovement:1760000000000:uuid-1'
+    `);
+    const changedSuffixHistory = await request(
+      port,
+      "GET",
+      `/v1/movements?${new URLSearchParams({
+        multipanelUsername: "user-y",
+        multipanelUsernameBase: "user-"
+      })}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(changedSuffixHistory.status, 200, JSON.stringify(changedSuffixHistory.body));
+    assert.equal(changedSuffixHistory.body.movements.length, 1);
+    assert.equal(changedSuffixHistory.body.movements[0].username, "user-x");
+    await pool.query(`
+      UPDATE agent_movements
+      SET platform = 'ganamos', username = 'user-a',
+          legacy_record_json = jsonb_set(
+            jsonb_set(legacy_record_json, '{platform}', '"ganamos"'::jsonb),
+            '{username}', '"user-a"'::jsonb
+          )
+      WHERE legacy_storage_key = 'agentMovement:1760000000000:uuid-1'
+    `);
     const advertisingTimestamp = Date.now() - 10 * 24 * 60 * 60 * 1000;
     const olderAdvertisingTimestamp = Date.now() - 70 * 24 * 60 * 60 * 1000;
     const advertisingMovements = {

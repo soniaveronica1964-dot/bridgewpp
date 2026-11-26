@@ -2568,8 +2568,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const filters = message.filters && typeof message.filters === "object" &&
       !Array.isArray(message.filters) ? message.filters : {};
     const allowedFilters = new Set([
-      "accountIds", "contactKey", "ganamosUsername", "legacyContactKeys", "multipanelUsername",
-      "operation", "since", "limit", "ownProfile"
+      "accountIds", "contactKey", "ganamosUsername", "ganamosUsernameBase", "legacyContactKeys",
+      "multipanelUsername", "multipanelUsernameBase", "operation", "since", "limit", "ownProfile"
     ]);
     if (Object.keys(filters).some((key) => !allowedFilters.has(key)) ||
       (Object.hasOwn(filters, "ownProfile") && typeof filters.ownProfile !== "boolean") ||
@@ -2590,7 +2590,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           Object.hasOwn(filters, "accountIds") && !Array.isArray(filters.accountIds))) ||
       (Object.hasOwn(filters, "contactKey") &&
         (typeof filters.contactKey !== "string" || !filters.contactKey)) ||
-      (["ganamosUsername", "multipanelUsername"].some((key) =>
+      (["ganamosUsername", "ganamosUsernameBase", "multipanelUsername", "multipanelUsernameBase"].some((key) =>
         Object.hasOwn(filters, key) &&
         (typeof filters[key] !== "string" || !filters[key] || filters[key].length > 128 ||
           /[\u0000-\u001f\u007f]/.test(filters[key])))) ||
@@ -2620,6 +2620,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (typeof filters.multipanelUsername === "string") {
       query.set("multipanelUsername", filters.multipanelUsername);
     }
+    if (typeof filters.ganamosUsernameBase === "string") {
+      query.set("ganamosUsernameBase", filters.ganamosUsernameBase);
+    }
+    if (typeof filters.multipanelUsernameBase === "string") {
+      query.set("multipanelUsernameBase", filters.multipanelUsernameBase);
+    }
     if (typeof filters.operation === "string") query.set("operation", filters.operation);
     if (Number.isSafeInteger(filters.since)) query.set("since", String(filters.since));
     if (Number.isSafeInteger(filters.limit)) query.set("limit", String(filters.limit));
@@ -2628,11 +2634,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         response = await requestDataApi(`/v1/movements?${query}`);
       } catch (error) {
-        const hasUsernameFilters = query.has("ganamosUsername") || query.has("multipanelUsername");
+        const hasUsernameBaseFilters = [
+          "ganamosUsernameBase", "multipanelUsernameBase"
+        ].some((key) => query.has(key));
+        const hasUsernameFilters = [
+          "ganamosUsername", "ganamosUsernameBase", "multipanelUsername", "multipanelUsernameBase"
+        ].some((key) => query.has(key));
         if (error.code !== "invalid_movement_query" || !hasUsernameFilters) throw error;
+        if (hasUsernameBaseFilters) {
+          throw new Error(
+            "La API de datos no está actualizada para buscar movimientos con las terminaciones anteriores. " +
+            "Ejecutá data-api\\update-windows-api.ps1 como administrador en la PC que aloja la API y recargá WhatsApp."
+          );
+        }
         const compatibleQuery = new URLSearchParams(query);
-        compatibleQuery.delete("ganamosUsername");
-        compatibleQuery.delete("multipanelUsername");
+        for (const key of [
+          "ganamosUsername", "ganamosUsernameBase", "multipanelUsername", "multipanelUsernameBase"
+        ]) {
+          compatibleQuery.delete(key);
+        }
         console.warn(
           "[Ganamos balance extension] La API de datos debe reiniciarse para habilitar la búsqueda por usuario; se reintenta con los filtros compatibles."
         );

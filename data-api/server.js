@@ -2896,8 +2896,8 @@ function createDataApiServer({ pool, config }) {
         const identity = await authenticate(request);
         const query = new URL(request.url, "https://localhost").searchParams;
         const allowedParameters = new Set([
-          "accountId", "contactKey", "ganamosUsername", "legacyContactKey", "multipanelUsername",
-          "operation", "since", "limit", "source"
+          "accountId", "contactKey", "ganamosUsername", "ganamosUsernameBase", "legacyContactKey",
+          "multipanelUsername", "multipanelUsernameBase", "operation", "since", "limit", "source"
         ]);
         if ([...query.keys()].some((key) => !allowedParameters.has(key)) ||
           [...allowedParameters].some((key) =>
@@ -2908,14 +2908,16 @@ function createDataApiServer({ pool, config }) {
         const accountIds = query.getAll("accountId");
         const legacyContactKeys = query.getAll("legacyContactKey");
         const ganamosUsername = query.get("ganamosUsername");
+        const ganamosUsernameBase = query.get("ganamosUsernameBase");
         const multipanelUsername = query.get("multipanelUsername");
+        const multipanelUsernameBase = query.get("multipanelUsernameBase");
         if (accountIds.some((accountId) =>
           !/^(ganamos|multipanel):\d{4,20}$/.test(accountId)) ||
           new Set(accountIds).size !== accountIds.length ||
           legacyContactKeys.some((key) =>
             !key || key.length > 2048 || /[\u0000-\u001f\u007f]/.test(key)) ||
           new Set(legacyContactKeys).size !== legacyContactKeys.length ||
-          [ganamosUsername, multipanelUsername].some((username) =>
+          [ganamosUsername, ganamosUsernameBase, multipanelUsername, multipanelUsernameBase].some((username) =>
             username !== null &&
             (!username || username.length > 128 || /[\u0000-\u001f\u007f]/.test(username))) ||
           legacyContactKeys.length > 0 && accountIds.length === 0 &&
@@ -2983,6 +2985,19 @@ function createDataApiServer({ pool, config }) {
         if (multipanelUsername !== null) {
           parameters.push(multipanelUsername);
           identityFilters.push(`(platform = 'multipanel' AND username = $${parameters.length})`);
+        }
+        for (const [platform, usernameBase] of [
+          ["ganamos", ganamosUsernameBase],
+          ["multipanel", multipanelUsernameBase]
+        ]) {
+          if (usernameBase === null) continue;
+          parameters.push(usernameBase.toLowerCase());
+          const baseParameter = parameters.length;
+          identityFilters.push(
+            `(platform = '${platform}' AND char_length(username) = char_length($${baseParameter}) + 1 ` +
+            `AND left(lower(username), char_length($${baseParameter})) = $${baseParameter} ` +
+            `AND right(lower(username), 1) ~ '^[a-z]$')`
+          );
         }
         if (identityFilters.length) {
           filters.push(`(${identityFilters.join(" OR ")})`);

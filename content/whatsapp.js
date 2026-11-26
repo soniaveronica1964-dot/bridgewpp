@@ -1231,14 +1231,26 @@
     } catch {
       usernames = null;
     }
+    const ganamosUsernameBase = typeof usernames?.ganamos === "string"
+      ? getUsernameBase(usernames.ganamos, "ganamos")
+      : "";
+    const multipanelUsernameBase = typeof usernames?.multipanel === "string"
+      ? getUsernameBase(usernames.multipanel, "multipanel")
+      : "";
     return {
       ...(accountIds.length ? { accountIds } : {}),
       legacyContactKeys,
       ...(typeof usernames?.ganamos === "string" && usernames.ganamos
         ? { ganamosUsername: usernames.ganamos }
         : {}),
+      ...(ganamosUsernameBase && ganamosUsernameBase !== usernames.ganamos
+        ? { ganamosUsernameBase }
+        : {}),
       ...(typeof usernames?.multipanel === "string" && usernames.multipanel
         ? { multipanelUsername: usernames.multipanel }
+        : {}),
+      ...(multipanelUsernameBase && multipanelUsernameBase !== usernames.multipanel
+        ? { multipanelUsernameBase }
         : {})
     };
   }
@@ -7083,7 +7095,7 @@
         console.error("[Ganamos balance extension] No se pudo cargar el historial del usuario.", error);
         const failure = document.createElement("p");
         failure.className = "movement-history-empty movement-history-error";
-        failure.textContent = "No se pudo cargar el historial de movimientos.";
+        failure.textContent = error.message || "No se pudo cargar el historial de movimientos.";
         list.replaceChildren(failure);
       }
     };
