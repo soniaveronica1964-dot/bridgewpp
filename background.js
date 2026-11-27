@@ -2571,7 +2571,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       !Array.isArray(message.filters) ? message.filters : {};
     const allowedFilters = new Set([
       "accountIds", "contactKey", "ganamosUsername", "ganamosUsernameBase", "legacyContactKeys",
-      "multipanelUsername", "multipanelUsernameBase", "operation", "since", "limit", "ownProfile"
+      "ganamosUsernameSuffixes", "multipanelUsername", "multipanelUsernameBase",
+      "multipanelUsernameSuffixes", "operation", "since", "limit", "ownProfile"
     ]);
     if (Object.keys(filters).some((key) => !allowedFilters.has(key)) ||
       (Object.hasOwn(filters, "ownProfile") && typeof filters.ownProfile !== "boolean") ||
@@ -2596,6 +2597,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         Object.hasOwn(filters, key) &&
         (typeof filters[key] !== "string" || !filters[key] || filters[key].length > 128 ||
           /[\u0000-\u001f\u007f]/.test(filters[key])))) ||
+      (["ganamosUsernameSuffixes", "multipanelUsernameSuffixes"].some((key) =>
+        Object.hasOwn(filters, key) &&
+        (!Array.isArray(filters[key]) || filters[key].length < 1 || filters[key].length > 26 ||
+          filters[key].some((suffix) => typeof suffix !== "string" || !/^[a-z]$/.test(suffix)) ||
+          new Set(filters[key]).size !== filters[key].length))) ||
       (Object.hasOwn(filters, "operation") &&
         !["deposit", "withdrawal", "exchange"].includes(filters.operation)) ||
       (Object.hasOwn(filters, "since") &&
@@ -2625,8 +2631,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (typeof filters.ganamosUsernameBase === "string") {
       query.set("ganamosUsernameBase", filters.ganamosUsernameBase);
     }
+    if (Array.isArray(filters.ganamosUsernameSuffixes)) {
+      for (const suffix of filters.ganamosUsernameSuffixes) {
+        query.append("ganamosUsernameSuffix", suffix);
+      }
+    }
     if (typeof filters.multipanelUsernameBase === "string") {
       query.set("multipanelUsernameBase", filters.multipanelUsernameBase);
+    }
+    if (Array.isArray(filters.multipanelUsernameSuffixes)) {
+      for (const suffix of filters.multipanelUsernameSuffixes) {
+        query.append("multipanelUsernameSuffix", suffix);
+      }
     }
     if (typeof filters.operation === "string") query.set("operation", filters.operation);
     if (Number.isSafeInteger(filters.since)) query.set("since", String(filters.since));

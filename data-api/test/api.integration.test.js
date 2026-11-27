@@ -577,7 +577,8 @@ test("HTTPS migration imports preserve private and shared data atomically", {
       "GET",
       `/v1/movements?${new URLSearchParams({
         multipanelUsername: "user-y",
-        multipanelUsernameBase: "user-"
+        multipanelUsernameBase: "user-",
+        multipanelUsernameSuffix: "x"
       })}`,
       undefined,
       main.credential,
@@ -586,6 +587,19 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     assert.equal(changedSuffixHistory.status, 200, JSON.stringify(changedSuffixHistory.body));
     assert.equal(changedSuffixHistory.body.movements.length, 1);
     assert.equal(changedSuffixHistory.body.movements[0].username, "user-x");
+    const excludedSuffixHistory = await request(
+      port,
+      "GET",
+      `/v1/movements?${new URLSearchParams({
+        multipanelUsernameBase: "user-",
+        multipanelUsernameSuffix: "y"
+      })}`,
+      undefined,
+      main.credential,
+      extensionId
+    );
+    assert.equal(excludedSuffixHistory.status, 200, JSON.stringify(excludedSuffixHistory.body));
+    assert.equal(excludedSuffixHistory.body.movements.length, 0);
     await pool.query(`
       UPDATE agent_movements
       SET platform = 'ganamos', username = 'user-a',

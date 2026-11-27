@@ -1212,10 +1212,16 @@
     try {
       const contact = JSON.parse(contactKey);
       if (!contact || typeof contact !== "object" || !contact.usernames) return [];
-      const usernames = [...new Set([
+      const currentUsernames = [...new Set([
         contact.usernames.ganamos,
         contact.usernames.multipanel
       ].filter((username) => typeof username === "string" && username))];
+      const usernames = currentUsernames.length
+        ? currentUsernames
+        : [...new Set([
+          contact.legacyUsernames?.ganamos?.username,
+          contact.legacyUsernames?.multipanel?.username
+        ].filter((username) => typeof username === "string" && username))];
       const assignments = [];
       for (const username of usernames) {
         assignments.push({ ganamos: username, multipanel: null });
@@ -1243,35 +1249,53 @@
   }
 
   function getMovementAccountFilter(contactKey) {
-    const accountIds = getMovementAccountIds(contactKey);
     const legacyContactKeys = getLegacyMovementContactKeys(contactKey);
     if (!legacyContactKeys.length) return { contactKey };
-    let usernames;
+    let contact;
     try {
-      usernames = JSON.parse(contactKey)?.usernames;
+      contact = JSON.parse(contactKey);
     } catch {
-      usernames = null;
+      contact = null;
     }
+    const usernames = contact?.usernames;
+    const legacyUsernames = contact?.legacyUsernames;
+    const ganamosUsername = typeof usernames?.ganamos === "string"
+      ? usernames.ganamos
+      : legacyUsernames?.ganamos?.username || "";
+    const multipanelUsername = typeof usernames?.multipanel === "string"
+      ? usernames.multipanel
+      : legacyUsernames?.multipanel?.username || "";
     const ganamosUsernameBase = typeof usernames?.ganamos === "string"
       ? getUsernameBase(usernames.ganamos, "ganamos")
-      : "";
+      : legacyUsernames?.ganamos?.base || "";
     const multipanelUsernameBase = typeof usernames?.multipanel === "string"
       ? getUsernameBase(usernames.multipanel, "multipanel")
-      : "";
+      : legacyUsernames?.multipanel?.base || "";
     return {
-      ...(accountIds.length ? { accountIds } : {}),
       legacyContactKeys,
-      ...(typeof usernames?.ganamos === "string" && usernames.ganamos
-        ? { ganamosUsername: usernames.ganamos }
+      ...(ganamosUsername
+        ? { ganamosUsername }
         : {}),
-      ...(ganamosUsernameBase && ganamosUsernameBase !== usernames.ganamos
-        ? { ganamosUsernameBase }
+      ...(ganamosUsernameBase
+        ? {
+          ganamosUsernameBase,
+          ganamosUsernameSuffixes: [
+            platformSuffixes.ganamos,
+            ...legacyPlatformSuffixes.ganamos
+          ]
+        }
         : {}),
-      ...(typeof usernames?.multipanel === "string" && usernames.multipanel
-        ? { multipanelUsername: usernames.multipanel }
+      ...(multipanelUsername
+        ? { multipanelUsername }
         : {}),
-      ...(multipanelUsernameBase && multipanelUsernameBase !== usernames.multipanel
-        ? { multipanelUsernameBase }
+      ...(multipanelUsernameBase
+        ? {
+          multipanelUsernameBase,
+          multipanelUsernameSuffixes: [
+            platformSuffixes.multipanel,
+            ...legacyPlatformSuffixes.multipanel
+          ]
+        }
         : {})
     };
   }
@@ -11213,6 +11237,10 @@
         ganamos: usernames.ganamos,
         multipanel: usernames.multipanel,
         firstPlatform: usernames.firstPlatform
+      },
+      legacyUsernames: usernames && {
+        ganamos: usernames.legacy.ganamos,
+        multipanel: usernames.legacy.multipanel
       },
       phone
     });

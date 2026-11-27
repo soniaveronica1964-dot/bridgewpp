@@ -2900,26 +2900,38 @@ function createDataApiServer({ pool, config }) {
         const query = new URL(request.url, "https://localhost").searchParams;
         const allowedParameters = new Set([
           "accountId", "contactKey", "ganamosUsername", "ganamosUsernameBase", "legacyContactKey",
-          "multipanelUsername", "multipanelUsernameBase", "operation", "since", "limit", "source"
+          "ganamosUsernameSuffix", "multipanelUsername", "multipanelUsernameBase",
+          "multipanelUsernameSuffix", "operation", "since", "limit", "source"
         ]);
         if ([...query.keys()].some((key) => !allowedParameters.has(key)) ||
           [...allowedParameters].some((key) =>
-            !["accountId", "legacyContactKey"].includes(key) && query.getAll(key).length > 1) ||
-          query.getAll("accountId").length > 4 || query.getAll("legacyContactKey").length > 40) {
+            !["accountId", "legacyContactKey", "ganamosUsernameSuffix", "multipanelUsernameSuffix"]
+              .includes(key) && query.getAll(key).length > 1) ||
+          query.getAll("accountId").length > 4 || query.getAll("legacyContactKey").length > 40 ||
+          query.getAll("ganamosUsernameSuffix").length > 26 ||
+          query.getAll("multipanelUsernameSuffix").length > 26) {
           throw new ApiError(400, "invalid_movement_query", "Los filtros de movimientos no son válidos.");
         }
         const accountIds = query.getAll("accountId");
         const legacyContactKeys = query.getAll("legacyContactKey");
         const ganamosUsername = query.get("ganamosUsername");
         const ganamosUsernameBase = query.get("ganamosUsernameBase");
+        const ganamosUsernameSuffixes = query.getAll("ganamosUsernameSuffix");
         const multipanelUsername = query.get("multipanelUsername");
         const multipanelUsernameBase = query.get("multipanelUsernameBase");
+        const multipanelUsernameSuffixes = query.getAll("multipanelUsernameSuffix");
         if (accountIds.some((accountId) =>
           !/^(ganamos|multipanel):\d{4,20}$/.test(accountId)) ||
           new Set(accountIds).size !== accountIds.length ||
           legacyContactKeys.some((key) =>
             !key || key.length > 2048 || /[\u0000-\u001f\u007f]/.test(key)) ||
           new Set(legacyContactKeys).size !== legacyContactKeys.length ||
+          [...ganamosUsernameSuffixes, ...multipanelUsernameSuffixes]
+            .some((suffix) => !/^[a-z]$/.test(suffix)) ||
+          new Set(ganamosUsernameSuffixes).size !== ganamosUsernameSuffixes.length ||
+          new Set(multipanelUsernameSuffixes).size !== multipanelUsernameSuffixes.length ||
+          ganamosUsernameBase !== null && ganamosUsernameSuffixes.length === 0 ||
+          multipanelUsernameBase !== null && multipanelUsernameSuffixes.length === 0 ||
           [ganamosUsername, ganamosUsernameBase, multipanelUsername, multipanelUsernameBase].some((username) =>
             username !== null &&
             (!username || username.length > 128 || /[\u0000-\u001f\u007f]/.test(username))) ||
@@ -2989,17 +3001,19 @@ function createDataApiServer({ pool, config }) {
           parameters.push(multipanelUsername);
           identityFilters.push(`(platform = 'multipanel' AND username = $${parameters.length})`);
         }
-        for (const [platform, usernameBase] of [
-          ["ganamos", ganamosUsernameBase],
-          ["multipanel", multipanelUsernameBase]
+        for (const [platform, usernameBase, usernameSuffixes] of [
+          ["ganamos", ganamosUsernameBase, ganamosUsernameSuffixes],
+          ["multipanel", multipanelUsernameBase, multipanelUsernameSuffixes]
         ]) {
           if (usernameBase === null) continue;
           parameters.push(usernameBase.toLowerCase());
           const baseParameter = parameters.length;
+          parameters.push(usernameSuffixes);
+          const suffixesParameter = parameters.length;
           identityFilters.push(
             `(platform = '${platform}' AND char_length(username) = char_length($${baseParameter}) + 1 ` +
             `AND left(lower(username), char_length($${baseParameter})) = $${baseParameter} ` +
-            `AND right(lower(username), 1) ~ '^[a-z]$')`
+            `AND right(lower(username), 1) = ANY($${suffixesParameter}::text[]))`
           );
         }
         if (identityFilters.length) {
