@@ -1059,6 +1059,8 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     const runtimeWrite = await request(port, "POST", "/v1/state", {
       changes: {
         ganamosSuffix: "q",
+        ganamosLegacySuffixes: "r, x",
+        multiPanelLegacySuffixes: "z",
         userCreationPassword: "runtime-secret-password",
         futureRuntimeSecret: { token: "future-secret-value" },
         activeBonusConfig: { type: "simple", enabled: true, percent: 10 },
@@ -1100,6 +1102,8 @@ test("HTTPS migration imports preserve private and shared data atomically", {
     );
     assert.equal(stateChanges.status, 200);
     assert.equal(stateChanges.body.values.ganamosSuffix, "q");
+    assert.equal(stateChanges.body.values.ganamosLegacySuffixes, "r, x");
+    assert.equal(stateChanges.body.values.multiPanelLegacySuffixes, "z");
     assert.equal(stateChanges.body.values.activeBonusConfig.percent, 10);
     assert.deepEqual(stateChanges.body.values.platformOutageConfig, {
       ganamos: true,

@@ -237,7 +237,8 @@ function buildReport(payload) {
       operationCounts[operation] = (operationCounts[operation] || 0) + 1;
     } else if (![
       "bridgeRole", "bridgeToken", "ganamosUserId", "ganamosSuffix",
-      "multiPanelSuffix", "userCreationPassword", "remoteCreateDestinations",
+      "ganamosLegacySuffixes", "multiPanelSuffix", "multiPanelLegacySuffixes",
+      "userCreationPassword", "remoteCreateDestinations",
       "multiPanelSession", "activeBonusConfig", "hiddenAdvertisingProfiles", "contactFlowCounters",
       "contactVisualTags",
       "agentBalanceView", "agentBalancesMinimized", "platformOutageConfig"
@@ -353,7 +354,9 @@ const PROFILE_SETTING_KEYS = new Set([
   "bridgeRole",
   "ganamosUserId",
   "ganamosSuffix",
+  "ganamosLegacySuffixes",
   "multiPanelSuffix",
+  "multiPanelLegacySuffixes",
   "activeBonusConfig",
   "hiddenAdvertisingProfiles",
   "platformOutageConfig",

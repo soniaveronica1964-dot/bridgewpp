@@ -46,9 +46,15 @@
       <p id="hint" class="hint"></p>
       <label for="ganamosSuffix">Letra final de usuario Ganamos</label>
       <input id="ganamosSuffix" name="ganamosSuffix" type="text" maxlength="1" pattern="[A-Za-z]" required>
+      <label for="ganamosLegacySuffixes">Letras antiguas de Ganamos</label>
+      <input id="ganamosLegacySuffixes" name="ganamosLegacySuffixes" type="text"
+        pattern="[A-Za-z](\s*,\s*[A-Za-z])*" placeholder="n, t">
       <label for="multiPanelSuffix">Letra final de usuario MultiPanel</label>
       <input id="multiPanelSuffix" name="multiPanelSuffix" type="text" maxlength="1" pattern="[A-Za-z]" required>
-      <p class="hint">Usá letras diferentes. Configurá los mismos sufijos en todos los perfiles emparejados.</p>
+      <label for="multiPanelLegacySuffixes">Letras antiguas de MultiPanel</label>
+      <input id="multiPanelLegacySuffixes" name="multiPanelLegacySuffixes" type="text"
+        pattern="[A-Za-z](\s*,\s*[A-Za-z])*" placeholder="z, w, p, b">
+      <p class="hint">Separá las letras antiguas con comas. Se reconocen solo las letras finales configuradas para cada plataforma; las antiguas predeterminadas son n, t para Ganamos y z, w, p, b para MultiPanel. Configurá los mismos sufijos en todos los perfiles emparejados.</p>
       <label for="userCreationPassword">Contraseña automática para nuevos usuarios</label>
       <input id="userCreationPassword" name="userCreationPassword" type="password" autocomplete="new-password">
       <p class="hint">El perfil que ejecuta el alta usa esta contraseña para Ganamos y MultiPanel, también para solicitudes de perfiles secundarios.</p>

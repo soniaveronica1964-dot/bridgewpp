@@ -197,6 +197,30 @@ test("options exporter reads profile state and verifies an encrypted archive", a
   );
 });
 
+test("legacy suffix options normalize comma-separated letters and reject conflicts", () => {
+  const { context } = createOptionsContext({});
+  assert.equal(
+    vm.runInContext('normalizeLegacySuffixes(" R, x ", "Ganamos")', context),
+    "r, x"
+  );
+  assert.equal(
+    vm.runInContext('normalizeLegacySuffixes(" ", "MultiPanel")', context),
+    ""
+  );
+  assert.throws(
+    () => vm.runInContext('normalizeLegacySuffixes("r, r", "Ganamos")', context),
+    /No repitas letras antiguas/
+  );
+  assert.throws(
+    () => vm.runInContext('normalizeLegacySuffixes("r x", "Ganamos")', context),
+    /separadas por comas/
+  );
+  assert.throws(
+    () => vm.runInContext('validateLegacySuffixes("f", "y", "r, x", "x")', context),
+    /no repetirse/
+  );
+});
+
 test("reconnect updates a saved API origin only when server and device identity match", async () => {
   const serverId = "11111111-1111-4111-8111-111111111111";
   const workspaceId = "22222222-2222-4222-8222-222222222222";

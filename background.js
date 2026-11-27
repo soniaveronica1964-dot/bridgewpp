@@ -11,7 +11,9 @@ const PROFILE_RUNTIME_STATE_KEYS = [
   "bridgeToken",
   "ganamosUserId",
   "ganamosSuffix",
+  "ganamosLegacySuffixes",
   "multiPanelSuffix",
+  "multiPanelLegacySuffixes",
   "multiPanelSession"
 ];
 const HIDDEN_ADVERTISING_PROFILES_KEY = "hiddenAdvertisingProfiles";

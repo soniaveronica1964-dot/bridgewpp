@@ -87,6 +87,8 @@ El inventario se deriva de los accesos actuales a `chrome.storage.local` en
 | `ganamosUserId` | Texto numérico. | Identificador de agente usado para consultas de Ganamos; se aplica el valor predeterminado actual cuando corresponde. |
 | `ganamosSuffix` | Texto de una letra. | Sufijo de alias para Ganamos. |
 | `multiPanelSuffix` | Texto de una letra. | Sufijo de alias para MultiPanel. Debe ser distinto al de Ganamos. |
+| `ganamosLegacySuffixes` | Texto con letras separadas por comas. | Sufijos antiguos reconocidos solo como alias heredados de Ganamos. Predeterminado: `n, t`. |
+| `multiPanelLegacySuffixes` | Texto con letras separadas por comas. | Sufijos antiguos reconocidos solo como alias heredados de MultiPanel. Predeterminado: `z, w, p, b`. |
 | `userCreationPassword` | Texto. | Contraseña automática para creación/restauración de usuarios. Es secreto. |
 | `remoteCreateDestinations` | Arreglo de hasta tres destinos. | Configuración privada del perfil Chrome; cada elemento puede contener `id`, `name`, `url`, `token`, `ganamosSuffix` y `multiPanelSuffix`. Incluye datos de red y secretos. |
 | `multiPanelSession` | Texto de sesión. | Caché de la sesión que obtiene el service worker desde la pestaña MultiPanel y que puede renovarse al consultar reportes. Es secreto. |
@@ -107,7 +109,7 @@ deban ser visibles para todos. La nueva API debe aplicar un ámbito explícito:
 | Movimientos `agentMovement:*` | Espacio de trabajo compartido | Se consultan desde las PC autorizadas; se conserva el perfil/instalación de origen para auditoría e idempotencia. El panel de depósitos y retiros filtra por el perfil Chrome autenticado. |
 | Contadores y paneles `contactFlowCounters` | Espacio de trabajo compartido | Incrementos/deduplicación deben ser atómicos en el servidor para impedir doble conteo entre PC. |
 | Bono activo | Espacio de trabajo compartido | La revisión/publicación existente se conserva; una actualización remota no se vuelve a publicar como local. |
-| `bridgeRole`, `bridgeToken`, ID de agente, sufijos y vista del panel | Perfil Chrome | No se propagan automáticamente a otros perfiles. |
+| `bridgeRole`, `bridgeToken`, ID de agente, sufijos actuales/antiguos y vista del panel | Perfil Chrome | No se propagan automáticamente a otros perfiles. |
 | `userCreationPassword`, `multiPanelSession` | Perfil Chrome autorizado | Secretos aislados por perfil; no se devuelven en lecturas generales ni se comparten por defecto. |
 | Token de cada destino remoto | Perfil Chrome, secreto | Solo lo reciben las pestañas del perfil propietario mediante la API autenticada; se cifra en el servidor. |
 | Permisos Chrome y `lux-support-user.session` del sitio | Fuera de la base compartida | Permanecen en Chrome/el sitio y cada PC/perfil mantiene su propio estado. |
@@ -757,7 +759,7 @@ solo devuelve la configuración descifrada al perfil propietario, por la lectura
 autenticada de su estado.
 
 Los ajustes privados quedan en `app_settings`, incluidos `bridgeRole`,
-`ganamosUserId`, los sufijos, `activeBonusConfig`, `agentBalanceView` y
+`ganamosUserId`, los sufijos actuales y antiguos, `activeBonusConfig`, `agentBalanceView` y
 `agentBalancesMinimized`. El valor de cada clave se guarda en JSON para
 distinguir correctamente texto, booleano, ausencia y otros tipos heredados.
 

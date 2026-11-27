@@ -70,6 +70,7 @@
   let agentBalanceView = "balance";
   let agentBalanceContactKey = null;
   let platformSuffixes = { ganamos: "f", multipanel: "y" };
+  let legacyPlatformSuffixes = { ganamos: ["n", "t"], multipanel: ["z", "w", "p", "b"] };
   let platformOutageConfig = { ganamos: false, multipanel: false };
   let remoteCreateDestinations = [];
   let remoteCreateDestinationsLoaded = false;
@@ -192,22 +193,29 @@
 
   stateStorage.get([
     "ganamosSuffix",
+    "ganamosLegacySuffixes",
     "multiPanelSuffix",
+    "multiPanelLegacySuffixes",
     ACTIVE_BONUS_CONFIG_KEY
   ])
-    .then(({ ganamosSuffix, multiPanelSuffix, activeBonusConfig }) => {
+    .then(({
+      ganamosSuffix,
+      ganamosLegacySuffixes,
+      multiPanelSuffix,
+      multiPanelLegacySuffixes,
+      activeBonusConfig
+    }) => {
       activeBonusConfigCache = activeBonusConfig == null ? null : validateActiveBonusConfig(activeBonusConfig) || null;
       markUnreadAfterStatusUpdateEnabled =
         activeBonusConfigCache?.[MARK_UNREAD_AFTER_STATUS_UPDATE_KEY] === true;
-      if (/^[a-z]$/i.test(ganamosSuffix || "") && /^[a-z]$/i.test(multiPanelSuffix || "") &&
-        ganamosSuffix.toLowerCase() !== multiPanelSuffix.toLowerCase()) {
-        platformSuffixes = {
-          ganamos: ganamosSuffix.toLowerCase(),
-          multipanel: multiPanelSuffix.toLowerCase()
-        };
-        scheduleUpdate();
-        scheduleContactTagScan();
-      }
+      updatePlatformSuffixes(
+        ganamosSuffix,
+        multiPanelSuffix,
+        ganamosLegacySuffixes,
+        multiPanelLegacySuffixes
+      );
+      scheduleUpdate();
+      scheduleContactTagScan();
     })
     .catch((error) => console.error("[Ganamos balance extension] No se pudieron cargar los sufijos de plataformas.", error));
 
@@ -318,14 +326,27 @@
         void refreshMultiPanelAgentBalance(balanceHost);
       }
     }
-    if (areaName !== "local" || (!changes.ganamosSuffix && !changes.multiPanelSuffix)) return;
-    const ganamos = changes.ganamosSuffix?.newValue ?? platformSuffixes.ganamos;
-    const multipanel = changes.multiPanelSuffix?.newValue ?? platformSuffixes.multipanel;
-    if (/^[a-z]$/i.test(ganamos) && /^[a-z]$/i.test(multipanel) &&
-      ganamos.toLowerCase() !== multipanel.toLowerCase()) {
-      platformSuffixes = { ganamos: ganamos.toLowerCase(), multipanel: multipanel.toLowerCase() };
+    if (areaName !== "local" || ![
+      "ganamosSuffix",
+      "ganamosLegacySuffixes",
+      "multiPanelSuffix",
+      "multiPanelLegacySuffixes"
+    ].some((key) => changes[key])) return;
+    try {
+      updatePlatformSuffixes(
+        changes.ganamosSuffix?.newValue ?? platformSuffixes.ganamos,
+        changes.multiPanelSuffix?.newValue ?? platformSuffixes.multipanel,
+        changes.ganamosLegacySuffixes
+          ? changes.ganamosLegacySuffixes.newValue
+          : legacyPlatformSuffixes.ganamos.join(", "),
+        changes.multiPanelLegacySuffixes
+          ? changes.multiPanelLegacySuffixes.newValue
+          : legacyPlatformSuffixes.multipanel.join(", ")
+      );
       scheduleUpdate();
       scheduleContactTagScan();
+    } catch (error) {
+      console.error("[Ganamos balance extension] La configuración de sufijos no es válida.", error);
     }
   });
 
@@ -8520,6 +8541,51 @@
     );
   }
 
+  function parseLegacySuffixes(value, defaults) {
+    if (value === undefined) return [...defaults];
+    if (typeof value !== "string") {
+      throw new Error("Las letras antiguas deben guardarse como texto.");
+    }
+    const input = value.trim().toLowerCase();
+    if (!input) return [];
+    if (!/^[a-z](?:\s*,\s*[a-z])*$/.test(input)) {
+      throw new Error("Las letras antiguas deben ser letras separadas por comas.");
+    }
+    const suffixes = input.split(/\s*,\s*/);
+    if (new Set(suffixes).size !== suffixes.length) {
+      throw new Error("Las letras antiguas no deben repetirse.");
+    }
+    return suffixes;
+  }
+
+  function updatePlatformSuffixes(ganamosSuffix, multipanelSuffix, ganamosLegacy, multipanelLegacy) {
+    const ganamos = typeof ganamosSuffix === "string"
+      ? ganamosSuffix.toLowerCase()
+      : platformSuffixes.ganamos;
+    const multipanel = typeof multipanelSuffix === "string"
+      ? multipanelSuffix.toLowerCase()
+      : platformSuffixes.multipanel;
+    if (!/^[a-z]$/.test(ganamos) || !/^[a-z]$/.test(multipanel) || ganamos === multipanel) {
+      throw new Error("Los sufijos actuales de Ganamos y MultiPanel deben ser letras distintas.");
+    }
+    const legacy = {
+      ganamos: parseLegacySuffixes(ganamosLegacy, ["n", "t"]),
+      multipanel: parseLegacySuffixes(multipanelLegacy, ["z", "w", "p", "b"])
+    };
+    if (ganamosLegacy === undefined) {
+      legacy.ganamos = legacy.ganamos.filter((suffix) => suffix !== ganamos && suffix !== multipanel);
+    }
+    if (multipanelLegacy === undefined) {
+      legacy.multipanel = legacy.multipanel.filter((suffix) => suffix !== ganamos && suffix !== multipanel);
+    }
+    const configured = [ganamos, multipanel, ...legacy.ganamos, ...legacy.multipanel];
+    if (new Set(configured).size !== configured.length) {
+      throw new Error("Cada letra final debe pertenecer a una sola plataforma y no repetirse.");
+    }
+    platformSuffixes = { ganamos, multipanel };
+    legacyPlatformSuffixes = legacy;
+  }
+
   function findPlatformUsernames(contactName) {
     const usernames = { ganamos: null, multipanel: null };
     const legacy = { ganamos: null, multipanel: null };
@@ -8552,9 +8618,9 @@
         usernames[platform] ||= `${base}${fullSuffix}`;
         continue;
       }
-      const legacyPlatform = ["n", "t"].includes(normalizedSuffix)
+      const legacyPlatform = legacyPlatformSuffixes.ganamos.includes(normalizedSuffix)
         ? "ganamos"
-        : ["z", "w", "p", "b"].includes(normalizedSuffix)
+        : legacyPlatformSuffixes.multipanel.includes(normalizedSuffix)
           ? "multipanel"
           : null;
       if (legacyPlatform && !legacy[legacyPlatform]) {

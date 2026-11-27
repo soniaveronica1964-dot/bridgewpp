@@ -2,7 +2,9 @@ const roleInput = document.querySelector("#role");
 const ganamosUserIdInput = document.querySelector("#ganamosUserId");
 const tokenInput = document.querySelector("#token");
 const ganamosSuffixInput = document.querySelector("#ganamosSuffix");
+const ganamosLegacySuffixesInput = document.querySelector("#ganamosLegacySuffixes");
 const multiPanelSuffixInput = document.querySelector("#multiPanelSuffix");
+const multiPanelLegacySuffixesInput = document.querySelector("#multiPanelLegacySuffixes");
 const userCreationPasswordInput = document.querySelector("#userCreationPassword");
 const hint = document.querySelector("#hint");
 const status = document.querySelector("#status");
@@ -980,6 +982,31 @@ function readRemoteDestinations() {
   return destinations;
 }
 
+function normalizeLegacySuffixes(value, label) {
+  const input = value.trim().toLowerCase();
+  if (!input) return "";
+  if (!/^[a-z](?:\s*,\s*[a-z])*$/.test(input)) {
+    throw new Error(`Ingresá letras antiguas de ${label} separadas por comas.`);
+  }
+  const suffixes = input.split(/\s*,\s*/);
+  if (new Set(suffixes).size !== suffixes.length) {
+    throw new Error(`No repitas letras antiguas de ${label}.`);
+  }
+  return suffixes.join(", ");
+}
+
+function validateLegacySuffixes(ganamos, multiPanel, ganamosLegacy, multiPanelLegacy) {
+  const configured = [
+    ganamos,
+    multiPanel,
+    ...ganamosLegacy.split(", ").filter(Boolean),
+    ...multiPanelLegacy.split(", ").filter(Boolean)
+  ];
+  if (new Set(configured).size !== configured.length) {
+    throw new Error("Cada letra final debe pertenecer a una sola plataforma y no repetirse.");
+  }
+}
+
 function populateRemoteDestinations(destinations) {
   for (const fields of remoteDestinationFields) {
     const destination = destinations.find((item) => item.id === fields.id);
@@ -1027,6 +1054,21 @@ document.querySelector("#settings").addEventListener("submit", async (event) => 
     status.textContent = "Ingresá una sola letra para cada plataforma y asegurate de que sean distintas.";
     return;
   }
+  let ganamosLegacySuffixes;
+  let multiPanelLegacySuffixes;
+  try {
+    ganamosLegacySuffixes = normalizeLegacySuffixes(ganamosLegacySuffixesInput.value, "Ganamos");
+    multiPanelLegacySuffixes = normalizeLegacySuffixes(multiPanelLegacySuffixesInput.value, "MultiPanel");
+    validateLegacySuffixes(
+      ganamosSuffix,
+      multiPanelSuffix,
+      ganamosLegacySuffixes,
+      multiPanelLegacySuffixes
+    );
+  } catch (error) {
+    status.textContent = error.message;
+    return;
+  }
   let remoteDestinations;
   try {
     remoteDestinations = readRemoteDestinations();
@@ -1056,7 +1098,9 @@ document.querySelector("#settings").addEventListener("submit", async (event) => 
       bridgeToken: role === "standalone" ? "" : token,
       ganamosUserId,
       ganamosSuffix,
+      ganamosLegacySuffixes,
       multiPanelSuffix,
+      multiPanelLegacySuffixes,
       userCreationPassword: userCreationPasswordInput.value,
       remoteCreateDestinations: remoteDestinations
     });
@@ -1073,11 +1117,23 @@ stateStorage.get([
   "bridgeToken",
   "ganamosUserId",
   "ganamosSuffix",
+  "ganamosLegacySuffixes",
   "multiPanelSuffix",
+  "multiPanelLegacySuffixes",
   "userCreationPassword",
   "remoteCreateDestinations"
 ])
-  .then(({ bridgeRole, bridgeToken, ganamosUserId, ganamosSuffix, multiPanelSuffix, userCreationPassword, remoteCreateDestinations }) => {
+  .then(({
+    bridgeRole,
+    bridgeToken,
+    ganamosUserId,
+    ganamosSuffix,
+    ganamosLegacySuffixes,
+    multiPanelSuffix,
+    multiPanelLegacySuffixes,
+    userCreationPassword,
+    remoteCreateDestinations
+  }) => {
     roleInput.value = ["primary", "secondary"].includes(bridgeRole) ? bridgeRole : "standalone";
     ganamosUserIdInput.value = /^\d+$/.test(String(ganamosUserId ?? ""))
       ? String(ganamosUserId)
@@ -1085,6 +1141,13 @@ stateStorage.get([
     tokenInput.value = typeof bridgeToken === "string" ? bridgeToken : "";
     ganamosSuffixInput.value = typeof ganamosSuffix === "string" ? ganamosSuffix : "f";
     multiPanelSuffixInput.value = typeof multiPanelSuffix === "string" ? multiPanelSuffix : "y";
+    const activeSuffixes = [ganamosSuffixInput.value.toLowerCase(), multiPanelSuffixInput.value.toLowerCase()];
+    ganamosLegacySuffixesInput.value = typeof ganamosLegacySuffixes === "string"
+      ? ganamosLegacySuffixes
+      : ["n", "t"].filter((suffix) => !activeSuffixes.includes(suffix)).join(", ");
+    multiPanelLegacySuffixesInput.value = typeof multiPanelLegacySuffixes === "string"
+      ? multiPanelLegacySuffixes
+      : ["z", "w", "p", "b"].filter((suffix) => !activeSuffixes.includes(suffix)).join(", ");
     userCreationPasswordInput.value = typeof userCreationPassword === "string" ? userCreationPassword : "";
     populateRemoteDestinations(Array.isArray(remoteCreateDestinations) ? remoteCreateDestinations : []);
     updateHint();
